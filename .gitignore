@@ -1,0 +1,7 @@
+/target
+recordagent.toml
+/data
+*.db
+*.db-wal
+*.db-shm
+.env
