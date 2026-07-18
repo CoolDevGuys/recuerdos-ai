@@ -15,11 +15,12 @@ services:
       - "7070:7070"
     environment:
       RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
-      # Containers must listen on all interfaces to be reachable through
-      # Docker's published port; recordagent.toml still defaults to
-      # 127.0.0.1 for bare-metal runs.
-      RECORDAGENT_SERVER__HOST: 0.0.0.0
-    command: ["cargo", "watch", "-x", "run -- serve"]
+    # RECORDAGENT_SERVER__HOST is scoped to this command (not a
+    # container-wide `environment:` entry) so it doesn't leak into
+    # `docker compose run --rm dev cargo test`. Containers must listen on
+    # all interfaces to be reachable through Docker's published port;
+    # recordagent.toml still defaults to 127.0.0.1 for bare-metal runs.
+    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve'"]
 
   ollama:
     image: ollama/ollama

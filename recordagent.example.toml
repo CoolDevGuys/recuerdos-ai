@@ -1,0 +1,55 @@
+# RecordAgent configuration.
+#
+# Every key below shows its built-in default. Copy this file to
+# `recordagent.toml` (or run `recordagent init`) and uncomment/change only
+# what you need — anything you omit falls back to the default shown here.
+# Every key can also be set via an env var: RECORDAGENT_<SECTION>__<KEY>,
+# e.g. RECORDAGENT_SERVER__PORT=8080. Env vars win over this file.
+
+[server]
+host = "127.0.0.1"
+port = 7070
+# Which MCP transports to expose (Phase 3+).
+mcp = { stdio = true, http = true }
+
+[storage]
+# embedded | postgres | qdrant (postgres/qdrant land post-POC, Phase 3+ roadmap)
+backend = "embedded"
+path = "~/.recordagent/data"
+
+[embeddings]
+# local | openai-compat | ollama — "local" needs no external service.
+provider = "local"
+# Pinned per collection; changing it requires the (future) `reindex` command.
+model = "bge-small-en-v1.5"
+
+[understanding]
+# anthropic | openai-compat | ollama | none — "none" disables extraction:
+# the service still works as store + hybrid search, verbatim + heuristic
+# tags, with zero LLM egress.
+provider = "none"
+model = "claude-haiku-4-5"
+# Name of the env var holding the provider API key (not the key itself).
+api_key_env = "ANTHROPIC_API_KEY"
+# Run the ADD/UPDATE/DELETE/NOOP reconcile pass against similar memories.
+reconcile = true
+
+[understanding.taxonomy]
+# Extend the default category list (see docs/architecture.md) without
+# replacing it.
+extra_categories = []
+
+[consolidation]
+enabled = true
+schedule = "daily"
+similarity_threshold = 0.92
+
+[retrieval]
+hybrid = true
+default_limit = 8
+recency_half_life_days = 90
+
+[auth]
+# api-key | none. "none" is an explicit single-user opt-out: every request
+# is treated as the built-in `default` user. Logged loudly at startup.
+mode = "api-key"

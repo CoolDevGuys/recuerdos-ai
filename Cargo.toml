@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
+figment = { version = "0.10", features = ["test"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 assert_cmd = "2"
 predicates = "3"
