@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Self-hostable long-term memory service for AI agents, over REST and MCP."
-repository = "https://github.com/recordagent/recordagent"
+repository = "https://github.com/alexromer0/recordagent"
 publish = false
 
 [[bin]]

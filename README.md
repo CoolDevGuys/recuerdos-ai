@@ -1,10 +1,10 @@
 # RecordAgent
 
-[![CI](https://github.com/recordagent/recordagent/actions/workflows/ci.yml/badge.svg)](https://github.com/recordagent/recordagent/actions/workflows/ci.yml)
+[![CI](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml/badge.svg)](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml)
 
-> The badge above points at a placeholder `recordagent/recordagent` repo
-> slug (see project-plan.md §16 — the name isn't finalized yet). Update it
-> once this code lands in its real GitHub repository.
+> Currently hosted at `alexromer0/recordagent` (private). The project name
+> itself isn't finalized — see project-plan.md §16 — so this may move to
+> its own org/repo before public launch.
 
 Every AI agent session starts as a blank slate. You re-explain your
 architecture preferences to Claude Code, your Hermes agent forgets your
