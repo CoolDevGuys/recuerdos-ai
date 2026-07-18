@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEV_IMAGE: recordagent-dev:ci
+
+jobs:
+  # fmt --check + clippy -D warnings + the boundary script, run inside the
+  # same dev image contributors use locally (`just check`) so CI can never
+  # drift from the documented dev flow.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dev
+          tags: ${{ env.DEV_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=dev-image
+          cache-to: type=gha,mode=max,scope=dev-image
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check / clippy -D warnings / boundary script
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            just check-native
+
+      # The container writes target/ and .ci-cache/ as uid 1000 ("dev");
+      # actions/cache's post-job tar runs as the runner's own uid and
+      # can't read cargo's incremental-compilation lock files otherwise.
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dev
+          tags: ${{ env.DEV_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=dev-image
+          cache-to: type=gha,mode=max,scope=dev-image
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: cargo test
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            just test-native
+
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+
+  # Build the release image and smoke-test it — proves docker/Dockerfile
+  # actually produces a working, non-root, healthchecked daemon, not just
+  # that it compiles.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: recordagent:ci
+          load: true
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,mode=max,scope=release-image
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run -d --name smoke -p 7070:7070 recordagent:ci serve
+
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:7070/healthz >/dev/null; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          echo "--- /healthz ---"
+          curl -fsS http://127.0.0.1:7070/healthz
+          echo
+          echo "--- /version ---"
+          curl -fsS http://127.0.0.1:7070/version
+          echo
+
+          # The endpoint responding doesn't mean Docker's own HEALTHCHECK
+          # has run yet — it only probes after --start-period elapses.
+          # Poll the reported status instead of checking once.
+          status="starting"
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' smoke)
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "health status: $status"
+          [ "$status" = "healthy" ]
+
+          docker stop smoke
+          docker rm smoke

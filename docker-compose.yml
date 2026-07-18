@@ -1,0 +1,37 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+    ports:
+      - "7070:7070"
+    environment:
+      RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
+    # RECORDAGENT_SERVER__HOST is scoped to this command (not a
+    # container-wide `environment:` entry) so it doesn't leak into
+    # `docker compose run --rm dev cargo test`. Containers must listen on
+    # all interfaces to be reachable through Docker's published port;
+    # recordagent.toml still defaults to 127.0.0.1 for bare-metal runs.
+    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve'"]
+
+  ollama:
+    image: ollama/ollama
+    profiles: ["llm"]
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:
+  ollama-models:

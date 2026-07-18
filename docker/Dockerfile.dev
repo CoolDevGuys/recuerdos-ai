@@ -1,0 +1,36 @@
+# Dev image: full rust toolchain + tooling. Not optimized for size — the
+# release image (docker/Dockerfile) is. Runs as a non-root user whose
+# UID/GID match the host user (passed as build args) so files written into
+# the bind-mounted repo aren't root-owned on the host.
+FROM rust:1-slim
+
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    pkg-config \
+    libssl-dev \
+    git \
+    curl \
+    ca-certificates \
+    util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt clippy \
+    && cargo install cargo-watch --locked \
+    && cargo install just --locked
+
+RUN (groupadd -g "${USER_GID}" dev || groupmod -n dev "$(getent group "${USER_GID}" | cut -d: -f1)") \
+    && (useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash dev \
+        || usermod -l dev -d /home/dev -m "$(getent passwd "${USER_UID}" | cut -d: -f1)") \
+    && mkdir -p /app
+
+COPY docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+
+WORKDIR /app
+EXPOSE 7070
+
+ENTRYPOINT ["/usr/local/bin/dev-entrypoint.sh"]
+CMD ["cargo", "watch", "-x", "run -- serve"]

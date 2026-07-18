@@ -1,0 +1,45 @@
+[package]
+name = "recordagent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Self-hostable long-term memory service for AI agents, over REST and MCP."
+repository = "https://github.com/recordagent/recordagent"
+publish = false
+
+[[bin]]
+name = "recordagent"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "timeout", "request-id", "util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+figment = { version = "0.10", features = ["test"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

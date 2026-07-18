@@ -1,0 +1,8 @@
+/target
+/.ci-cache
+recordagent.toml
+/data
+*.db
+*.db-wal
+*.db-shm
+.env
