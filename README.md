@@ -1,5 +1,11 @@
 # RecordAgent
 
+[![CI](https://github.com/recordagent/recordagent/actions/workflows/ci.yml/badge.svg)](https://github.com/recordagent/recordagent/actions/workflows/ci.yml)
+
+> The badge above points at a placeholder `recordagent/recordagent` repo
+> slug (see project-plan.md §16 — the name isn't finalized yet). Update it
+> once this code lands in its real GitHub repository.
+
 A fast, self-hostable long-term memory service for AI agents and coding
 assistants — one memory backend consumed by every agent you use, over REST
 or MCP. See [project-plan.md](project-plan.md) for the full design and

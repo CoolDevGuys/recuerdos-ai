@@ -1,4 +1,5 @@
 /target
+/.ci-cache
 recordagent.toml
 /data
 *.db
