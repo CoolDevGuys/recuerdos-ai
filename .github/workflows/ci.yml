@@ -54,6 +54,13 @@ jobs:
             "${{ env.DEV_IMAGE }}" \
             just check-native
 
+      # The container writes target/ and .ci-cache/ as uid 1000 ("dev");
+      # actions/cache's post-job tar runs as the runner's own uid and
+      # can't read cargo's incremental-compilation lock files otherwise.
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -91,6 +98,10 @@ jobs:
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just test-native
+
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
 
   # Build the release image and smoke-test it — proves docker/Dockerfile
   # actually produces a working, non-root, healthchecked daemon, not just
@@ -131,7 +142,19 @@ jobs:
           curl -fsS http://127.0.0.1:7070/version
           echo
 
-          docker inspect --format='{{.State.Health.Status}}' smoke | grep -q healthy
+          # The endpoint responding doesn't mean Docker's own HEALTHCHECK
+          # has run yet — it only probes after --start-period elapses.
+          # Poll the reported status instead of checking once.
+          status="starting"
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' smoke)
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            sleep 1
+          done
+          echo "health status: $status"
+          [ "$status" = "healthy" ]
 
           docker stop smoke
           docker rm smoke
