@@ -6,6 +6,12 @@ pub mod clock;
 pub mod error;
 pub mod ids;
 
+// Re-exported for a nicer `crate::shared::X` surface. Not yet used outside
+// this module's own tests — consumers arrive with the identity/memories
+// domain in Phase 1+.
+#[allow(unused_imports)]
 pub use clock::{Clock, SystemClock};
+#[allow(unused_imports)]
 pub use error::{RaError, Result};
+#[allow(unused_imports)]
 pub use ids::{MemoryId, UserId};

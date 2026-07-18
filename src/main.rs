@@ -7,7 +7,7 @@ mod shared;
 mod understanding;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -22,6 +22,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start the daemon.
+    Serve {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Write a default recordagent.toml and create its data directory.
     Init {
         #[arg(long, default_value = "recordagent.toml")]
@@ -29,10 +34,12 @@ enum Command {
     },
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
     };
 
@@ -40,6 +47,16 @@ fn main() {
         eprintln!("error: {message}");
         std::process::exit(1);
     }
+}
+
+async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
+    bootstrap::server::init_tracing();
+
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+
+    bootstrap::server::serve(&config.server.host, config.server.port)
+        .await
+        .map_err(|e| format!("server error: {e}"))
 }
 
 fn run_init(config_path: &PathBuf) -> Result<(), String> {

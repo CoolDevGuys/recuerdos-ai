@@ -4,10 +4,14 @@
 use chrono::{DateTime, Utc};
 use std::sync::{Arc, Mutex};
 
+// Consumed starting with Phase 1+ use cases; not yet constructed by any
+// Phase 0 code outside this module's own tests.
+#[allow(dead_code)]
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 

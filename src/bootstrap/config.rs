@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[error("config error: {}", .0.join("; "))]
 pub struct ConfigError(pub Vec<String>);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -27,20 +27,6 @@ pub struct AppConfig {
     pub consolidation: ConsolidationConfig,
     pub retrieval: RetrievalConfig,
     pub auth: AuthConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageConfig::default(),
-            embeddings: EmbeddingsConfig::default(),
-            understanding: UnderstandingConfig::default(),
-            consolidation: ConsolidationConfig::default(),
-            retrieval: RetrievalConfig::default(),
-            auth: AuthConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -307,6 +293,10 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 #[cfg(test)]
+// Jail::expect_with closures return figment's Result<(), figment::Error>;
+// figment::Error is intentionally rich (path + reason) and this is test-only
+// code, never a hot path — the perf lint doesn't apply here.
+#[allow(clippy::result_large_err)]
 mod tests {
     use super::*;
     use figment::Jail;
