@@ -6,10 +6,19 @@
 > slug (see project-plan.md §16 — the name isn't finalized yet). Update it
 > once this code lands in its real GitHub repository.
 
-A fast, self-hostable long-term memory service for AI agents and coding
-assistants — one memory backend consumed by every agent you use, over REST
-or MCP. See [project-plan.md](project-plan.md) for the full design and
-[implementation-plan.md](implementation-plan.md) for the phased build plan.
+Every AI agent session starts as a blank slate. You re-explain your
+architecture preferences to Claude Code, your Hermes agent forgets your
+dietary restrictions, and memory saved by one tool is invisible to the
+others — your coding assistant learning you prefer `pnpm` doesn't help
+your life-assistant bot.
+
+RecordAgent's thesis: memory should be a *service* you own — a single fast
+daemon that any agent can read from and write to over REST or MCP, that
+*understands* what it stores (extracting facts, labeling, categorizing,
+deduplicating, resolving contradictions), and that isolates each user's
+memories strictly. See [project-plan.md](project-plan.md) for the full
+design and [implementation-plan.md](implementation-plan.md) for the phased
+build plan.
 
 > **Status: Phase 0 — Foundation.** The daemon boots, serves `/healthz` and
 > `/version`, and loads validated config. No memory features yet — see the
@@ -87,6 +96,33 @@ understanding   LLM pipeline: extract → reconcile → label
 providers       concrete LLM/embedding implementations
 consolidation   background jobs: dedup/merge, decay, distillation, profile
 shared          shared kernel: ids, error type, clock
+```
+
+The target end-state (most of this arrives in later phases — see the
+status table above for what's real today):
+
+```
+                                ┌────────────────────────────────────────────┐
+  Claude Code ── MCP(stdio) ──▶ │                RECORDAGENT DAEMON          │
+  opencode ──── MCP(http) ────▶ │  ┌──────────┐  ┌──────────────────────┐    │
+  Hermes ────── REST ─────────▶ │  │ API layer│  │  Memory Engine       │    │
+  LangChain ─── REST/SDK ─────▶ │  │ axum+rmcp│─▶│  ingest → understand │    │
+                                │  │ auth mw  │  │  → label → store     │    │
+                                │  └──────────┘  │  retrieve: hybrid    │    │
+                                │        │       │  (vector+BM25+filter)│    │
+                                │        ▼       └──────┬───────────────┘    │
+                                │  ┌──────────┐         │   ┌─────────────┐  │
+                                │  │ Job queue│◀────────┘   │ Provider hub│  │
+                                │  │ (async   │             │ anthropic / │  │
+                                │  │  ingest, │────────────▶│ openai-compat│ │
+                                │  │  consol.)│             │ ollama /    │  │
+                                │  └──────────┘             │ onnx-local  │  │
+                                │        │                  └─────────────┘  │
+                                │        ▼                                   │
+                                │  MemoryStore trait                         │
+                                │  ├─ embedded: SQLite + sqlite-vec + tantivy│
+                                │  └─ scale:    Postgres+pgvector | Qdrant   │
+                                └────────────────────────────────────────────┘
 ```
 
 ## Contributing
