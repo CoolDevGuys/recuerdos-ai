@@ -51,6 +51,22 @@ for ctx in $contexts; do
         | grep -v "use crate::${ctx}::infrastructure" || true)
 done
 
+# Rule (isolation): only the identity context may mint a `UserContext`.
+# rustc already enforces this — the constructors are
+# `pub(in crate::identity)` — so this grep exists to catch someone
+# "fixing" a compile error by widening that visibility instead of routing
+# the call through authentication. See src/identity/domain/user_context.rs.
+while IFS= read -r match; do
+    note_violation "$match (only crate::identity may construct a UserContext)"
+done < <(grep -rnE 'UserContext::(authenticated|unauthenticated)\b' src --include='*.rs' \
+    | grep -v '^src/identity/' || true)
+
+while IFS= read -r match; do
+    note_violation "$match (UserContext constructors must stay pub(in crate::identity))"
+done < <(grep -rnE '^\s*pub(\s|\()' src/identity/domain/user_context.rs \
+    | grep -E 'fn (authenticated|unauthenticated)\b' \
+    | grep -v 'pub(in crate::identity)' || true)
+
 # Rule (naming): the suffixes *Port, *Service, *Manager, *Helper are banned
 # on traits/structs — they invite logic dumping and say nothing about role.
 while IFS= read -r match; do

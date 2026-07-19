@@ -27,6 +27,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+refinery = { version = "0.9.2", default-features = false, features = ["rusqlite"] }
+argon2 = "0.5.3"
+rand = "0.10.2"
+hex = "0.4.3"
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["test"] }

@@ -14,4 +14,4 @@ pub use clock::{Clock, SystemClock};
 #[allow(unused_imports)]
 pub use error::{RaError, Result};
 #[allow(unused_imports)]
-pub use ids::{MemoryId, UserId};
+pub use ids::{ApiKeyId, MemoryId, UserId};

@@ -55,6 +55,7 @@ macro_rules! define_uuid_id {
 }
 
 define_uuid_id!(UserId);
+define_uuid_id!(ApiKeyId);
 define_uuid_id!(MemoryId);
 
 #[cfg(test)]
