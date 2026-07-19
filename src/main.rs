@@ -70,7 +70,13 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
 
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
 
-    bootstrap::server::serve(&config.server.host, config.server.port)
+    let identity = bootstrap::wiring::Identity::build(&config).map_err(|e| e.to_string())?;
+    let state = bootstrap::state::AppState {
+        identity: std::sync::Arc::new(identity),
+        auth_mode: bootstrap::state::AuthMode::from_config(&config),
+    };
+
+    bootstrap::server::serve(&config.server.host, config.server.port, state)
         .await
         .map_err(|e| format!("server error: {e}"))
 }

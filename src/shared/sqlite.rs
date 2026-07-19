@@ -15,10 +15,6 @@
 //! Every call here blocks. Async callers must wrap them in
 //! `tokio::task::spawn_blocking` rather than stalling a runtime worker.
 
-// Consumed by the identity repositories (Task 1.2) and wired into the
-// binary in Task 1.4; see the note in `src/identity/mod.rs`.
-#![allow(dead_code)]
-
 use crate::shared::error::{RaError, Result};
 use rusqlite::Connection;
 use std::path::Path;
@@ -54,6 +50,7 @@ impl SqliteDatabase {
 
     /// An ephemeral database for tests. Same pragmas, same migrations —
     /// tests exercise the real schema, never a hand-written stand-in.
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let connection = Connection::open_in_memory()
             .map_err(|e| RaError::Internal(format!("failed to open in-memory database: {e}")))?;

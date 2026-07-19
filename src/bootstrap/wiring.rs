@@ -9,6 +9,7 @@ use crate::bootstrap::config::AppConfig;
 use crate::identity::application::api_key_issuer::ApiKeyIssuer;
 use crate::identity::application::api_key_lister::ApiKeyLister;
 use crate::identity::application::api_key_revoker::ApiKeyRevoker;
+use crate::identity::application::default_user_resolver::DefaultUserResolver;
 use crate::identity::application::key_authenticator::KeyAuthenticator;
 use crate::identity::application::user_creator::UserCreator;
 use crate::identity::domain::api_key_hasher::ApiKeyHasher;
@@ -25,15 +26,13 @@ use std::sync::Arc;
 /// The database file inside the configured data directory.
 pub const DATABASE_FILE: &str = "recordagent.db";
 
-// `key_authenticator`, `keys` and `clock` are consumed by the HTTP auth
-// middleware in Task 1.4; the CLI (Task 1.3) needs only the rest.
-#[allow(dead_code)]
 pub struct Identity {
     pub user_creator: Arc<UserCreator>,
     pub api_key_issuer: Arc<ApiKeyIssuer>,
     pub api_key_revoker: Arc<ApiKeyRevoker>,
     pub api_key_lister: Arc<ApiKeyLister>,
     pub key_authenticator: Arc<KeyAuthenticator>,
+    pub default_user_resolver: Arc<DefaultUserResolver>,
     /// Exposed for the `auth.mode = "none"` bootstrap user and for
     /// `user list`; callers outside this module should prefer a use case.
     pub users: Arc<dyn UserRepository>,
@@ -73,6 +72,10 @@ impl Identity {
                 Arc::clone(&users),
                 Arc::clone(&keys),
                 Arc::clone(&hasher),
+            )),
+            default_user_resolver: Arc::new(DefaultUserResolver::new(
+                Arc::clone(&users),
+                Arc::clone(&clock),
             )),
             users,
             keys,

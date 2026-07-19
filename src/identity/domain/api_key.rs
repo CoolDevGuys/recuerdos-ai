@@ -224,11 +224,10 @@ impl ApiKey {
         self.revoked_at.is_some()
     }
 
-    /// Whether this key carries `required`. `Admin` grants everything;
-    /// otherwise membership is exact (see [`Scope`]).
-    pub fn allows(&self, required: Scope) -> bool {
-        self.scopes.contains(&Scope::Admin) || self.scopes.contains(&required)
-    }
+    // Deliberately no `allows(scope)` here. Authorization is decided in
+    // exactly one place — `UserContext::allows` — because two copies of
+    // the same rule are two copies that can drift apart. A key's scopes
+    // reach a request only by being copied into its context.
 }
 
 #[cfg(test)]
@@ -328,26 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn allows_matches_exact_scopes() {
-        let key = issued(vec![Scope::Read]);
-        assert!(key.allows(Scope::Read));
-        assert!(!key.allows(Scope::Write));
-        assert!(!key.allows(Scope::Admin));
-    }
-
-    #[test]
-    fn write_does_not_imply_read() {
-        let key = issued(vec![Scope::Write]);
-        assert!(key.allows(Scope::Write));
-        assert!(!key.allows(Scope::Read));
-    }
-
-    #[test]
-    fn admin_implies_every_scope() {
-        let key = issued(vec![Scope::Admin]);
-        assert!(key.allows(Scope::Read));
-        assert!(key.allows(Scope::Write));
-        assert!(key.allows(Scope::Admin));
+    fn carries_the_scopes_it_was_issued_with() {
+        // What the scopes *mean* is asserted against `UserContext`, which
+        // is where the decision is made; a key just carries them.
+        let key = issued(vec![Scope::Read, Scope::Write]);
+        assert_eq!(key.scopes(), &[Scope::Read, Scope::Write]);
     }
 
     #[test]

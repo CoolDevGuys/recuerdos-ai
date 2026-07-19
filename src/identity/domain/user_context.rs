@@ -58,6 +58,9 @@ impl UserContext {
         }
     }
 
+    /// Whose data this request may touch. Phase 1 has no data to scope
+    /// yet; from Phase 2 every repository call takes this.
+    #[allow(dead_code)]
     pub fn user_id(&self) -> UserId {
         self.user_id
     }
@@ -74,12 +77,14 @@ impl UserContext {
         &self.scopes
     }
 
+    #[allow(dead_code)] // used by `require` below and by tests
     pub fn allows(&self, required: Scope) -> bool {
         self.scopes.contains(&Scope::Admin) || self.scopes.contains(&required)
     }
 
     /// Gate for a scoped operation: `Ok(())` or a `Forbidden` error
     /// naming the scope that was missing.
+    #[allow(dead_code)] // called by the ReadAccess/WriteAccess extractors
     pub fn require(&self, required: Scope) -> Result<()> {
         if self.allows(required) {
             Ok(())
@@ -87,19 +92,6 @@ impl UserContext {
             Err(RaError::Forbidden(format!(
                 "this API key is missing the {required} scope"
             )))
-        }
-    }
-
-    /// A context for tests in other contexts, which cannot call the
-    /// private constructors. Compiled out of release builds entirely, so
-    /// it can never widen the production surface.
-    #[cfg(test)]
-    pub fn for_test(user_id: UserId) -> Self {
-        Self {
-            user_id,
-            handle: "test-user".to_string(),
-            key_id: None,
-            scopes: vec![Scope::Admin],
         }
     }
 }

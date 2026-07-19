@@ -3,5 +3,6 @@
 
 pub mod argon2_api_key_hasher;
 pub mod cli;
+pub mod http;
 pub mod sqlite_api_key_repository;
 pub mod sqlite_user_repository;

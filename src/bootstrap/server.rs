@@ -1,6 +1,8 @@
 //! axum router, graceful shutdown, tracing init. The observability
 //! baseline every later phase's routes build on.
 
+use crate::bootstrap::state::{AppState, AuthMode};
+use crate::identity::infrastructure::http::authenticated::Authenticated;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
@@ -34,10 +36,14 @@ pub fn init_tracing() {
     }
 }
 
-pub fn router() -> Router {
+pub fn router(state: AppState) -> Router {
     Router::new()
+        // Unauthenticated by design: a health check that needs a
+        // credential is useless to a load balancer or `docker healthcheck`.
         .route("/healthz", get(healthz))
         .route("/version", get(version))
+        .route("/v1/ping", get(ping))
+        .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
@@ -51,6 +57,15 @@ async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Temporary: proves authentication end-to-end until Phase 2 gives the
+/// API real authenticated routes, at which point this is removed.
+async fn ping(Authenticated(context): Authenticated) -> Json<Value> {
+    Json(json!({
+        "user": context.handle(),
+        "scopes": context.scopes().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    }))
+}
+
 async fn version() -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -62,15 +77,26 @@ async fn version() -> Json<Value> {
 /// arrives, then drains in-flight requests before returning — Docker sends
 /// SIGTERM on `docker stop` and expects the process gone well inside its
 /// default 10 s grace period.
-pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
+pub async fn serve(host: &str, port: u16, state: AppState) -> std::io::Result<()> {
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .unwrap_or_else(|e| panic!("invalid [server].host/port {host}:{port}: {e}"));
 
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "listening");
+    if state.auth_mode == AuthMode::None {
+        // Loud on purpose: anyone who can reach this port is the `default`
+        // user, so an operator must never discover this setting by
+        // accident.
+        tracing::warn!(
+            "[auth].mode = \"none\": authentication is DISABLED and every \
+             request runs as the built-in `default` user. Only do this on a \
+             host where the listen address is not reachable by others."
+        );
+    }
 
-    axum::serve(listener, router())
+    let listener = TcpListener::bind(addr).await?;
+    tracing::info!(%addr, auth_mode = ?state.auth_mode, "listening");
+
+    axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
 }
