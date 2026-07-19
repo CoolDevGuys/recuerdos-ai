@@ -89,12 +89,37 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      # The suites spawn real daemons, which load the embedding model at
+      # startup. Downloading it once here (and caching it) keeps the tests
+      # off the network and stops a HuggingFace hiccup failing the build.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/models
+          key: models-${{ runner.os }}-bge-small-en-v1.5
+
+      - name: Warm the embedding model
+        run: |
+          mkdir -p .ci-cache/models
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            cargo run -q --bin recordagent -- warm-models
+
       - name: cargo test
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/app" \
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECORDAGENT_MODEL_CACHE=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just test-native
