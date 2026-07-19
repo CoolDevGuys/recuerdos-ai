@@ -163,9 +163,20 @@ mod tests {
     /// production write route to exercise yet.
     fn app(auth_mode: AuthMode) -> (Router, Arc<Identity>) {
         let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
-        let identity = Arc::new(Identity::from_database(database).unwrap());
+        let identity = Arc::new(Identity::from_database(Arc::clone(&database)).unwrap());
+        // A tmp dir per test app, so the tantivy indexes don't collide.
+        let index_dir = tempfile::tempdir().unwrap();
+        let memories = Arc::new(
+            crate::bootstrap::memories_wiring::Memories::for_test(
+                database,
+                Arc::new(crate::memories::application::fake_embedder::FakeEmbedder::default()),
+                index_dir.keep(),
+            )
+            .unwrap(),
+        );
         let state = AppState {
             identity: Arc::clone(&identity),
+            memories,
             auth_mode,
         };
 

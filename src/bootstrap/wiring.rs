@@ -40,12 +40,16 @@ pub struct Identity {
     pub clock: Arc<dyn Clock>,
 }
 
+/// Opens the one database handle every context shares.
+pub fn open_database(config: &AppConfig) -> Result<Arc<SqliteDatabase>> {
+    Ok(Arc::new(SqliteDatabase::open(
+        &config.data_dir().join(DATABASE_FILE),
+    )?))
+}
+
 impl Identity {
     pub fn build(config: &AppConfig) -> Result<Self> {
-        let database = Arc::new(SqliteDatabase::open(
-            &config.data_dir().join(DATABASE_FILE),
-        )?);
-        Self::from_database(database)
+        Self::from_database(open_database(config)?)
     }
 
     /// Wires against an already-open database. Used by tests to build the

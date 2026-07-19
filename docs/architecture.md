@@ -47,7 +47,15 @@ Phase 6; today it states the rules that are already enforced, with
    `application` (never their `infrastructure`).
 3. `infrastructure` implements domain-owned traits; only `bootstrap/` wires
    concrete implementations into use cases (composition root = the only
-   place that sees everything).
+   place that sees everything). One context's infrastructure may not
+   import another's — with a single spelled-out exception:
+   `identity::infrastructure::http` publishes the
+   `Authenticated`/`ReadAccess`/`WriteAccess` extractors, which every
+   other context's routes are built on. That is how a handler becomes
+   unable to run without the right scope; the alternative is each context
+   re-implementing bearer parsing. Identity's repositories and CLI remain
+   off limits, and `check-boundaries.sh` encodes the carve-out narrowly
+   enough to prove it (a Phase 2 amendment, same reasoning as rule 1).
 4. Inbound adapters (axum handlers, rmcp tools, CLI commands) live in the
    infrastructure layer of the context that owns the use case.
 5. Contracts are owned by consumers: e.g. the `Embedder` trait lives in

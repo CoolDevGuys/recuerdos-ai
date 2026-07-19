@@ -51,7 +51,7 @@ mod tests {
     fn fixture() -> Fixture {
         let users = Arc::new(InMemoryUserRepository::default());
         let keys = Arc::new(InMemoryApiKeyRepository::default());
-        let hasher = Arc::new(FakeApiKeyHasher);
+        let hasher = Arc::new(FakeApiKeyHasher::default());
 
         Fixture {
             issuer: ApiKeyIssuer::new(

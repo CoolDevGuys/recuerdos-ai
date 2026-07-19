@@ -48,6 +48,16 @@ done
 
 # Rule 3: only bootstrap wires concrete infrastructure across contexts —
 # infrastructure modules must not import another context's infrastructure.
+#
+# One deliberate exception, spelled out rather than left as a general
+# loophole: `identity::infrastructure::http` publishes the
+# Authenticated/ReadAccess/WriteAccess extractors, and every other
+# context's routes are built on them. That is the mechanism by which a
+# handler cannot run without the right scope — putting the check in the
+# signature instead of in a line someone must remember to write. The
+# alternative (every context re-implementing bearer parsing) is worse.
+# Anything else in identity's infrastructure — its repositories, its CLI
+# — is still off limits.
 for ctx in $contexts; do
     dir="src/$ctx/infrastructure"
     [ -d "$dir" ] || continue
@@ -55,7 +65,8 @@ for ctx in $contexts; do
         note_violation "$match (infrastructure must not import another context's infrastructure)"
     done < <(grep -rnE '^\s*use crate::' "$dir" --include='*.rs' \
         | grep -E "use crate::($(echo "$contexts" | tr ' ' '|'))::infrastructure(::|;| )" \
-        | grep -v "use crate::${ctx}::infrastructure" || true)
+        | grep -v "use crate::${ctx}::infrastructure" \
+        | grep -v 'use crate::identity::infrastructure::http::' || true)
 done
 
 # Rule (isolation): only the identity context may mint a `UserContext`.

@@ -7,6 +7,7 @@ pub mod api_key_revoker;
 pub mod default_user_resolver;
 pub mod key_authenticator;
 pub mod user_creator;
+pub mod verified_key_cache;
 
 #[cfg(test)]
 pub mod test_doubles;
