@@ -6,10 +6,12 @@
 
 use super::sqlite_memory_repository::SqliteMemoryRepository;
 use super::sqlite_vector_index::SqliteVectorIndex;
+use super::tantivy_text_index::TantivyTextIndex;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditOperation, MemoryRepository};
+use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::error::RaError;
 use crate::shared::ids::MemoryId;
@@ -22,20 +24,26 @@ const DIMENSIONS: usize = 4;
 struct Fixture {
     memories: SqliteMemoryRepository,
     vectors: SqliteVectorIndex,
+    text: TantivyTextIndex,
     alex: UserContext,
     sam: UserContext,
+    // Holds the text index's directory for the test's lifetime.
+    _index_dir: tempfile::TempDir,
 }
 
 fn fixture() -> Fixture {
     let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
     let identity =
         crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+    let index_dir = tempfile::tempdir().unwrap();
 
     Fixture {
         memories: SqliteMemoryRepository::new(Arc::clone(&database), "test-model", DIMENSIONS),
         vectors: SqliteVectorIndex::open(Arc::clone(&database), DIMENSIONS).unwrap(),
+        text: TantivyTextIndex::open(index_dir.path().to_path_buf()).unwrap(),
         alex: authenticate(&identity, "alex"),
         sam: authenticate(&identity, "sam"),
+        _index_dir: index_dir,
     }
 }
 
@@ -599,4 +607,259 @@ fn a_zero_limit_returns_nothing_rather_than_erroring() {
             .unwrap()
             .is_empty()
     );
+}
+
+// ---- text index ----
+
+#[test]
+fn text_search_finds_a_memory_by_its_words() {
+    let fixture = fixture();
+    let memory = memory_for(
+        &fixture.alex,
+        "User forbids barrel files and index re-exports",
+    );
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    let hits = fixture
+        .text
+        .search(&fixture.alex, "barrel files", 10)
+        .unwrap();
+
+    assert_eq!(hits, vec![memory.id()]);
+}
+
+#[test]
+fn text_search_finds_an_exact_identifier_a_vector_would_blur() {
+    // The case that justifies having a keyword leg at all
+    // (project-plan.md §7.7). An embedding places `useQuery` near its
+    // semantic neighbours — `useState`, `useEffect`, "react hook" — so
+    // vector search alone answers "which hook?" rather than "this exact
+    // symbol". BM25 matches the literal token.
+    let fixture = fixture();
+    let target = memory_for(
+        &fixture.alex,
+        "The useQuery cache key must include the tenant id",
+    );
+    let neighbour = memory_for(
+        &fixture.alex,
+        "Prefer useState over useReducer for simple state",
+    );
+    fixture.text.upsert(&fixture.alex, &target).unwrap();
+    fixture.text.upsert(&fixture.alex, &neighbour).unwrap();
+
+    let hits = fixture.text.search(&fixture.alex, "useQuery", 10).unwrap();
+
+    assert_eq!(
+        hits.first(),
+        Some(&target.id()),
+        "the exact identifier should win"
+    );
+}
+
+#[test]
+fn text_search_matches_tags_and_category_too() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "content without the word");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    assert_eq!(
+        fixture
+            .text
+            .search(&fixture.alex, "typescript", 10)
+            .unwrap(),
+        vec![memory.id()],
+        "tags should be searchable"
+    );
+    assert_eq!(
+        fixture
+            .text
+            .search(&fixture.alex, "preference.coding", 10)
+            .unwrap(),
+        vec![memory.id()],
+        "category should be searchable"
+    );
+}
+
+#[test]
+fn text_search_never_crosses_users() {
+    let fixture = fixture();
+    let alex_memory = memory_for(&fixture.alex, "shared vocabulary about pnpm");
+    let sam_memory = memory_for(&fixture.sam, "shared vocabulary about pnpm");
+    fixture.text.upsert(&fixture.alex, &alex_memory).unwrap();
+    fixture.text.upsert(&fixture.sam, &sam_memory).unwrap();
+
+    assert_eq!(
+        fixture.text.search(&fixture.alex, "pnpm", 10).unwrap(),
+        vec![alex_memory.id()]
+    );
+    assert_eq!(
+        fixture.text.search(&fixture.sam, "pnpm", 10).unwrap(),
+        vec![sam_memory.id()]
+    );
+}
+
+#[test]
+fn reindexing_a_memory_does_not_duplicate_it() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "original wording about pnpm");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    let hits = fixture.text.search(&fixture.alex, "pnpm", 10).unwrap();
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "tantivy has no update; upsert must delete first"
+    );
+}
+
+#[test]
+fn editing_a_memory_makes_the_new_words_findable_and_the_old_ones_not() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "deploys on flyio");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    let edited = memory
+        .clone()
+        .edit(
+            crate::memories::domain::memory::MemoryEdit {
+                content: Some("deploys on hetzner".to_string()),
+                ..Default::default()
+            },
+            now(),
+        )
+        .unwrap();
+    fixture.text.upsert(&fixture.alex, &edited).unwrap();
+
+    assert_eq!(
+        fixture.text.search(&fixture.alex, "hetzner", 10).unwrap(),
+        vec![memory.id()]
+    );
+    assert!(
+        fixture
+            .text
+            .search(&fixture.alex, "flyio", 10)
+            .unwrap()
+            .is_empty(),
+        "the superseded wording is still indexed"
+    );
+}
+
+#[test]
+fn removing_a_memory_takes_it_out_of_text_search() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "transient note about pnpm");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    fixture.text.remove(&fixture.alex, memory.id()).unwrap();
+
+    assert!(
+        fixture
+            .text
+            .search(&fixture.alex, "pnpm", 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn one_user_cannot_remove_anothers_indexed_memory() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "alex's note about pnpm");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    fixture.text.remove(&fixture.sam, memory.id()).unwrap();
+
+    assert_eq!(
+        fixture.text.search(&fixture.alex, "pnpm", 10).unwrap(),
+        vec![memory.id()],
+        "another user's remove deleted this document"
+    );
+}
+
+#[test]
+fn a_natural_language_question_matches_on_any_of_its_words() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "User prefers pnpm as their package manager");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    // Requiring every term would match nothing here.
+    let hits = fixture
+        .text
+        .search(&fixture.alex, "which package manager should I use?", 10)
+        .unwrap();
+
+    assert_eq!(hits, vec![memory.id()]);
+}
+
+#[test]
+fn punctuation_heavy_input_does_not_error() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "note about pnpm");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    for query in ["+++", "pnpm:", "\"unclosed", "a/b\\c", "((("] {
+        let result = fixture.text.search(&fixture.alex, query, 10);
+        assert!(result.is_ok(), "{query:?} produced {result:?}");
+    }
+}
+
+#[test]
+fn searching_an_empty_query_or_zero_limit_returns_nothing() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "note about pnpm");
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    assert!(
+        fixture
+            .text
+            .search(&fixture.alex, "   ", 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .text
+            .search(&fixture.alex, "pnpm", 0)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn searching_a_user_with_no_index_yet_is_empty_not_an_error() {
+    let fixture = fixture();
+    assert!(
+        fixture
+            .text
+            .search(&fixture.sam, "anything", 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn each_user_gets_their_own_index_directory() {
+    let fixture = fixture();
+    fixture
+        .text
+        .upsert(&fixture.alex, &memory_for(&fixture.alex, "alex"))
+        .unwrap();
+    fixture
+        .text
+        .upsert(&fixture.sam, &memory_for(&fixture.sam, "sam"))
+        .unwrap();
+
+    let alex_dir = fixture
+        ._index_dir
+        .path()
+        .join(fixture.alex.user_id().to_string());
+    let sam_dir = fixture
+        ._index_dir
+        .path()
+        .join(fixture.sam.user_id().to_string());
+
+    assert!(alex_dir.is_dir(), "expected a per-user index directory");
+    assert!(sam_dir.is_dir());
 }

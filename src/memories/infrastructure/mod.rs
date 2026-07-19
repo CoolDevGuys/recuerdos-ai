@@ -3,6 +3,7 @@
 
 pub mod sqlite_memory_repository;
 pub mod sqlite_vector_index;
+pub mod tantivy_text_index;
 
 #[cfg(test)]
 mod storage_tests;
