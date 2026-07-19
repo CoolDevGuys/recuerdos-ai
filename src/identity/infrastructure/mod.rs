@@ -2,5 +2,6 @@
 //! `user`/`key` subcommands — everything that touches the outside world.
 
 pub mod argon2_api_key_hasher;
+pub mod cli;
 pub mod sqlite_api_key_repository;
 pub mod sqlite_user_repository;

@@ -32,6 +32,20 @@ enum Command {
         #[arg(long, default_value = "recordagent.toml")]
         config: PathBuf,
     },
+    /// Manage users.
+    User {
+        #[command(subcommand)]
+        command: identity::infrastructure::cli::UserCommand,
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+    },
+    /// Manage API keys.
+    Key {
+        #[command(subcommand)]
+        command: identity::infrastructure::cli::KeyCommand,
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -41,6 +55,8 @@ async fn main() {
     let result = match cli.command {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
+        Command::User { command, config } => run_user(command, config.as_deref()),
+        Command::Key { command, config } => run_key(command, config.as_deref()),
     };
 
     if let Err(message) = result {
@@ -57,6 +73,27 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     bootstrap::server::serve(&config.server.host, config.server.port)
         .await
         .map_err(|e| format!("server error: {e}"))
+}
+
+fn run_user(
+    command: identity::infrastructure::cli::UserCommand,
+    config_path: Option<&Path>,
+) -> Result<(), String> {
+    let identity = build_identity(config_path)?;
+    identity::infrastructure::cli::run_user_command(command, &identity).map_err(|e| e.to_string())
+}
+
+fn run_key(
+    command: identity::infrastructure::cli::KeyCommand,
+    config_path: Option<&Path>,
+) -> Result<(), String> {
+    let identity = build_identity(config_path)?;
+    identity::infrastructure::cli::run_key_command(command, &identity).map_err(|e| e.to_string())
+}
+
+fn build_identity(config_path: Option<&Path>) -> Result<bootstrap::wiring::Identity, String> {
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    bootstrap::wiring::Identity::build(&config).map_err(|e| e.to_string())
 }
 
 fn run_init(config_path: &PathBuf) -> Result<(), String> {
