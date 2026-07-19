@@ -20,9 +20,10 @@ memories strictly. See [project-plan.md](project-plan.md) for the full
 design and [implementation-plan.md](implementation-plan.md) for the phased
 build plan.
 
-> **Status: Phase 0 — Foundation.** The daemon boots, serves `/healthz` and
-> `/version`, and loads validated config. No memory features yet — see the
-> phase table below.
+> **Status: Phase 1 — Identity.** The daemon boots, loads validated config,
+> and serves multi-user API-key authentication: create users, issue and
+> revoke scoped keys, and every `/v1` route resolves to exactly one user.
+> No memory features yet — those start in Phase 2.
 
 ## Prerequisites
 
@@ -47,6 +48,57 @@ curl localhost:7070/version   # {"version":"0.1.0","git_sha":"..."}
 
 Edit any file under `src/`; `cargo-watch` rebuilds and restarts the daemon
 automatically.
+
+### Create a user and an API key
+
+Every `/v1` route requires a key. Keys are issued from the CLI — there is
+deliberately no HTTP endpoint that hands them out.
+
+With `just dev` still running, in a second terminal:
+
+```bash
+alias ra='docker compose run --rm dev cargo run -q --bin recordagent --'
+
+ra user add alex --email alex@example.com
+ra key issue --user alex --scopes read,write --name laptop
+```
+
+(The CLI runs in its own container but shares the daemon's database
+through the `data` volume, so a key issued here works against the server
+already running.)
+
+```
+API key created for alex (name: laptop, scopes: read,write)
+
+  ra_live_b99f884ae92dd2318af8929b09018970a53acc6c
+
+This is the only time this key is shown. Store it now.
+```
+
+Only a hash of the key is stored, so a lost key can be replaced but never
+recovered. Use it as a bearer token:
+
+```bash
+curl -H "Authorization: Bearer ra_live_..." localhost:7070/v1/ping
+# {"user":"alex","scopes":["read","write"]}
+
+curl localhost:7070/v1/ping
+# 401 {"error":{"code":"unauthorized","message":"invalid API key"}}
+```
+
+`/v1/ping` is temporary: it exists to prove authentication end-to-end and
+disappears when Phase 2 adds real routes.
+
+Other key commands:
+
+```bash
+ra key list --user alex      # prefixes, scopes, last used, status
+ra key revoke b99f884a       # revoke by prefix (the visible half)
+ra user list
+```
+
+See [docs/api.md](docs/api.md) for the HTTP surface and
+[docs/security.md](docs/security.md) for how isolation is enforced.
 
 Don't have `just`? Run the underlying commands directly:
 `docker compose up dev`, `docker compose run --rm dev cargo test`, etc. —
@@ -74,8 +126,8 @@ See [docs/configuration.md](docs/configuration.md).
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 — Foundation | Docker dev env, config, HTTP skeleton, CI | ✅ in progress |
-| 1 — Identity | Users, API keys, per-user isolation | ⬜ |
+| 0 — Foundation | Docker dev env, config, HTTP skeleton, CI | ✅ |
+| 1 — Identity | Users, API keys, per-user isolation | ✅ |
 | 2 — Memories | Store + hybrid search (REST) | ⬜ |
 | 3 — MCP server | Claude Code / opencode integration | ⬜ |
 | 4 — Understanding | Extraction, labeling, reconciliation | ⬜ |
