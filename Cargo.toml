@@ -32,6 +32,9 @@ refinery = { version = "0.9.2", default-features = false, features = ["rusqlite"
 argon2 = "0.5.3"
 rand = "0.10.2"
 hex = "0.4.3"
+sqlite-vec = "0.1.9"
+tantivy = "0.25.0"
+fastembed = "5.17.3"
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["test"] }

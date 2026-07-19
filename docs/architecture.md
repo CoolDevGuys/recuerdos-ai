@@ -28,7 +28,21 @@ Phase 6; today it states the rules that are already enforced, with
 
 ## Boundary rules
 
-1. `domain` imports only `shared` and std.
+1. `domain` imports `shared`, std, and other contexts' `domain` — never
+   anyone's `application` or `infrastructure`, and never `bootstrap`.
+
+   Cross-context *domain* imports are the published language between
+   contexts. Today that is exactly `identity::domain::UserContext`, which
+   every repository contract takes as its first argument so that reaching
+   another user's data cannot compile. It must live in `identity` for its
+   constructors to stay `pub(in crate::identity)` — moving it to `shared`
+   would force them public and throw the guarantee away. The rule
+   therefore permits domain→domain and holds the line at the layers that
+   actually carry framework and I/O dependencies.
+
+   (This is a Phase 2 amendment. The original rule said "`shared` and std
+   only", written before it was clear that the isolation guarantee
+   requires a domain type to be shared between contexts.)
 2. `application` imports its own `domain` + `shared` + other contexts'
    `application` (never their `infrastructure`).
 3. `infrastructure` implements domain-owned traits; only `bootstrap/` wires

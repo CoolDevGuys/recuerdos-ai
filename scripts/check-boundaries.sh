@@ -14,18 +14,25 @@ note_violation() {
     fail=1
 }
 
-# Rule 1: domain imports only shared + std (+ its own context's domain).
-# A domain file may not `use crate::<other-context>::` at all, and may not
-# reach into any context's application/infrastructure layer, including its
-# own.
+# Rule 1: a domain may import `shared`, std, and other contexts' *domain*
+# — never anyone's application or infrastructure layer, and never
+# bootstrap.
+#
+# Cross-context domain imports are the published language between
+# contexts. Today that is exactly `identity::domain::UserContext`, which
+# every repository contract takes so that reaching another user's data
+# cannot compile. It has to live in `identity` for its constructors to
+# stay `pub(in crate::identity)`; moving it to `shared` would force them
+# public and throw the guarantee away. So the rule permits domain→domain
+# and holds the line at the layers that actually carry framework and I/O
+# dependencies.
 for ctx in $contexts; do
     dir="src/$ctx/domain"
     [ -d "$dir" ] || continue
     while IFS= read -r match; do
-        note_violation "$match (domain must import only shared + std)"
+        note_violation "$match (domain must not import application, infrastructure or bootstrap)"
     done < <(grep -rnE '^\s*use crate::' "$dir" --include='*.rs' \
-        | grep -vE 'use crate::shared(::|;| )' \
-        | grep -E "use crate::($(echo "$contexts" | tr ' ' '|')|bootstrap)::" || true)
+        | grep -E "use crate::(bootstrap(::|;| )|($(echo "$contexts" | tr ' ' '|'))::(application|infrastructure)(::|;| ))" || true)
 done
 
 # Rule 2: application imports its own domain + shared + other contexts'
