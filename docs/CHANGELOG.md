@@ -54,6 +54,13 @@ Known limitations, stated rather than buried:
   throughput for an agent that just saved something), which is most of
   the 55ms.
 
+The release image grows from ~112 MB to ~287 MB: the embedding model is
+baked in (~130 MB) so a container never downloads at runtime, plus the
+C++ runtime libraries ONNX needs. Both build stages now pin the same
+Debian release — `rust:1-slim` had drifted to trixie while the runtime
+stage was still bookworm, which produced a binary the runtime's glibc
+could not load.
+
 297 tests.
 
 ## v0.1.0-alpha.1 — Phase 1: Identity

@@ -183,3 +183,10 @@ jobs:
 
           docker stop smoke
           docker rm smoke
+
+      # Without this, a container that dies on startup shows up only as
+      # "connection refused" — the actual reason (a linker error, in the
+      # case that prompted adding this) stays in logs nobody printed.
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs smoke 2>&1 | tail -50 || true
