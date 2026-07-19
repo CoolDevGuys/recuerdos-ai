@@ -11,10 +11,21 @@ services:
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
       - target:/app/target
+      - data:/data
     ports:
       - "7070:7070"
     environment:
       RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
+      # Container-wide so the daemon (`docker compose up dev`) and the CLI
+      # (`docker compose run --rm dev ...`) — separate containers — share
+      # one database on the `data` volume. Without it each container would
+      # write to its own throwaway home directory, and a key issued from
+      # the CLI would be invisible to the running server.
+      #
+      # Safe for tests: the integration suites set this variable
+      # explicitly per spawned app, and the config unit tests run inside
+      # figment's Jail, which sandboxes the environment.
+      RECORDAGENT_STORAGE__PATH: /data
     # RECORDAGENT_SERVER__HOST is scoped to this command (not a
     # container-wide `environment:` entry) so it doesn't leak into
     # `docker compose run --rm dev cargo test`. Containers must listen on
@@ -34,4 +45,5 @@ volumes:
   cargo-registry:
   cargo-git:
   target:
+  data:
   ollama-models:

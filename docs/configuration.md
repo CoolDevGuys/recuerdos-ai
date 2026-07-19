@@ -1,8 +1,8 @@
 # Configuration
 
-**Status: Phase 0.** Every key below is loaded and validated today. The
-`[auth]` section is parsed and validated but not yet enforced by any
-route — that lands in Phase 1.
+**Status: Phase 1.** Every key below is loaded and validated today.
+`[auth]` and `[storage]` are enforced; the rest configure features that
+arrive in later phases.
 
 ## Precedence
 
@@ -40,8 +40,52 @@ config error: [server].port is 0; [embeddings].model is empty
 
 Each message names the exact TOML path it's complaining about.
 
-## Coming in Phase 1
+## Authentication
 
-`[auth].mode` (`api-key` | `none`) gets enforced by an auth middleware
-that resolves every request to a `UserContext`. See
-[implementation-plan.md Phase 1](../implementation-plan.md#phase-1).
+```toml
+[auth]
+mode = "api-key"   # api-key | none
+```
+
+### `mode = "api-key"` (default)
+
+Every `/v1` route requires a bearer key. Manage keys with the CLI:
+
+```bash
+recordagent user add alex --email alex@example.com
+recordagent key issue --user alex --scopes read,write --name laptop
+recordagent key list --user alex
+recordagent key revoke b99f884a          # by prefix
+```
+
+The key is displayed once at issue time. Only an argon2id hash is stored,
+so a lost key can be replaced but never recovered.
+
+An unrecognised `mode` value falls back to `api-key`. Failing closed is
+the only safe direction: a typo must never silently disable
+authentication.
+
+### `mode = "none"`
+
+Disables authentication entirely — every request runs as a built-in user
+named `default`. Intended for a single-user deployment bound to
+`127.0.0.1`, where the OS is already the access control.
+
+Anyone who can reach the port is the `default` user. The server logs a
+warning at startup whenever this is set.
+
+Turning it back on later is safe: `default` is a real persisted user, so
+memories written while auth was off keep their owner rather than being
+orphaned.
+
+## Storage
+
+```toml
+[storage]
+path = "~/.recordagent/data"
+```
+
+The database lives at `<path>/recordagent.db` and is created, along with
+any missing parent directories, on first use. Schema migrations run
+automatically at startup and are idempotent. Backup is `cp` of the data
+directory (stop the daemon first, or copy the WAL files with it).
