@@ -5,6 +5,7 @@
 pub mod clock;
 pub mod error;
 pub mod ids;
+pub mod sqlite;
 
 // Re-exported for a nicer `crate::shared::X` surface. Not yet used outside
 // this module's own tests — consumers arrive with the identity/memories
