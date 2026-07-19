@@ -146,6 +146,10 @@ impl Memory {
         self.id
     }
 
+    /// Whose memory this is. The repositories scope by the *context's*
+    /// user rather than trusting this, so it is read by tests and by
+    /// Phase 4's reconciliation rather than by the write path.
+    #[allow(dead_code)]
     pub fn user_id(&self) -> UserId {
         self.user_id
     }
@@ -238,15 +242,23 @@ impl Memory {
         Ok(self)
     }
 
-    /// Marks this memory as replaced by another. Used by Phase 4's
-    /// reconciliation and Phase 5's consolidation; the memory is retained,
+    /// Marks this memory as replaced by another. The memory is retained,
     /// only hidden from ordinary recall.
+    ///
+    /// Phase 4's reconciliation (ADD/UPDATE/DELETE/NOOP) is its first
+    /// production caller; today it is exercised by tests, which is how
+    /// the storage and recall paths already handle superseded rows.
+    #[allow(dead_code)]
     pub fn supersede(mut self, replacement: MemoryId, now: DateTime<Utc>) -> Self {
         self.superseded_by = Some(replacement);
         self.updated_at = now;
         self
     }
 
+    /// Records a recall. The SQLite repository does this in one UPDATE
+    /// rather than by rebuilding the aggregate, so this is the in-memory
+    /// path — used by the test double and by Phase 5's decay work.
+    #[allow(dead_code)]
     pub fn mark_accessed(mut self, now: DateTime<Utc>) -> Self {
         self.last_accessed_at = Some(now);
         self

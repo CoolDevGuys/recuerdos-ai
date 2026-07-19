@@ -359,20 +359,6 @@ impl MemoryRepository for SqliteMemoryRepository {
             Ok(())
         })
     }
-
-    fn count(&self, context: &UserContext) -> Result<usize> {
-        self.database.with_connection(|connection| {
-            let count: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM memories
-                     WHERE user_id = ?1 AND deleted_at IS NULL AND superseded_by IS NULL",
-                    [context.user_id().to_string()],
-                    |row| row.get(0),
-                )
-                .map_err(|e| map_sqlite_error(e, "memory count conflict"))?;
-            Ok(count as usize)
-        })
-    }
 }
 
 fn not_found(id: MemoryId) -> RaError {

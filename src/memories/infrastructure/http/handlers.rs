@@ -196,6 +196,7 @@ pub async fn read_audit(
                 memory_id: entry.memory_id.to_string(),
                 operation: entry.operation.as_str().to_string(),
                 actor: entry.actor.clone(),
+                detail: entry.detail.clone(),
                 at: entry.at,
             })
             .collect(),

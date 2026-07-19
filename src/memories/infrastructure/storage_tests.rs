@@ -215,7 +215,6 @@ fn listing_returns_only_the_callers_memories() {
             .all(|memory| memory.user_id() == fixture.alex.user_id())
     );
     assert_eq!(fixture.memories.list(&fixture.sam, false).unwrap().len(), 1);
-    assert_eq!(fixture.memories.count(&fixture.alex).unwrap(), 2);
 }
 
 #[test]

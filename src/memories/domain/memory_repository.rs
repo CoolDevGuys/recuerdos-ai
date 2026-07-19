@@ -72,6 +72,4 @@ pub trait MemoryRepository: Send + Sync {
         ids: &[MemoryId],
         now: DateTime<Utc>,
     ) -> Result<()>;
-
-    fn count(&self, context: &UserContext) -> Result<usize>;
 }

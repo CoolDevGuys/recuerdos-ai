@@ -293,10 +293,6 @@ impl MemoryRepository for InMemoryMemoryRepository {
         }
         Ok(())
     }
-
-    fn count(&self, context: &UserContext) -> Result<usize> {
-        Ok(self.list(context, false)?.len())
-    }
 }
 
 #[derive(Default)]

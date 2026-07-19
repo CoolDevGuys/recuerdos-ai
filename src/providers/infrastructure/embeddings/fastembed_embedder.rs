@@ -20,8 +20,9 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// The default model: 384 dimensions, ~130 MB, strong quality per byte.
-pub const DEFAULT_MODEL: &str = "bge-small-en-v1.5";
+/// Dimensionality of every model this accepts. The vec0 table's fixed
+/// width and the per-collection pin both depend on it, which is why
+/// `resolve_model` refuses models that don't match.
 pub const DEFAULT_DIMENSIONS: usize = 384;
 
 pub struct FastembedEmbedder {
@@ -150,7 +151,7 @@ mod tests {
     #[test]
     #[ignore = "requires the ONNX model; run with --ignored"]
     fn embeds_text_into_vectors_of_the_expected_width() {
-        let embedder = FastembedEmbedder::load(DEFAULT_MODEL, model_cache_dir()).unwrap();
+        let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
 
         let embeddings = embedder
             .embed(&[
@@ -169,7 +170,7 @@ mod tests {
     fn places_paraphrases_closer_than_unrelated_text() {
         // The property the whole vector leg rests on. If this fails, the
         // model is loading but not doing anything useful.
-        let embedder = FastembedEmbedder::load(DEFAULT_MODEL, model_cache_dir()).unwrap();
+        let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
 
         let embeddings = embedder
             .embed(&[
@@ -191,7 +192,7 @@ mod tests {
     #[test]
     #[ignore = "requires the ONNX model; run with --ignored"]
     fn embedding_is_deterministic() {
-        let embedder = FastembedEmbedder::load(DEFAULT_MODEL, model_cache_dir()).unwrap();
+        let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
         let text = vec!["User prefers pnpm".to_string()];
 
         let first = embedder.embed(&text).unwrap();
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     #[ignore = "requires the ONNX model; run with --ignored"]
     fn an_empty_batch_is_not_an_error() {
-        let embedder = FastembedEmbedder::load(DEFAULT_MODEL, model_cache_dir()).unwrap();
+        let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
         assert!(embedder.embed(&[]).unwrap().is_empty());
     }
 

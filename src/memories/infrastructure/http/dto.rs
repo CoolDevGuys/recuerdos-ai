@@ -149,6 +149,9 @@ pub struct AuditEntryResponse {
     pub memory_id: String,
     pub operation: String,
     pub actor: String,
+    /// What changed, when the operation recorded anything worth saying.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
     pub at: DateTime<Utc>,
 }
 
