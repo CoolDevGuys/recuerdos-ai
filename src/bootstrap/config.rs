@@ -88,6 +88,11 @@ const EMBEDDINGS_PROVIDERS: &[&str] = &["local", "openai-compat", "ollama"];
 pub struct EmbeddingsConfig {
     pub provider: String,
     pub model: String,
+    /// Where the local model files live. Set explicitly rather than left
+    /// to the library's default, which is the process's working
+    /// directory — for a daemon, "wherever it happened to be started
+    /// from". The Docker image points this at a baked-in `/models`.
+    pub cache_dir: String,
 }
 
 impl Default for EmbeddingsConfig {
@@ -95,6 +100,7 @@ impl Default for EmbeddingsConfig {
         Self {
             provider: "local".to_string(),
             model: "bge-small-en-v1.5".to_string(),
+            cache_dir: "~/.recordagent/models".to_string(),
         }
     }
 }
@@ -239,6 +245,9 @@ impl AppConfig {
         if self.embeddings.model.trim().is_empty() {
             issues.push("[embeddings].model is empty".to_string());
         }
+        if self.embeddings.cache_dir.trim().is_empty() {
+            issues.push("[embeddings].cache_dir is empty".to_string());
+        }
 
         if !UNDERSTANDING_PROVIDERS.contains(&self.understanding.provider.as_str()) {
             issues.push(format!(
@@ -280,6 +289,11 @@ impl AppConfig {
     /// Resolve `storage.path`, expanding a leading `~` to `$HOME`.
     pub fn data_dir(&self) -> PathBuf {
         expand_home(&self.storage.path)
+    }
+
+    /// Resolve `embeddings.cache_dir`, expanding a leading `~`.
+    pub fn model_cache_dir(&self) -> PathBuf {
+        expand_home(&self.embeddings.cache_dir)
     }
 }
 

@@ -12,6 +12,7 @@ services:
       - cargo-git:/usr/local/cargo/git
       - target:/app/target
       - data:/data
+      - models:/models
     ports:
       - "7070:7070"
     environment:
@@ -26,6 +27,12 @@ services:
       # explicitly per spawned app, and the config unit tests run inside
       # figment's Jail, which sandboxes the environment.
       RECORDAGENT_STORAGE__PATH: /data
+      # A named volume, so the ~130 MB model is downloaded once and
+      # shared by every dev container rather than landing in the
+      # bind-mounted repo (fastembed's default is the working directory).
+      RECORDAGENT_EMBEDDINGS__CACHE_DIR: /models
+      # Same path the ignored real-model tests look for.
+      RECORDAGENT_MODEL_CACHE: /models
     # RECORDAGENT_SERVER__HOST is scoped to this command (not a
     # container-wide `environment:` entry) so it doesn't leak into
     # `docker compose run --rm dev cargo test`. Containers must listen on
@@ -46,4 +53,5 @@ volumes:
   cargo-git:
   target:
   data:
+  models:
   ollama-models:

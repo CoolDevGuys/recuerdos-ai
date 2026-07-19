@@ -32,6 +32,14 @@ enum Command {
         #[arg(long, default_value = "recordagent.toml")]
         config: PathBuf,
     },
+    /// Download the local embedding model into the cache directory.
+    ///
+    /// Run at image build time so a container never downloads at
+    /// runtime, or before taking a host offline.
+    WarmModels {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Manage users.
     User {
         #[command(subcommand)]
@@ -55,6 +63,7 @@ async fn main() {
     let result = match cli.command {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
+        Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
     };
@@ -79,6 +88,36 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     bootstrap::server::serve(&config.server.host, config.server.port, state)
         .await
         .map_err(|e| format!("server error: {e}"))
+}
+
+fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
+    use memories::domain::embedder::Embedder;
+
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let cache_dir = config.model_cache_dir();
+
+    println!(
+        "downloading embedding model {} into {}",
+        config.embeddings.model,
+        cache_dir.display()
+    );
+
+    let embedder =
+        providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder::load(
+            &config.embeddings.model,
+            cache_dir,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Embedding something proves the model actually runs, not just that
+    // the files downloaded — a truncated download would otherwise only
+    // surface on the first real request.
+    embedder
+        .embed(&["warm".to_string()])
+        .map_err(|e| e.to_string())?;
+
+    println!("model ready ({} dimensions)", embedder.dimensions());
+    Ok(())
 }
 
 fn run_user(
