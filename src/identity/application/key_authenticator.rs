@@ -3,6 +3,7 @@
 //! This is the gate every authenticated request passes through, and the
 //! only place outside the domain that produces a `UserContext`.
 
+use crate::identity::application::verified_key_cache::VerifiedKeyCache;
 use crate::identity::domain::api_key::ApiKeyToken;
 use crate::identity::domain::api_key_hasher::ApiKeyHasher;
 use crate::identity::domain::api_key_repository::ApiKeyRepository;
@@ -15,6 +16,7 @@ pub struct KeyAuthenticator {
     users: Arc<dyn UserRepository>,
     keys: Arc<dyn ApiKeyRepository>,
     hasher: Arc<dyn ApiKeyHasher>,
+    verified: VerifiedKeyCache,
 }
 
 impl KeyAuthenticator {
@@ -27,6 +29,7 @@ impl KeyAuthenticator {
             users,
             keys,
             hasher,
+            verified: VerifiedKeyCache::default(),
         }
     }
 
@@ -47,11 +50,27 @@ impl KeyAuthenticator {
             .find_by_prefix(token.prefix())?
             .ok_or_else(invalid_key)?;
 
-        // Verify before checking revocation, so a revoked key and an
-        // unknown one cost the same. Skipping the hash for revoked keys
-        // would make revocation detectable by timing alone.
-        let matches = self.hasher.verify(token.secret(), key.secret_hash())?;
+        // A recent verification of this exact secret lets us skip argon2,
+        // which costs ~230 ms and dominated every request. Revocation and
+        // scopes are still read from the row below, so revoking a key
+        // takes effect immediately rather than after the cache TTL.
+        let matches = if self.verified.is_verified(&token) {
+            true
+        } else {
+            // Verify before checking revocation, so a revoked key and an
+            // unknown one cost the same. Skipping the hash for revoked
+            // keys would make revocation detectable by timing alone.
+            let verified = self.hasher.verify(token.secret(), key.secret_hash())?;
+            if verified {
+                self.verified.remember(&token);
+            }
+            verified
+        };
+
         if !matches || key.is_revoked() {
+            if key.is_revoked() {
+                self.verified.forget(token.prefix());
+            }
             return Err(invalid_key());
         }
 
@@ -88,6 +107,7 @@ mod tests {
     struct Fixture {
         users: Arc<InMemoryUserRepository>,
         keys: Arc<InMemoryApiKeyRepository>,
+        hasher: Arc<FakeApiKeyHasher>,
         issuer: ApiKeyIssuer,
         authenticator: KeyAuthenticator,
     }
@@ -95,7 +115,7 @@ mod tests {
     fn fixture() -> Fixture {
         let users = Arc::new(InMemoryUserRepository::default());
         let keys = Arc::new(InMemoryApiKeyRepository::default());
-        let hasher = Arc::new(FakeApiKeyHasher);
+        let hasher = Arc::new(FakeApiKeyHasher::default());
 
         Fixture {
             issuer: ApiKeyIssuer::new(
@@ -111,6 +131,7 @@ mod tests {
             ),
             users,
             keys,
+            hasher,
         }
     }
 
@@ -237,5 +258,77 @@ mod tests {
         assert_eq!(alex_ctx.handle(), "alex");
         assert_eq!(sam_ctx.handle(), "sam");
         assert_ne!(alex_ctx.user_id(), sam_ctx.user_id());
+    }
+
+    #[test]
+    fn a_revoked_key_is_rejected_even_after_a_successful_verification() {
+        // The cache must not outlive revocation. This is the test that
+        // makes skipping argon2 safe: the key is verified (and cached),
+        // then revoked, then presented again.
+        let fixture = fixture();
+        let issued = issue(&fixture, "alex", vec![Scope::Read]);
+        let raw = issued.token.render();
+
+        assert!(
+            fixture.authenticator.execute(&raw).is_ok(),
+            "first call primes the cache"
+        );
+
+        fixture
+            .keys
+            .revoke(issued.key.id(), fixed_clock().now())
+            .unwrap();
+
+        assert_rejected(fixture.authenticator.execute(&raw));
+    }
+
+    #[test]
+    fn a_cached_prefix_does_not_admit_a_different_secret() {
+        // Presenting a valid prefix with the wrong secret must still fail
+        // after that prefix has been verified once.
+        let fixture = fixture();
+        let issued = issue(&fixture, "alex", vec![Scope::Read]);
+        assert!(
+            fixture
+                .authenticator
+                .execute(&issued.token.render())
+                .is_ok()
+        );
+
+        let forged = format!("ra_live_{}{}", issued.token.prefix(), "0".repeat(32));
+
+        assert_rejected(fixture.authenticator.execute(&forged));
+    }
+
+    #[test]
+    fn scope_changes_are_not_masked_by_the_cache() {
+        // Scopes come from the row on every call, not from the cache.
+        let fixture = fixture();
+        let issued = issue(&fixture, "alex", vec![Scope::Read]);
+        let raw = issued.token.render();
+
+        let first = fixture.authenticator.execute(&raw).unwrap();
+        assert!(first.allows(Scope::Read) && !first.allows(Scope::Write));
+
+        let second = fixture.authenticator.execute(&raw).unwrap();
+        assert!(second.allows(Scope::Read) && !second.allows(Scope::Write));
+    }
+
+    #[test]
+    fn the_expensive_hash_runs_once_per_key_not_once_per_request() {
+        let fixture = fixture();
+        let issued = issue(&fixture, "alex", vec![Scope::Read]);
+        let raw = issued.token.render();
+        let before = fixture.hasher.verify_calls();
+
+        for _ in 0..5 {
+            fixture.authenticator.execute(&raw).unwrap();
+        }
+
+        assert_eq!(
+            fixture.hasher.verify_calls() - before,
+            1,
+            "argon2 should run once, then be served from the cache"
+        );
     }
 }

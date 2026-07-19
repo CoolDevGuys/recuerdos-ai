@@ -165,3 +165,165 @@ async fn scopes_are_carried_from_the_key_that_authenticated() {
     let writer_scopes = ping_as(&app, &writer).await;
     assert_eq!(writer_scopes["scopes"], serde_json::json!(["write"]));
 }
+
+// ---- memories (Phase 2) ----
+//
+// The claim under test widens from "whose key is this?" to "whose data
+// does this reach?". Each case gives the attacker every advantage the
+// system can be asked to withstand: the exact id, identical content, the
+// same query.
+
+async fn save_as(app: &TestApp, key: &str, content: &str) -> serde_json::Value {
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/memories:direct", app.base_url))
+        .bearer_auth(key)
+        .json(&serde_json::json!({"content": content}))
+        .send()
+        .await
+        .expect("save request");
+
+    assert_eq!(response.status(), 201);
+    response.json().await.expect("json body")
+}
+
+async fn search_as(app: &TestApp, key: &str, query: &str) -> Vec<String> {
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/memories/search", app.base_url))
+        .bearer_auth(key)
+        .json(&serde_json::json!({"query": query, "limit": 50}))
+        .send()
+        .await
+        .expect("search request");
+
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.unwrap();
+    body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| hit["content"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn recall_never_returns_another_users_memories() {
+    let users = two_users().await;
+
+    // Byte-identical content: a bug that filtered by *text* rather than
+    // by owner would be invisible against distinct data.
+    save_as(
+        &users.app,
+        &users.alex_key,
+        "the deployment target is hetzner",
+    )
+    .await;
+    save_as(
+        &users.app,
+        &users.sam_key,
+        "the deployment target is hetzner",
+    )
+    .await;
+
+    let alex_results = search_as(&users.app, &users.alex_key, "deployment target").await;
+    let sam_results = search_as(&users.app, &users.sam_key, "deployment target").await;
+
+    assert_eq!(alex_results.len(), 1, "got {alex_results:?}");
+    assert_eq!(sam_results.len(), 1, "got {sam_results:?}");
+}
+
+#[tokio::test]
+async fn one_user_cannot_read_anothers_memory_by_id() {
+    let users = two_users().await;
+    let saved = save_as(&users.app, &users.alex_key, "alex's private note").await;
+    let id = saved["id"].as_str().unwrap();
+
+    let response = reqwest::Client::new()
+        .get(format!("{}/v1/memories/{id}", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        404,
+        "knowing the id must not be enough to read it"
+    );
+}
+
+#[tokio::test]
+async fn one_user_cannot_edit_or_delete_anothers_memory() {
+    let users = two_users().await;
+    let saved = save_as(&users.app, &users.alex_key, "alex's original wording").await;
+    let id = saved["id"].as_str().unwrap();
+    let http = reqwest::Client::new();
+
+    let edit = http
+        .patch(format!("{}/v1/memories/{id}", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .json(&serde_json::json!({"content": "overwritten by sam"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(edit.status(), 404);
+
+    let delete = http
+        .delete(format!("{}/v1/memories/{id}", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), 404);
+
+    // And the memory is genuinely untouched, not merely reported as such.
+    let still_there = search_as(&users.app, &users.alex_key, "original wording").await;
+    assert_eq!(still_there, vec!["alex's original wording"]);
+}
+
+#[tokio::test]
+async fn export_contains_only_the_callers_memories() {
+    let users = two_users().await;
+    save_as(&users.app, &users.alex_key, "alex's exported memory").await;
+    save_as(&users.app, &users.sam_key, "sam's exported memory").await;
+
+    let export = reqwest::Client::new()
+        .get(format!("{}/v1/memories/export", users.app.base_url))
+        .bearer_auth(&users.alex_key)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+
+    assert!(export.contains("alex's exported memory"));
+    assert!(
+        !export.contains("sam's exported memory"),
+        "export leaked another user's memories:\n{export}"
+    );
+}
+
+#[tokio::test]
+async fn the_audit_trail_is_per_user() {
+    let users = two_users().await;
+    let saved = save_as(&users.app, &users.alex_key, "alex's audited memory").await;
+    let alex_memory_id = saved["id"].as_str().unwrap();
+
+    let sam_audit: serde_json::Value = reqwest::Client::new()
+        .get(format!("{}/v1/audit", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let entries = sam_audit["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["memory_id"] != alex_memory_id),
+        "another user's mutations appeared in this audit trail: {sam_audit}"
+    );
+}

@@ -24,7 +24,8 @@ RUN rustup component add rustfmt clippy \
 RUN (groupadd -g "${USER_GID}" dev || groupmod -n dev "$(getent group "${USER_GID}" | cut -d: -f1)") \
     && (useradd -m -u "${USER_UID}" -g "${USER_GID}" -s /bin/bash dev \
         || usermod -l dev -d /home/dev -m "$(getent passwd "${USER_UID}" | cut -d: -f1)") \
-    && mkdir -p /app /data \
+    && mkdir -p /app /data /models \
+    && chown "${USER_UID}:${USER_GID}" /models \
     # /data is a named volume shared by every container of the `dev`
     # service, so the CLI (`docker compose run`) and the daemon
     # (`docker compose up`) see one database. Docker seeds a fresh named

@@ -18,10 +18,37 @@
 use crate::shared::error::{RaError, Result};
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 
 mod embedded {
     refinery::embed_migrations!("migrations");
+}
+
+static REGISTER_EXTENSIONS: Once = Once::new();
+
+/// Registers sqlite-vec as an auto-extension, so every connection opened
+/// afterwards has `vec0` available.
+///
+/// `sqlite3_auto_extension` is process-global and must run before the
+/// connections that need it; `Once` makes that idempotent and
+/// thread-safe. The `transmute` is how the C entry point is handed to
+/// SQLite — the signature is fixed by the C API and checked by nothing,
+/// which is why it is confined to this one place.
+fn register_extensions() {
+    REGISTER_EXTENSIONS.call_once(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            // `c_char` rather than a hardcoded i8: it is unsigned on
+            // aarch64 Linux, so spelling it out breaks that build.
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
+        )));
+    });
 }
 
 pub struct SqliteDatabase {
@@ -32,6 +59,8 @@ impl SqliteDatabase {
     /// Opens (creating if absent) the database at `path`, applies pragmas
     /// and runs any pending migrations. Parent directories are created.
     pub fn open(path: &Path) -> Result<Self> {
+        register_extensions();
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 RaError::Internal(format!(
@@ -52,6 +81,8 @@ impl SqliteDatabase {
     /// tests exercise the real schema, never a hand-written stand-in.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
+        register_extensions();
+
         let connection = Connection::open_in_memory()
             .map_err(|e| RaError::Internal(format!("failed to open in-memory database: {e}")))?;
         Self::from_connection(connection)

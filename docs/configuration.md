@@ -1,8 +1,10 @@
 # Configuration
 
-**Status: Phase 1.** Every key below is loaded and validated today.
-`[auth]` and `[storage]` are enforced; the rest configure features that
-arrive in later phases.
+**Status: Phase 2.** Every key below is loaded and validated today.
+`[auth]`, `[storage]`, `[embeddings]`, `[retrieval]` and
+`[understanding.taxonomy].extra_categories` are enforced; the remaining
+`[understanding]` and `[consolidation]` keys configure features that
+arrive in Phases 4 and 5.
 
 ## Precedence
 
@@ -78,6 +80,45 @@ Turning it back on later is safe: `default` is a real persisted user, so
 memories written while auth was off keep their owner rather than being
 orphaned.
 
+## Embeddings
+
+```toml
+[embeddings]
+provider  = "local"                    # only "local" works today
+model     = "bge-small-en-v1.5"        # or all-minilm-l6-v2
+cache_dir = "~/.recordagent/models"
+```
+
+Embeddings are computed in-process, on CPU, with no external service —
+that is why the daemon works with no API key and no network.
+
+`cache_dir` is where the ~130 MB model lives. The Docker image bakes it
+in at `/models`, so containers never download at runtime. On bare metal
+the model is fetched on first use; `recordagent warm-models` does it
+ahead of time, which is what you want before taking a host offline.
+
+**The model is pinned per collection.** Vectors from two different models
+are not comparable, so changing `model` against an existing database is
+refused with an actionable error rather than silently returning nonsense
+rankings. Both supported models are 384-dimensional.
+
+## Retrieval
+
+```toml
+[retrieval]
+hybrid                 = true
+default_limit          = 8
+recency_half_life_days = 90
+```
+
+`recency_half_life_days` tunes how much a memory's age discounts it.
+Recency is a *bounded* multiplier — it can reorder comparably relevant
+results but never bury a far more relevant old memory. See the reasoning
+in `src/memories/domain/recall_ranker.rs`.
+
+`default_limit` applies when a search omits `limit`; requests are capped
+at 50 regardless.
+
 ## Storage
 
 ```toml
@@ -85,7 +126,8 @@ orphaned.
 path = "~/.recordagent/data"
 ```
 
-The database lives at `<path>/recordagent.db` and is created, along with
+The database lives at `<path>/recordagent.db`, and the per-user keyword
+indexes at `<path>/text-index/<user-id>/`. Both are created, along with
 any missing parent directories, on first use. Schema migrations run
 automatically at startup and are idempotent. Backup is `cp` of the data
 directory (stop the daemon first, or copy the WAL files with it).

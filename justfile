@@ -38,3 +38,8 @@ test-native:
 
 fmt-native:
     cargo fmt
+
+# Download the embedding model into the shared volume. The test suites
+# need it; the dev image does not bake it in (the release image does).
+warm:
+    docker compose run --rm dev cargo run -q --bin recordagent -- warm-models

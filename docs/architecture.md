@@ -28,12 +28,34 @@ Phase 6; today it states the rules that are already enforced, with
 
 ## Boundary rules
 
-1. `domain` imports only `shared` and std.
+1. `domain` imports `shared`, std, and other contexts' `domain` — never
+   anyone's `application` or `infrastructure`, and never `bootstrap`.
+
+   Cross-context *domain* imports are the published language between
+   contexts. Today that is exactly `identity::domain::UserContext`, which
+   every repository contract takes as its first argument so that reaching
+   another user's data cannot compile. It must live in `identity` for its
+   constructors to stay `pub(in crate::identity)` — moving it to `shared`
+   would force them public and throw the guarantee away. The rule
+   therefore permits domain→domain and holds the line at the layers that
+   actually carry framework and I/O dependencies.
+
+   (This is a Phase 2 amendment. The original rule said "`shared` and std
+   only", written before it was clear that the isolation guarantee
+   requires a domain type to be shared between contexts.)
 2. `application` imports its own `domain` + `shared` + other contexts'
    `application` (never their `infrastructure`).
 3. `infrastructure` implements domain-owned traits; only `bootstrap/` wires
    concrete implementations into use cases (composition root = the only
-   place that sees everything).
+   place that sees everything). One context's infrastructure may not
+   import another's — with a single spelled-out exception:
+   `identity::infrastructure::http` publishes the
+   `Authenticated`/`ReadAccess`/`WriteAccess` extractors, which every
+   other context's routes are built on. That is how a handler becomes
+   unable to run without the right scope; the alternative is each context
+   re-implementing bearer parsing. Identity's repositories and CLI remain
+   off limits, and `check-boundaries.sh` encodes the carve-out narrowly
+   enough to prove it (a Phase 2 amendment, same reasoning as rule 1).
 4. Inbound adapters (axum handlers, rmcp tools, CLI commands) live in the
    infrastructure layer of the context that owns the use case.
 5. Contracts are owned by consumers: e.g. the `Embedder` trait lives in

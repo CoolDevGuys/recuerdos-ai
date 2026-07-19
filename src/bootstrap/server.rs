@@ -3,10 +3,11 @@
 
 use crate::bootstrap::state::{AppState, AuthMode};
 use crate::identity::infrastructure::http::authenticated::Authenticated;
+use crate::memories::infrastructure::http as memories_http;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -43,6 +44,25 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .route("/v1/ping", get(ping))
+        .route(
+            "/v1/memories:direct",
+            post(memories_http::handlers::save_memory),
+        )
+        .route(
+            "/v1/memories/search",
+            post(memories_http::handlers::search_memories),
+        )
+        .route(
+            "/v1/memories/export",
+            get(memories_http::handlers::export_memories),
+        )
+        .route(
+            "/v1/memories/{id}",
+            get(memories_http::handlers::get_memory)
+                .patch(memories_http::handlers::update_memory)
+                .delete(memories_http::handlers::forget_memory),
+        )
+        .route("/v1/audit", get(memories_http::handlers::read_audit))
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,

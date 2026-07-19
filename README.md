@@ -20,10 +20,10 @@ memories strictly. See [project-plan.md](project-plan.md) for the full
 design and [implementation-plan.md](implementation-plan.md) for the phased
 build plan.
 
-> **Status: Phase 1 — Identity.** The daemon boots, loads validated config,
-> and serves multi-user API-key authentication: create users, issue and
-> revoke scoped keys, and every `/v1` route resolves to exactly one user.
-> No memory features yet — those start in Phase 2.
+> **Status: Phase 2 — Memories.** Store memories and search them
+> semantically *and* lexically, fully offline, strictly per user. The LLM
+> understanding pipeline (extraction, labelling, contradiction handling)
+> arrives in Phase 4; today a memory is stored as given.
 
 ## Prerequisites
 
@@ -86,8 +86,41 @@ curl localhost:7070/v1/ping
 # 401 {"error":{"code":"unauthorized","message":"invalid API key"}}
 ```
 
-`/v1/ping` is temporary: it exists to prove authentication end-to-end and
-disappears when Phase 2 adds real routes.
+### Save and recall
+
+```bash
+curl -X POST localhost:7070/v1/memories:direct \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+    "content": "User forbids barrel files / index.ts re-exports",
+    "category": "preference.coding", "tags": ["typescript"]
+  }'
+
+curl -X POST localhost:7070/v1/memories/search \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"query": "how should I structure my typescript imports?"}'
+```
+
+```json
+{"results": [{"content": "User forbids barrel files / index.ts re-exports",
+  "category": "preference.coding", "score": 0.0325,
+  "matched": {"vector_rank": 1, "bm25_rank": 2}}], "took_ms": 9}
+```
+
+The question shares almost no words with the memory — that's the vector
+leg. Ask for `useQuery` and the keyword leg finds the literal token a
+vector would blur into its neighbours. Both run on every search and their
+rankings are fused.
+
+Nothing left the machine: embeddings are computed in-process by a local
+ONNX model baked into the image.
+
+Export everything you've stored, any time:
+
+```bash
+curl "localhost:7070/v1/memories/export" -H "Authorization: Bearer $KEY"
+```
+
+See [docs/api.md](docs/api.md) for the full surface.
 
 Other key commands:
 
@@ -128,7 +161,7 @@ See [docs/configuration.md](docs/configuration.md).
 |---|---|---|
 | 0 — Foundation | Docker dev env, config, HTTP skeleton, CI | ✅ |
 | 1 — Identity | Users, API keys, per-user isolation | ✅ |
-| 2 — Memories | Store + hybrid search (REST) | ⬜ |
+| 2 — Memories | Store + hybrid search (REST) | ✅ |
 | 3 — MCP server | Claude Code / opencode integration | ⬜ |
 | 4 — Understanding | Extraction, labeling, reconciliation | ⬜ |
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ⬜ |

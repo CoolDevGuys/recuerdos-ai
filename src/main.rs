@@ -32,6 +32,14 @@ enum Command {
         #[arg(long, default_value = "recordagent.toml")]
         config: PathBuf,
     },
+    /// Download the local embedding model into the cache directory.
+    ///
+    /// Run at image build time so a container never downloads at
+    /// runtime, or before taking a host offline.
+    WarmModels {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Manage users.
     User {
         #[command(subcommand)]
@@ -55,6 +63,7 @@ async fn main() {
     let result = match cli.command {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
+        Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
     };
@@ -70,15 +79,54 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
 
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
 
-    let identity = bootstrap::wiring::Identity::build(&config).map_err(|e| e.to_string())?;
+    // Both contexts share one database handle: SQLite has a single
+    // writer, and two handles would mean two connections contending for
+    // the same file rather than queueing behind one mutex.
+    let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
+    let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
+        .map_err(|e| e.to_string())?;
+    let memories = bootstrap::memories_wiring::Memories::build(&config, database)
+        .map_err(|e| e.to_string())?;
+
     let state = bootstrap::state::AppState {
         identity: std::sync::Arc::new(identity),
+        memories: std::sync::Arc::new(memories),
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
     };
 
     bootstrap::server::serve(&config.server.host, config.server.port, state)
         .await
         .map_err(|e| format!("server error: {e}"))
+}
+
+fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
+    use memories::domain::embedder::Embedder;
+
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let cache_dir = config.model_cache_dir();
+
+    println!(
+        "downloading embedding model {} into {}",
+        config.embeddings.model,
+        cache_dir.display()
+    );
+
+    let embedder =
+        providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder::load(
+            &config.embeddings.model,
+            cache_dir,
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Embedding something proves the model actually runs, not just that
+    // the files downloaded — a truncated download would otherwise only
+    // surface on the first real request.
+    embedder
+        .embed(&["warm".to_string()])
+        .map_err(|e| e.to_string())?;
+
+    println!("model ready ({} dimensions)", embedder.dimensions());
+    Ok(())
 }
 
 fn run_user(

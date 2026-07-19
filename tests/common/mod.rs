@@ -130,9 +130,16 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// Generous because each spawned app loads the ONNX embedding model at
+/// startup (Phase 2), and the integration suites run in parallel — a
+/// dozen processes doing that at once on a CI box takes far longer than
+/// any one of them does alone. Too tight a bound here shows up as
+/// mystifying flakes rather than as the resource contention it is.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(90);
+
 async fn wait_until_healthy(base_url: &str) {
     let client = reqwest::Client::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
     loop {
         if let Ok(response) = client.get(format!("{base_url}/healthz")).send().await {
             if response.status().is_success() {
@@ -140,7 +147,11 @@ async fn wait_until_healthy(base_url: &str) {
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("recordagent did not become healthy within 10s");
+            panic!(
+                "recordagent did not become healthy within {HEALTH_TIMEOUT:?}. \
+                 If the embedding model is missing this is where it surfaces: \
+                 run `recordagent warm-models` (or `just warm`) first."
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

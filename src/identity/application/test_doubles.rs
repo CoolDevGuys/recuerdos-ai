@@ -155,7 +155,20 @@ fn rebuild(
 /// A hasher that is instant and still asymmetric: the stored value is not
 /// the secret, so a test asserting "the secret is never stored" is a real
 /// assertion. Obviously not secure — it is `cfg(test)` only.
-pub struct FakeApiKeyHasher;
+///
+/// It also counts verifications, which is how the tests prove the
+/// verified-key cache actually skips the expensive path rather than
+/// merely appearing to.
+#[derive(Default)]
+pub struct FakeApiKeyHasher {
+    verify_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl FakeApiKeyHasher {
+    pub fn verify_calls(&self) -> usize {
+        self.verify_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 impl ApiKeyHasher for FakeApiKeyHasher {
     fn hash(&self, secret: &str) -> Result<String> {
@@ -163,6 +176,9 @@ impl ApiKeyHasher for FakeApiKeyHasher {
     }
 
     fn verify(&self, secret: &str, hash: &str) -> Result<bool> {
+        self.verify_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
         if !hash.starts_with("fake-hash:") {
             return Err(RaError::Internal("stored key hash is unreadable".into()));
         }

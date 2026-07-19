@@ -14,18 +14,25 @@ note_violation() {
     fail=1
 }
 
-# Rule 1: domain imports only shared + std (+ its own context's domain).
-# A domain file may not `use crate::<other-context>::` at all, and may not
-# reach into any context's application/infrastructure layer, including its
-# own.
+# Rule 1: a domain may import `shared`, std, and other contexts' *domain*
+# — never anyone's application or infrastructure layer, and never
+# bootstrap.
+#
+# Cross-context domain imports are the published language between
+# contexts. Today that is exactly `identity::domain::UserContext`, which
+# every repository contract takes so that reaching another user's data
+# cannot compile. It has to live in `identity` for its constructors to
+# stay `pub(in crate::identity)`; moving it to `shared` would force them
+# public and throw the guarantee away. So the rule permits domain→domain
+# and holds the line at the layers that actually carry framework and I/O
+# dependencies.
 for ctx in $contexts; do
     dir="src/$ctx/domain"
     [ -d "$dir" ] || continue
     while IFS= read -r match; do
-        note_violation "$match (domain must import only shared + std)"
+        note_violation "$match (domain must not import application, infrastructure or bootstrap)"
     done < <(grep -rnE '^\s*use crate::' "$dir" --include='*.rs' \
-        | grep -vE 'use crate::shared(::|;| )' \
-        | grep -E "use crate::($(echo "$contexts" | tr ' ' '|')|bootstrap)::" || true)
+        | grep -E "use crate::(bootstrap(::|;| )|($(echo "$contexts" | tr ' ' '|'))::(application|infrastructure)(::|;| ))" || true)
 done
 
 # Rule 2: application imports its own domain + shared + other contexts'
@@ -41,6 +48,16 @@ done
 
 # Rule 3: only bootstrap wires concrete infrastructure across contexts —
 # infrastructure modules must not import another context's infrastructure.
+#
+# One deliberate exception, spelled out rather than left as a general
+# loophole: `identity::infrastructure::http` publishes the
+# Authenticated/ReadAccess/WriteAccess extractors, and every other
+# context's routes are built on them. That is the mechanism by which a
+# handler cannot run without the right scope — putting the check in the
+# signature instead of in a line someone must remember to write. The
+# alternative (every context re-implementing bearer parsing) is worse.
+# Anything else in identity's infrastructure — its repositories, its CLI
+# — is still off limits.
 for ctx in $contexts; do
     dir="src/$ctx/infrastructure"
     [ -d "$dir" ] || continue
@@ -48,7 +65,8 @@ for ctx in $contexts; do
         note_violation "$match (infrastructure must not import another context's infrastructure)"
     done < <(grep -rnE '^\s*use crate::' "$dir" --include='*.rs' \
         | grep -E "use crate::($(echo "$contexts" | tr ' ' '|'))::infrastructure(::|;| )" \
-        | grep -v "use crate::${ctx}::infrastructure" || true)
+        | grep -v "use crate::${ctx}::infrastructure" \
+        | grep -v 'use crate::identity::infrastructure::http::' || true)
 done
 
 # Rule (isolation): only the identity context may mint a `UserContext`.
