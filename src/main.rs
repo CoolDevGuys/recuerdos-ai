@@ -32,6 +32,15 @@ enum Command {
         #[arg(long, default_value = "recordagent.toml")]
         config: PathBuf,
     },
+    /// Serve MCP over stdio, for an MCP client to spawn.
+    ///
+    /// Forwards to a running daemon; set RECORDAGENT_API_KEY (and
+    /// RECORDAGENT_URL if it isn't on localhost:7070).
+    Mcp {
+        /// Recorded as the source of memories this client saves.
+        #[arg(long, default_value = "mcp")]
+        client: String,
+    },
     /// Download the local embedding model into the cache directory.
     ///
     /// Run at image build time so a container never downloads at
@@ -63,6 +72,7 @@ async fn main() {
     let result = match cli.command {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
+        Command::Mcp { client } => run_mcp(&client).await,
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
@@ -97,6 +107,15 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     bootstrap::server::serve(&config.server.host, config.server.port, state)
         .await
         .map_err(|e| format!("server error: {e}"))
+}
+
+async fn run_mcp(client_name: &str) -> Result<(), String> {
+    // Deliberately no tracing init: stdout is the MCP protocol channel,
+    // and the subscriber's default writer is stdout. The shim writes
+    // diagnostics to stderr itself.
+    memories::infrastructure::mcp::stdio_shim::serve_stdio(client_name)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {

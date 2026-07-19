@@ -2,6 +2,7 @@
 //! handlers, MCP tools — everything that touches the outside world.
 
 pub mod http;
+pub mod mcp;
 pub mod sqlite_memory_repository;
 pub mod sqlite_vector_index;
 pub mod tantivy_text_index;
