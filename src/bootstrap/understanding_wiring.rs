@@ -6,6 +6,7 @@
 //! local Ollama is a config edit, not a code change.
 
 use crate::bootstrap::config::AppConfig;
+use crate::bootstrap::memories_wiring::Memories;
 use crate::providers::infrastructure::chat::anthropic_chat_model::AnthropicChatModel;
 use crate::providers::infrastructure::chat::ollama_chat_model::OllamaChatModel;
 use crate::providers::infrastructure::chat::openai_compat_chat_model::OpenAiCompatChatModel;
@@ -14,8 +15,18 @@ use crate::providers::infrastructure::chat::{
     anthropic_chat_model, ollama_chat_model, openai_compat_chat_model, transport,
 };
 use crate::shared::error::{RaError, Result};
+use crate::shared::sqlite::SqliteDatabase;
+use crate::understanding::application::candidate_extractor::CandidateExtractor;
+use crate::understanding::application::memory_ingestor::MemoryIngestor;
+use crate::understanding::application::memory_reconciler::MemoryReconciler;
+use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
 use crate::understanding::domain::chat_model::ChatModel;
+use crate::understanding::domain::ingest_job::JobQueue;
+use crate::understanding::domain::ingest_pipeline::IngestPipeline;
+use crate::understanding::domain::taxonomy::Taxonomy;
+use crate::understanding::infrastructure::sqlite_job_queue::SqliteJobQueue;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Builds the configured chat model, or `None` when understanding is off.
 ///
@@ -78,6 +89,70 @@ pub fn build_chat_model(config: &AppConfig) -> Result<Option<Arc<dyn ChatModel>>
     );
 
     Ok(Some(Arc::new(RetryingChatModel::new(model))))
+}
+
+/// The understanding context as the rest of the process sees it.
+///
+/// Both fields exist in every mode. That uniformity is the point of the
+/// `IngestPipeline` trait: an installation without a provider still gets
+/// jobs, job ids, and the same endpoints — it just gets a pipeline that
+/// stores content verbatim. Turning understanding on is then a config
+/// edit, and no client notices except that the memories get better.
+pub struct Understanding {
+    pub queue: Arc<dyn JobQueue>,
+    pub pipeline: Arc<dyn IngestPipeline>,
+    /// Whether a language model is behind the pipeline. Reported on the
+    /// job so a caller can tell "stored verbatim" from "extracted".
+    pub enabled: bool,
+    /// Pinged after an enqueue so a worker picks the job up immediately
+    /// rather than on its next poll.
+    pub wake: Arc<Notify>,
+}
+
+impl Understanding {
+    pub fn build(
+        config: &AppConfig,
+        database: Arc<SqliteDatabase>,
+        memories: &Memories,
+    ) -> Result<Self> {
+        let model = build_chat_model(config)?;
+        let taxonomy = Arc::new(Taxonomy::new(
+            config.understanding.taxonomy.extra_categories.clone(),
+        ));
+
+        let pipeline: Arc<dyn IngestPipeline> = match model {
+            Some(model) => Arc::new(MemoryIngestor::new(
+                Arc::new(CandidateExtractor::new(Arc::clone(&model), taxonomy)),
+                Arc::new(MemoryReconciler::new(
+                    Arc::clone(&memories.recaller),
+                    Arc::clone(&memories.saver),
+                    Arc::clone(&memories.forgetter),
+                    Arc::clone(&memories.repository),
+                    model,
+                    config.understanding.reconcile,
+                )),
+            )),
+            None => Arc::new(VerbatimIngestor::new(
+                Arc::clone(&memories.saver),
+                config.understanding.taxonomy.extra_categories.clone(),
+            )),
+        };
+
+        let enabled = config.understanding.provider != "none";
+        if !enabled {
+            tracing::info!(
+                "[understanding].provider = \"none\": submitted content is stored \
+                 verbatim. Set a provider to enable extraction and reconciliation."
+            );
+        }
+
+        Ok(Self {
+            queue: Arc::new(SqliteJobQueue::new(database)),
+            pipeline,
+            enabled,
+            wake: Arc::new(Notify::new()),
+        })
+    }
 }
 
 #[cfg(test)]

@@ -257,10 +257,9 @@ async fn unacceptable_content_fails_immediately_rather_than_burning_attempts() {
     let context = harness.alex.clone();
     eventually(
         || {
-            queue
-                .find(&context, id)
-                .unwrap()
-                .is_some_and(|job| job.status.is_terminal())
+            queue.find(&context, id).unwrap().is_some_and(|job| {
+                matches!(job.status, JobStatus::Succeeded | JobStatus::DeadLetter)
+            })
         },
         "the job to fail",
     )

@@ -31,7 +31,7 @@ widens that visibility or calls the constructors from outside `identity`
 reach another's data? It covers key resolution, credential forgery and
 revocation blast radius, plus — since Phase 2 — memory recall, reads by
 id, edits, deletes, export and the audit trail. Every later phase extends
-it: Phase 3 for the MCP tools, Phase 4 for ingestion.
+it: Phase 3 for the MCP tools, Phase 4 for ingest jobs.
 
 Two cases are worth calling out because they defeat the bugs a casual
 test would miss:
@@ -116,9 +116,20 @@ Deliberately very little.
 
 ## Data locality
 
-Nothing leaves the machine in Phase 1 — no telemetry, no update checks, no
-LLM providers. (Those arrive in Phase 4 and are opt-in:
-`[understanding].provider` defaults to `none`.)
+No telemetry, no update checks. Embeddings run locally by default, so
+storage and search never touch the network.
+
+The one thing that can leave the machine is the understanding pipeline,
+and it is opt-in: `[understanding].provider` defaults to `none`. When you
+do turn it on, what gets sent is the content you submitted plus, during
+reconciliation, the handful of existing memories most similar to it — so
+enabling a hosted provider means your memories are sent to it. The
+`ollama` provider exists so that need not be true: it keeps the whole
+pipeline on your own hardware.
+
+API keys are never read from config files, only from the environment
+variable `[understanding].api_key_env` names. A key pasted into
+`recordagent.toml` gets committed eventually.
 
 ## Threat model
 

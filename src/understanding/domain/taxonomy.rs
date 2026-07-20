@@ -57,10 +57,6 @@ impl Taxonomy {
             .collect()
     }
 
-    pub fn extras(&self) -> &[String] {
-        &self.extras
-    }
-
     /// The taxonomy as prompt text: one line per category, with the
     /// guidance from `category.rs` attached.
     ///
@@ -222,7 +218,14 @@ mod tests {
     fn extras_are_normalised_so_config_casing_does_not_matter() {
         let taxonomy = Taxonomy::new(vec!["  Fact.Homelab  ".to_string(), "   ".to_string()]);
 
-        assert_eq!(taxonomy.extras(), ["fact.homelab"]);
         assert!(taxonomy.resolve("fact.homelab").exact);
+        assert_eq!(taxonomy.names(), {
+            let mut expected: Vec<String> = DEFAULT_CATEGORIES
+                .iter()
+                .map(|c| c.as_str().to_string())
+                .collect();
+            expected.push("fact.homelab".to_string());
+            expected
+        });
     }
 }

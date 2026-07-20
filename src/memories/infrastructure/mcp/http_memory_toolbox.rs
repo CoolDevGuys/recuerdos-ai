@@ -9,7 +9,7 @@
 //! privileged back door — the shim is subject to the same authentication
 //! and the same per-user scoping.
 
-use super::memory_toolbox::{MemoryToolbox, RecallRequest, SaveRequest, ToolMemory};
+use super::memory_toolbox::{MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest, ToolMemory};
 use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -78,10 +78,14 @@ impl HttpMemoryToolbox {
 
 #[async_trait::async_trait]
 impl MemoryToolbox for HttpMemoryToolbox {
-    async fn save(&self, request: SaveRequest) -> Result<ToolMemory> {
+    async fn save(&self, request: SaveRequest) -> Result<SaveOutcome> {
+        // `wait` rather than the 202 path: an MCP tool has to tell the
+        // agent what happened in this turn, and "queued, ask again later"
+        // is not something an agent can act on.
         let mut body = json!({
             "content": request.content,
             "tags": request.tags,
+            "wait": true,
         });
         if let Some(category) = request.category {
             body["category"] = json!(category);
@@ -90,10 +94,35 @@ impl MemoryToolbox for HttpMemoryToolbox {
             body["client"] = json!(client);
         }
 
-        let saved = self
-            .request(reqwest::Method::POST, "/v1/memories:direct", Some(body))
+        let result = self
+            .request(reqwest::Method::POST, "/v1/memories", Some(body))
             .await?;
-        parse_memory(&saved)
+
+        let understanding = result["understanding"].as_bool().unwrap_or(false);
+        let ids: Vec<String> = result["memory_ids"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect();
+
+        // The ingest response carries ids; the tool wants to show the
+        // stored wording, which extraction may have rewritten. Fetching
+        // is a handful of localhost round trips and worth it — an agent
+        // that reports the user's phrasing when we stored something else
+        // is quietly lying.
+        let mut memories = Vec::with_capacity(ids.len());
+        for id in ids {
+            let memory = self
+                .request(reqwest::Method::GET, &format!("/v1/memories/{id}"), None)
+                .await?;
+            memories.push(parse_memory(&memory)?);
+        }
+
+        Ok(SaveOutcome {
+            memories,
+            understanding,
+        })
     }
 
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>> {

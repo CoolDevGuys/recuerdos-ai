@@ -1,6 +1,6 @@
 # MCP server
 
-**Status: Phase 3.** Three tools and one resource, over stdio.
+**Status: Phase 4.** Three tools and one resource, over stdio.
 
 RecordAgent speaks the [Model Context Protocol](https://modelcontextprotocol.io),
 so any MCP client — Claude Code, opencode, Hermes Agent, MCP Inspector —
@@ -67,11 +67,44 @@ Stores a durable fact, preference, or decision.
 ```
 
 ```
-Saved as [preference.coding] (id 019f7c5a-…). It will be available in future sessions.
+Saved as [preference.coding] (id 019f7c5a-…): User forbids barrel files and index.ts re-exports
+It will be available in future sessions.
 ```
 
-`category` is optional and defaults to `fact.project`; see the
-[taxonomy](api.md#categories).
+`category` is optional; see the [taxonomy](api.md#categories). It is a
+hint rather than an instruction — with a provider configured, extraction
+may find several memories in one submission and they need not all share it.
+
+**What the tool actually does depends on `[understanding].provider`.**
+With one configured, `memory_save` runs the full pipeline synchronously
+(it uses `wait: true` on [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)),
+which means it can answer with more than one memory:
+
+```
+Saved 2 memories:
+
+- [fact.project] The backend runs on Hetzner (id 019f7c61-…)
+- [preference.coding] User requires table-driven tests in Go (id 019f7c62-…)
+
+They will be available in future sessions.
+```
+
+…or with none:
+
+```
+Nothing new was stored — either this is already known, or there was nothing
+in it that stays true beyond this conversation. Do not tell the user it was
+saved.
+```
+
+That last one is why the tool does not simply return "saved". A model told
+"saved" after a no-op goes on to tell the user something untrue, and the
+user only finds out much later when the memory isn't there.
+
+It is also where reconciliation earns its keep: if what the agent saves
+contradicts something already stored, the old memory is superseded rather
+than kept alongside it. Without a provider the tool stores content
+verbatim and this section reduces to the single-memory case.
 
 ### `memory_recall`
 
@@ -195,3 +228,8 @@ implementation rather than a second copy of the tools.
 
 **Prompts.** No MCP prompts are exposed. The server's `instructions`
 field carries the "read the profile first" guidance instead.
+
+**`session_distill`.** Submitting a whole transcript for distillation is
+Phase 5 work. Until then, a session-end hook can POST the summary to
+[`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content), which
+runs the same extraction pipeline over it.

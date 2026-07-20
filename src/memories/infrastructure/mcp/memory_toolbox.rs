@@ -45,6 +45,21 @@ pub struct SaveRequest {
     pub client: Option<String>,
 }
 
+/// What a save actually did.
+///
+/// Not a single `ToolMemory`, because with understanding enabled one
+/// submission can become several memories, replace an existing one, or —
+/// when the store already knows it — produce none at all. An agent that
+/// was told "saved" after a NOOP would report something untrue to the
+/// user.
+#[derive(Debug, Clone)]
+pub struct SaveOutcome {
+    pub memories: Vec<ToolMemory>,
+    /// Whether a language model extracted and reconciled, or the content
+    /// was stored as sent.
+    pub understanding: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RecallRequest {
     pub query: String,
@@ -59,7 +74,7 @@ pub struct RecallRequest {
 /// do.
 #[async_trait::async_trait]
 pub trait MemoryToolbox: Send + Sync {
-    async fn save(&self, request: SaveRequest) -> Result<ToolMemory>;
+    async fn save(&self, request: SaveRequest) -> Result<SaveOutcome>;
 
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>>;
 

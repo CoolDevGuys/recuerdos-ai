@@ -47,7 +47,6 @@ mod tests {
     use crate::identity::application::test_doubles::{InMemoryUserRepository, fixed_clock};
     use crate::identity::domain::scope::Scope;
     use crate::identity::domain::user::User;
-    use crate::shared::clock::Clock;
 
     #[test]
     fn resolves_a_stored_user_to_a_read_write_context() {

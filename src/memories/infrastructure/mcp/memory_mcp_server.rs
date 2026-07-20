@@ -96,7 +96,7 @@ impl MemoryMcpServer {
         &self,
         Parameters(params): Parameters<SaveParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let saved = self
+        let outcome = self
             .toolbox
             .save(SaveRequest {
                 content: params.content,
@@ -108,7 +108,7 @@ impl MemoryMcpServer {
             .map_err(to_mcp_error)?;
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            tool_text::render_saved(&saved),
+            tool_text::render_saved(&outcome),
         )]))
     }
 

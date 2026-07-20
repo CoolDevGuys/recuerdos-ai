@@ -53,15 +53,6 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            JobStatus::Pending => "pending",
-            JobStatus::Running => "running",
-            JobStatus::Succeeded => "succeeded",
-            JobStatus::DeadLetter => "dead_letter",
-        }
-    }
-
     /// Rebuilds from storage. An unrecognised value means the row was
     /// written by a newer version; treating it as pending would re-run
     /// work that may already have happened, so it reads as running —
@@ -73,10 +64,6 @@ impl JobStatus {
             "dead_letter" => JobStatus::DeadLetter,
             _ => JobStatus::Running,
         }
-    }
-
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, JobStatus::Succeeded | JobStatus::DeadLetter)
     }
 }
 
@@ -153,15 +140,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn statuses_round_trip() {
-        for status in [
-            JobStatus::Pending,
-            JobStatus::Running,
-            JobStatus::Succeeded,
-            JobStatus::DeadLetter,
-        ] {
-            assert_eq!(JobStatus::from_stored(status.as_str()), status);
-        }
+    fn the_stored_spellings_are_the_ones_the_schema_writes() {
+        // Asserted against literals rather than against a helper, because
+        // these strings are what `V3__jobs.sql` and the queue's SQL put in
+        // the column. A helper here would only prove it agreed with itself.
+        assert_eq!(JobStatus::from_stored("pending"), JobStatus::Pending);
+        assert_eq!(JobStatus::from_stored("running"), JobStatus::Running);
+        assert_eq!(JobStatus::from_stored("succeeded"), JobStatus::Succeeded);
+        assert_eq!(JobStatus::from_stored("dead_letter"), JobStatus::DeadLetter);
     }
 
     #[test]
@@ -169,14 +155,6 @@ mod tests {
         // A row written by a newer version must not be re-run: at worst
         // it stalls until reclaimed, rather than duplicating memories.
         assert_eq!(JobStatus::from_stored("quantum"), JobStatus::Running);
-    }
-
-    #[test]
-    fn only_succeeded_and_dead_letter_are_terminal() {
-        assert!(JobStatus::Succeeded.is_terminal());
-        assert!(JobStatus::DeadLetter.is_terminal());
-        assert!(!JobStatus::Pending.is_terminal());
-        assert!(!JobStatus::Running.is_terminal());
     }
 
     #[test]

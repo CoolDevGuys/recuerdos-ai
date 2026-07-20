@@ -60,11 +60,6 @@ impl ScriptedChatModel {
         self
     }
 
-    /// Every request made so far, in order.
-    pub fn requests(&self) -> Vec<StructuredRequest> {
-        self.requests.lock().unwrap().clone()
-    }
-
     pub fn call_count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }

@@ -4,6 +4,7 @@
 use crate::bootstrap::state::{AppState, AuthMode};
 use crate::identity::infrastructure::http::authenticated::Authenticated;
 use crate::memories::infrastructure::http as memories_http;
+use crate::understanding::infrastructure::http as understanding_http;
 use axum::Json;
 use axum::Router;
 use axum::http::StatusCode;
@@ -44,6 +45,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .route("/v1/ping", get(ping))
+        // Raw content in, understood memories out — asynchronously.
+        .route("/v1/memories", post(understanding_http::handlers::ingest))
+        .route("/v1/jobs/{id}", get(understanding_http::handlers::get_job))
+        // The escape hatch: store exactly this, no pipeline. For a caller
+        // that has already decided what to remember.
         .route(
             "/v1/memories:direct",
             post(memories_http::handlers::save_memory),

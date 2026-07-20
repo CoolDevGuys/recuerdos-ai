@@ -27,7 +27,7 @@
 //! the agent's context window, and JSON spends tokens on punctuation the
 //! model does not need.
 
-use super::memory_toolbox::ToolMemory;
+use super::memory_toolbox::{SaveOutcome, ToolMemory};
 
 pub const PROFILE_DESCRIPTION: &str = "\
 A short digest of who this user is: their standing preferences, \
@@ -68,11 +68,48 @@ pub fn render_recall(memories: &[ToolMemory]) -> String {
     output.trim_end().to_string()
 }
 
-pub fn render_saved(memory: &ToolMemory) -> String {
-    format!(
-        "Saved as [{}] (id {}). It will be available in future sessions.",
-        memory.category, memory.id
-    )
+/// What a save did, phrased so an agent can repeat it to the user
+/// without overstating it.
+///
+/// The interesting case is zero memories. With understanding enabled that
+/// means the store already knew this, or there was nothing durable in it
+/// — both legitimate, and both very different from "saved". An agent told
+/// "saved" after a NOOP goes on to tell the user something untrue.
+pub fn render_saved(outcome: &SaveOutcome) -> String {
+    if outcome.memories.is_empty() {
+        return if outcome.understanding {
+            "Nothing new was stored — either this is already known, or there was              nothing in it that stays true beyond this conversation. Do not tell the              user it was saved."
+                .to_string()
+        } else {
+            "Nothing was stored.".to_string()
+        };
+    }
+
+    if outcome.memories.len() == 1 {
+        let memory = &outcome.memories[0];
+        return format!(
+            "Saved as [{}] (id {}): {}
+It will be available in future sessions.",
+            memory.category,
+            memory.id,
+            memory.content.replace('\n', " ")
+        );
+    }
+
+    // Several memories from one submission means extraction split it.
+    // Showing each is how the agent learns that its one sentence became
+    // three separately-recallable facts.
+    let mut output = format!("Saved {} memories:\n\n", outcome.memories.len());
+    for memory in &outcome.memories {
+        output.push_str(&format!(
+            "- [{}] {} (id {})\n",
+            memory.category,
+            memory.content.replace('\n', " "),
+            memory.id
+        ));
+    }
+    output.push_str("\nThey will be available in future sessions.");
+    output
 }
 
 /// The first half of `memory_forget`: what would be deleted, and how to

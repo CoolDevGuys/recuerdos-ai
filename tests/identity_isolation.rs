@@ -327,3 +327,84 @@ async fn the_audit_trail_is_per_user() {
         "another user's mutations appeared in this audit trail: {sam_audit}"
     );
 }
+
+#[tokio::test]
+async fn an_ingest_job_is_invisible_to_another_user() {
+    // Job ids are uuids, so guessing one is not the realistic attack —
+    // but a status endpoint that answered for any id would leak the shape
+    // of someone else's activity: what they submit, how often, and what
+    // failed.
+    let users = two_users().await;
+    let http = reqwest::Client::new();
+
+    let accepted: serde_json::Value = http
+        .post(format!("{}/v1/memories", users.app.base_url))
+        .bearer_auth(&users.alex_key)
+        .json(&serde_json::json!({"content": "alex's private submission"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let job_id = accepted["job_id"].as_str().expect("a job id");
+
+    let as_sam = http
+        .get(format!("{}/v1/jobs/{job_id}", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        as_sam.status(),
+        404,
+        "another user could read this job's status"
+    );
+
+    // And the owner still can — otherwise the assertion above would pass
+    // for the boring reason that the route is broken.
+    let as_alex = http
+        .get(format!("{}/v1/jobs/{job_id}", users.app.base_url))
+        .bearer_auth(&users.alex_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(as_alex.status(), 200);
+}
+
+#[tokio::test]
+async fn memories_created_by_ingestion_belong_to_the_submitter() {
+    // The pipeline writes on behalf of a user the request is long gone
+    // for — a background worker resolves the context from the job row.
+    // If that ever resolved to the wrong user, this is where it shows.
+    let users = two_users().await;
+    let http = reqwest::Client::new();
+
+    http.post(format!("{}/v1/memories", users.app.base_url))
+        .bearer_auth(&users.alex_key)
+        .json(&serde_json::json!({
+            "content": "alex ingested this through the pipeline",
+            "wait": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let sam_results: serde_json::Value = http
+        .post(format!("{}/v1/memories/search", users.app.base_url))
+        .bearer_auth(&users.sam_key)
+        .json(&serde_json::json!({"query": "ingested pipeline", "limit": 20}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert!(
+        sam_results["results"].as_array().unwrap().is_empty(),
+        "a pipeline-written memory leaked to another user: {sam_results}"
+    );
+}

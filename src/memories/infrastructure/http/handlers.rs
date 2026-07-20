@@ -18,6 +18,7 @@ use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::MemoryEdit;
 use crate::memories::domain::recall_query::RecallQuery;
+use crate::shared::blocking::blocking;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use axum::Json;
@@ -227,14 +228,4 @@ fn parse_id(raw: &str) -> Result<MemoryId> {
     // A malformed id is the caller's mistake, not a missing resource.
     MemoryId::from_str(raw)
         .map_err(|_| RaError::Validation(format!("{raw:?} is not a valid memory id")))
-}
-
-async fn blocking<T, F>(work: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    tokio::task::spawn_blocking(work)
-        .await
-        .map_err(|e| RaError::Internal(format!("request task failed: {e}")))?
 }

@@ -28,19 +28,33 @@ impl TestApp {
     /// dir, and blocks (async) until `/healthz` responds or panics after
     /// a 10s timeout.
     pub async fn spawn() -> Self {
+        Self::spawn_with(&[]).await
+    }
+
+    /// Spawns with extra `RECORDAGENT_*` settings.
+    ///
+    /// Config reaches the daemon only through its environment, so this is
+    /// how a test runs the same binary in a different mode — pointing
+    /// `[understanding]` at a mock provider, for instance, which is what
+    /// makes an end-to-end pipeline test possible without a real model.
+    pub async fn spawn_with(env: &[(&str, &str)]) -> Self {
         let port = free_port();
         let data_dir = tempfile::tempdir().expect("create tmp data dir");
 
-        let child = Command::new(env!("CARGO_BIN_EXE_recordagent"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_recordagent"));
+        command
             .arg("serve")
             .env("RECORDAGENT_SERVER__HOST", "127.0.0.1")
             .env("RECORDAGENT_SERVER__PORT", port.to_string())
             .env("RECORDAGENT_STORAGE__PATH", data_dir.path())
             .env_remove("RECORDAGENT_LOG")
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn recordagent binary");
+            .stderr(Stdio::piped());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let child = command.spawn().expect("failed to spawn recordagent binary");
 
         let base_url = format!("http://127.0.0.1:{port}");
         wait_until_healthy(&base_url).await;

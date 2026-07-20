@@ -281,50 +281,46 @@ async fn an_unreachable_provider_is_retryable() {
 async fn each_provider_authenticates_the_way_its_api_expects() {
     // Anthropic uses x-api-key, OpenAI-compatible servers use a bearer
     // token, and Ollama uses neither. Getting this wrong produces a 401
-    // that looks like a bad key rather than a bad client.
-    let cases: Vec<(&str, &str, Box<dyn Fn(&MockServer) -> Mock>)> = vec![
-        (
-            "anthropic",
-            "/v1/messages",
-            Box::new(|_| {
-                Mock::given(method("POST"))
-                    .and(path("/v1/messages"))
-                    .and(header("x-api-key", "test-key"))
-                    .and(header("anthropic-version", "2023-06-01"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                        "stop_reason": "tool_use",
-                        "content": [{"type": "tool_use", "input": {"ok": true}}],
-                    })))
-            }),
-        ),
-        (
-            "openai-compat",
-            "/chat/completions",
-            Box::new(|_| {
-                Mock::given(method("POST"))
-                    .and(path("/chat/completions"))
-                    .and(header("authorization", "Bearer test-key"))
-                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                        "choices": [{"message": {"content": "{\"ok\": true}"}}]
-                    })))
-            }),
-        ),
-    ];
+    // that looks like a bad key rather than a bad client, so each mock
+    // below *requires* the header and the call fails without it.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("x-api-key", "test-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "stop_reason": "tool_use",
+            "content": [{"type": "tool_use", "input": {"ok": true}}],
+        })))
+        .mount(&server)
+        .await;
+    build("anthropic", &server.uri())
+        .complete_structured(&request())
+        .await
+        .expect("anthropic did not send x-api-key and anthropic-version");
 
-    for (name, _path, build_mock) in cases {
-        let server = MockServer::start().await;
-        build_mock(&server).mount(&server).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": OK_JSON}}]
+        })))
+        .mount(&server)
+        .await;
+    build("openai-compat", &server.uri())
+        .complete_structured(&request())
+        .await
+        .expect("openai-compat did not send a bearer token");
+}
 
-        let provider = providers()
-            .into_iter()
-            .find(|p| p.name == name)
-            .expect("known provider");
-
-        (provider.build)(&server.uri())
-            .complete_structured(&request())
-            .await
-            .unwrap_or_else(|e| panic!("{name} did not send the expected credentials: {e}"));
-    }
+/// The named provider, built against `base`.
+fn build(name: &str, base: &str) -> Arc<dyn ChatModel> {
+    let provider = providers()
+        .into_iter()
+        .find(|provider| provider.name == name)
+        .unwrap_or_else(|| panic!("no provider named {name}"));
+    (provider.build)(base)
 }
 
 #[tokio::test]
