@@ -76,13 +76,13 @@ done
 # the call through authentication. See src/identity/domain/user_context.rs.
 while IFS= read -r match; do
     note_violation "$match (only crate::identity may construct a UserContext)"
-done < <(grep -rnE 'UserContext::(authenticated|unauthenticated)\b' src --include='*.rs' \
+done < <(grep -rnE 'UserContext::(authenticated|unauthenticated|background)\b' src --include='*.rs' \
     | grep -v '^src/identity/' || true)
 
 while IFS= read -r match; do
     note_violation "$match (UserContext constructors must stay pub(in crate::identity))"
 done < <(grep -rnE '^\s*pub(\s|\()' src/identity/domain/user_context.rs \
-    | grep -E 'fn (authenticated|unauthenticated)\b' \
+    | grep -E 'fn (authenticated|unauthenticated|background)\b' \
     | grep -v 'pub(in crate::identity)' || true)
 
 # Rule (naming): the suffixes *Port, *Service, *Manager, *Helper are banned
