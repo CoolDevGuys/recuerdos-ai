@@ -54,6 +54,17 @@ wiremock = "0.6"
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
 
+# Debug builds carry full DWARF by default, which for this dependency tree
+# (tantivy, ONNX, rustls, axum) meant a ~10 GB `target/`. That is enough to
+# exhaust a CI runner's disk, and when it does the failure is a linker
+# `SIGBUS` — which reads as a toolchain problem rather than a full disk.
+#
+# Line tables keep file and line numbers in panic backtraces, which is what
+# a test failure actually needs. Stepping through a debugger loses local
+# variables; if you need that, override this locally.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = true
