@@ -20,10 +20,11 @@ memories strictly. See [project-plan.md](project-plan.md) for the full
 design and [implementation-plan.md](implementation-plan.md) for the phased
 build plan.
 
-> **Status: Phase 2 — Memories.** Store memories and search them
-> semantically *and* lexically, fully offline, strictly per user. The LLM
-> understanding pipeline (extraction, labelling, contradiction handling)
-> arrives in Phase 4; today a memory is stored as given.
+> **Status: Phase 3 — MCP.** Claude Code and opencode can read and write
+> your memories over MCP. Storage is hybrid semantic + keyword search,
+> fully offline, strictly per user. The LLM understanding pipeline
+> (extraction, labelling, contradiction handling) arrives in Phase 4;
+> today a memory is stored as given.
 
 ## Prerequisites
 
@@ -122,6 +123,39 @@ curl "localhost:7070/v1/memories/export" -H "Authorization: Bearer $KEY"
 
 See [docs/api.md](docs/api.md) for the full surface.
 
+### Connect your agent
+
+Claude Code, opencode and any other MCP client talk to the same store:
+
+```json
+{
+  "mcpServers": {
+    "recordagent": {
+      "command": "recordagent",
+      "args": ["mcp", "--client", "claude-code"],
+      "env": { "RECORDAGENT_API_KEY": "ra_live_…" }
+    }
+  }
+}
+```
+
+Then, in one session:
+
+> Remember that I forbid barrel files — no index.ts re-exports.
+
+And in a **new** session, in a **different** project:
+
+> How should I structure imports here?
+
+It recalls the preference without being told. Three tools
+(`memory_save`, `memory_recall`, `memory_forget`) plus a
+`memory://profile` resource that gives an agent your standing
+preferences before it asks anything.
+
+See [docs/mcp.md](docs/mcp.md) and the
+[Claude Code](docs/integrations/claude-code.md) /
+[opencode](docs/integrations/opencode.md) recipes.
+
 Other key commands:
 
 ```bash
@@ -162,7 +196,7 @@ See [docs/configuration.md](docs/configuration.md).
 | 0 — Foundation | Docker dev env, config, HTTP skeleton, CI | ✅ |
 | 1 — Identity | Users, API keys, per-user isolation | ✅ |
 | 2 — Memories | Store + hybrid search (REST) | ✅ |
-| 3 — MCP server | Claude Code / opencode integration | ⬜ |
+| 3 — MCP server | Claude Code / opencode integration | ✅ |
 | 4 — Understanding | Extraction, labeling, reconciliation | ⬜ |
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ⬜ |
 | 6 — Release | SDK, docs, packaging | ⬜ |

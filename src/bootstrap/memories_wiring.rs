@@ -7,6 +7,7 @@ use crate::memories::application::memory_finder::MemoryFinder;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
 use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_updater::MemoryUpdater;
+use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_ranker::RecallRanker;
@@ -31,6 +32,7 @@ pub struct Memories {
     pub updater: Arc<MemoryUpdater>,
     pub forgetter: Arc<MemoryForgetter>,
     pub exporter: Arc<MemoryExporter>,
+    pub profile_assembler: Arc<ProfileAssembler>,
     /// Exposed for the audit endpoint, which reads the trail directly
     /// rather than through a use case of its own.
     pub repository: Arc<dyn MemoryRepository>,
@@ -115,6 +117,10 @@ impl Memories {
                 Arc::clone(&text),
             )),
             exporter: Arc::new(MemoryExporter::new(Arc::clone(&repository))),
+            profile_assembler: Arc::new(ProfileAssembler::new(
+                Arc::clone(&repository),
+                Arc::clone(&clock),
+            )),
             repository,
             extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,

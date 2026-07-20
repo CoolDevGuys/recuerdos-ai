@@ -3,6 +3,38 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.3.0-alpha — Phase 3: MCP server
+
+Claude Code, opencode and any other MCP client can now read and write the
+same memory store.
+
+- **Three tools** — `memory_save`, `memory_recall`, `memory_forget` — and
+  the **`memory://profile` resource**, served by `recordagent mcp`.
+- **The stdio server is a shim**, forwarding to the daemon over the same
+  authenticated REST API any client uses. Four editor windows would
+  otherwise mean four resident embedding models and four writers on one
+  SQLite file.
+- **Tool descriptions carry the trigger logic.** A model decides from the
+  description alone whether to save something, so they name concrete
+  phrasings ("I prefer", "we decided") *and* say when not to call —
+  without which a memory store fills with transient task chatter.
+- **`memory_forget` is two-step and the server enforces it**: ids without
+  `confirm: true` delete nothing, and the candidate listing states
+  plainly that nothing has been deleted yet.
+- **`GET /v1/profile`** exposes the same digest over REST, which is what
+  the shim reads and what a Claude Code SessionStart hook can curl.
+- Integration recipes for [Claude Code](integrations/claude-code.md)
+  (including SessionStart and PreCompact hooks) and
+  [opencode](integrations/opencode.md).
+
+Deferred: the streamable-HTTP MCP transport. rmcp's session factory
+cannot see request headers, so per-user auth would need a per-call path
+that complicates keeping tool definitions identical across transports —
+and every target client speaks stdio. The `MemoryToolbox` trait keeps
+adding it to one new implementation.
+
+308 tests.
+
 ## v0.2.0-alpha — Phase 2: Memories
 
 Store memories and search them semantically and lexically, fully offline,

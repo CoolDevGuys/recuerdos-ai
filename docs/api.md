@@ -1,6 +1,8 @@
 # REST API
 
-**Status: Phase 2.** Authentication and the memory endpoints are live.
+**Status: Phase 3.** Authentication, the memory endpoints and the profile
+are live; agents can also reach all of it over
+[MCP](mcp.md).
 The async understanding pipeline (`POST /v1/memories`) arrives in Phase 4.
 See [implementation-plan.md](../implementation-plan.md) for what lands when.
 
@@ -191,6 +193,16 @@ Requires `read`. `?format=markdown` (default) or `?format=json`, plus
 
 Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
+
+### `GET /v1/profile`
+
+Requires `read`. Returns the markdown digest described in
+[mcp.md](mcp.md#resource-memoryprofile) — the user's standing
+preferences, decisions and durable facts, grouped by category and capped
+at roughly 1500 tokens.
+
+The same content the MCP `memory://profile` resource serves, so an agent
+and a shell script see one profile.
 
 ### `GET /v1/audit`
 

@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
                 .patch(memories_http::handlers::update_memory)
                 .delete(memories_http::handlers::forget_memory),
         )
+        .route("/v1/profile", get(memories_http::handlers::read_profile))
         .route("/v1/audit", get(memories_http::handlers::read_audit))
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
