@@ -39,13 +39,15 @@ sha2 = "0.11.0"
 rmcp = { version = "2.2.0", features = ["server", "client", "transport-io", "transport-streamable-http-server", "macros", "schemars", "transport-streamable-http-client-reqwest"] }
 async-trait = "0.1.91"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Used by the `eval` subcommand, which builds a throwaway instance so that
+# scoring retrieval can never touch a real store.
+tempfile = "3"
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["test"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 assert_cmd = "2"
 predicates = "3"
-tempfile = "3"
 rmcp = { version = "2.2.0", features = ["client", "transport-child-process"] }
 wiremock = "0.6"
 

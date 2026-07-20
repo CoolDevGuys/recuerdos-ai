@@ -128,6 +128,79 @@ jobs:
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
 
+  # Retrieval quality, gated against a committed baseline.
+  #
+  # Its own job because it needs the real embedding model and takes tens of
+  # seconds — folding it into `test` would slow down every run for a signal
+  # that only matters when retrieval changes. It is the only check that can
+  # catch a ranker regression: nothing in `test` would notice a one-line
+  # change that quietly made freshness outrank relevance.
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dev
+          tags: ${{ env.DEV_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=dev-image
+          cache-to: type=gha,mode=max,scope=dev-image
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/models
+          key: models-${{ runner.os }}-bge-small-en-v1.5
+
+      # Explicit rather than letting the eval download it on first use:
+      # a HuggingFace hiccup should fail as "could not fetch the model",
+      # not as a mysterious retrieval regression.
+      - name: Warm the embedding model
+        run: |
+          mkdir -p .ci-cache/models
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            cargo run -q --bin recordagent -- warm-models
+
+      - name: Score retrieval against the baseline
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            just eval-native
+
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+
   # Build the release image and smoke-test it — proves docker/Dockerfile
   # actually produces a working, non-root, healthchecked daemon, not just
   # that it compiles.

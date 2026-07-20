@@ -248,6 +248,10 @@ status table above for what's real today):
 
 ## Contributing
 
+Retrieval quality has its own gate — `just eval` scores recall against a
+committed baseline, because no unit test would notice a change that made
+ranking worse. See [docs/evaluation.md](docs/evaluation.md).
+
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) (Docker-only dev flow,
 boundary rules).
 

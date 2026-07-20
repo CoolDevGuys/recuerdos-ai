@@ -19,13 +19,26 @@ test:
 fmt:
     docker compose run --rm dev cargo fmt
 
-# Start the optional local Ollama profile (used from Phase 4 onward).
+# Start the optional local Ollama profile, for zero-egress understanding.
 llm:
     docker compose --profile llm up ollama
+
+# Score retrieval quality against the committed baseline.
+eval:
+    docker compose run --rm dev just eval-native
+
+# Re-record the baseline after a deliberate retrieval change.
+eval-record:
+    docker compose run --rm dev cargo run -q --bin recordagent -- \
+        eval --write-baseline eval/baseline.json
 
 # Build the release image.
 docker-build:
     docker build -f docker/Dockerfile -t recordagent:local .
+
+eval-native:
+    cargo run -q --bin recordagent -- \
+        eval --baseline eval/baseline.json --max-drop 5
 
 check-native:
     cargo fmt --check
