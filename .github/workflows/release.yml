@@ -1,0 +1,174 @@
+name: Release
+
+# Tag-driven. Pushing `v0.1.0` builds the binaries, publishes the image
+# and drafts the release; nothing here runs on a branch push, so a merge
+# to main can never publish by accident.
+on:
+  push:
+    tags: ["v*"]
+  # For rehearsing the build without creating a tag. Produces artifacts
+  # and publishes nothing.
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the release, upload assets
+  packages: write   # push to GHCR
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  # Each target builds on its own architecture rather than
+  # cross-compiling. This project links three C/C++ dependencies —
+  # bundled SQLite, ONNX Runtime behind fastembed, and tantivy's
+  # compression — and setting up a working cross toolchain for all of
+  # them is more fragile than paying for a second runner. A native build
+  # also means the artifact is exercised on the platform it ships to.
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang pkg-config libssl-dev
+
+      - name: Build
+        run: cargo build --release --locked --bin recordagent
+
+      # Proves the artifact runs on the platform it was built for before
+      # it is published. A binary that fails to start is the one failure
+      # mode an install script cannot recover from, and `--version`
+      # exercises the whole link — including the ONNX and SQLite objects.
+      - name: Smoke test
+        run: ./target/release/recordagent --version
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="recordagent-${{ matrix.target }}.tar.gz"
+
+          # Only the binary. The model is not baked in here — it is ~130
+          # MB and would dominate the download; a bare-metal install
+          # fetches it into ~/.recordagent/models on first use, and the
+          # Docker image is the option for air-gapped hosts.
+          tar -czf "$asset" -C target/release recordagent
+
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+
+          # install.sh reads the first field of this file, so the format
+          # has to stay `<hash>  <filename>`.
+          cat "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+          if-no-files-found: error
+
+  # Multi-arch, built with QEMU rather than on two runners: the image
+  # build is dominated by the same cargo compile the job above already
+  # did natively, and this one only needs to be correct, not fast.
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          # `latest` only for a final release. A prerelease tag that
+          # quietly became `docker run …/recordagent` for everyone would
+          # be a nasty surprise.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') && startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          # Only a tag publishes. A manual run builds both architectures
+          # and throws them away, which is the point of the rehearsal.
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,mode=max,scope=release-image
+
+  release:
+    name: Draft the release
+    needs: [binaries, image]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: What we are about to publish
+        run: ls -la artifacts
+
+      - name: Draft
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.sha256
+          generate_release_notes: true
+          # Drafted, not published. The last step before a release is
+          # visible to the world should be a person reading it — the
+          # notes are generated, and generated notes are worth checking.
+          draft: true
+          prerelease: ${{ contains(github.ref, '-') }}
