@@ -25,6 +25,15 @@
 //! memories is one batch call to a local model in a nightly job, and it
 //! keeps the whole comparison on one scale.
 //!
+//! # Two halves, only one of which needs a model
+//!
+//! Expiry and decay are arithmetic — a timestamp comparison and a score
+//! over access bookkeeping — so they run in every installation,
+//! including the zero-egress default. Merging needs a model to judge
+//! whether two memories mean the same thing, and simply does not happen
+//! without one. Tying the first to the second would mean the common
+//! configuration silently keeps expired memories forever.
+//!
 //! # Why it never fails the whole run
 //!
 //! A run touches every user. One user's broken cluster, missing model
@@ -33,6 +42,7 @@
 //! The alternative is that one bad memory freezes consolidation for
 //! everybody, silently, for as long as it takes someone to notice.
 
+use crate::consolidation::application::memory_maintainer::MemoryMaintainer;
 use crate::consolidation::application::memory_merger::{MemoryMerger, MergeOutcome};
 use crate::consolidation::domain::cluster_builder::ClusterBuilder;
 use crate::consolidation::domain::consolidation_run::{ClusterPreview, ConsolidationReport};
@@ -68,26 +78,33 @@ pub struct ConsolidationRunner {
     resolver: Arc<BackgroundUserResolver>,
     memories: Arc<dyn MemoryRepository>,
     embedder: Arc<dyn Embedder>,
-    merger: Arc<MemoryMerger>,
+    maintainer: Arc<MemoryMaintainer>,
+    /// `None` without a configured provider. Expiry and decay still run.
+    merger: Option<Arc<MemoryMerger>>,
     clock: Arc<dyn Clock>,
     threshold: f32,
 }
 
 impl ConsolidationRunner {
+    /// Takes the user table once and derives the context resolver from
+    /// it. Passing both would let a caller hand over two different user
+    /// tables — one to walk, another to authenticate against — which is
+    /// not a configuration that means anything.
     pub fn new(
         users: Arc<dyn UserRepository>,
-        resolver: Arc<BackgroundUserResolver>,
         memories: Arc<dyn MemoryRepository>,
         embedder: Arc<dyn Embedder>,
-        merger: Arc<MemoryMerger>,
+        maintainer: Arc<MemoryMaintainer>,
+        merger: Option<Arc<MemoryMerger>>,
         clock: Arc<dyn Clock>,
         threshold: f32,
     ) -> Self {
         Self {
+            resolver: Arc::new(BackgroundUserResolver::new(Arc::clone(&users))),
             users,
-            resolver,
             memories,
             embedder,
+            maintainer,
             merger,
             clock,
             threshold,
@@ -139,6 +156,17 @@ impl ConsolidationRunner {
         context: &UserContext,
         dry_run: bool,
     ) -> Result<ConsolidationReport> {
+        // Maintenance first, and before the snapshot: a memory that
+        // expired last night should not be clustered, merged, and only
+        // then retired.
+        let maintenance = if dry_run {
+            Default::default()
+        } else {
+            let this = self.clone();
+            let (owned, now) = (context.clone(), self.clock.now());
+            blocking(move || this.maintainer.execute(&owned, now)).await?
+        };
+
         let this = self.clone();
         let owned = context.clone();
         let (examined, clusters) = blocking(move || this.plan(&owned)).await?;
@@ -147,6 +175,8 @@ impl ConsolidationRunner {
             dry_run,
             memories_examined: examined,
             clusters_found: clusters.len(),
+            expired: maintenance.expired,
+            rescored: maintenance.rescored,
             ..ConsolidationReport::default()
         };
 
@@ -155,8 +185,14 @@ impl ConsolidationRunner {
             return Ok(report);
         }
 
+        let Some(merger) = self.merger.as_ref() else {
+            // No provider. Expiry and decay have already run, which is
+            // everything this installation can do.
+            return Ok(report);
+        };
+
         for cluster in clusters {
-            match self.merger.execute(context, &cluster).await {
+            match merger.execute(context, &cluster).await {
                 Ok(MergeOutcome::Merged { retired, .. }) => {
                     report.merged += 1;
                     report.retired += retired;
@@ -315,12 +351,13 @@ mod tests {
         (
             ConsolidationRunner::new(
                 Arc::clone(&fixture.users) as Arc<dyn UserRepository>,
-                Arc::new(BackgroundUserResolver::new(
-                    Arc::clone(&fixture.users) as Arc<dyn UserRepository>
-                )),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
                 Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
-                merger,
+                Arc::new(MemoryMaintainer::new(
+                    Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                    Arc::new(fixture.forgetter()),
+                )),
+                Some(merger),
                 fixed_clock(),
                 threshold,
             ),

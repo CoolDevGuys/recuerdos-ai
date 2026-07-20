@@ -29,6 +29,10 @@ pub struct ConsolidationReport {
     pub retired: usize,
     /// Clusters the model looked at and declined.
     pub kept_separate: usize,
+    /// Memories retired for having reached their `expires_at`.
+    pub expired: usize,
+    /// Memories whose decay score was recomputed.
+    pub rescored: usize,
     /// Populated only on a dry run.
     pub previews: Vec<ClusterPreview>,
 }
@@ -45,9 +49,15 @@ impl ConsolidationReport {
         }
 
         format!(
-            "consolidated {} user(s): {} cluster(s) found, {} merged ({} memories retired), \
-             {} left alone",
-            self.users, self.clusters_found, self.merged, self.retired, self.kept_separate
+            "consolidated {} user(s): {} expired, {} rescored, {} cluster(s) found, \
+             {} merged ({} memories retired), {} left alone",
+            self.users,
+            self.expired,
+            self.rescored,
+            self.clusters_found,
+            self.merged,
+            self.retired,
+            self.kept_separate
         )
     }
 
@@ -57,6 +67,8 @@ impl ConsolidationReport {
         self.merged += other.merged;
         self.retired += other.retired;
         self.kept_separate += other.kept_separate;
+        self.expired += other.expired;
+        self.rescored += other.rescored;
         self.previews.extend(other.previews);
     }
 }

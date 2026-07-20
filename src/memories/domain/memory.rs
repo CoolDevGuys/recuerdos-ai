@@ -52,6 +52,14 @@ pub struct Memory {
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     last_accessed_at: Option<DateTime<Utc>>,
+    /// How many times recall has returned this memory. Bookkeeping, not
+    /// an assertion: written by the recall path, read only by decay.
+    access_count: u32,
+    /// The decay-weighted score, recomputed by the nightly job from
+    /// `last_accessed_at` and `access_count` — see
+    /// `consolidation::domain::decay`. Starts at 1.0 so a memory ranks
+    /// normally until something has actually measured it.
+    importance: f32,
     expires_at: Option<DateTime<Utc>>,
     superseded_by: Option<MemoryId>,
 }
@@ -102,6 +110,8 @@ impl Memory {
             created_at: now,
             updated_at: now,
             last_accessed_at: None,
+            access_count: 0,
+            importance: 1.0,
             expires_at: new.expires_at,
             superseded_by: None,
         })
@@ -122,6 +132,8 @@ impl Memory {
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
         last_accessed_at: Option<DateTime<Utc>>,
+        access_count: u32,
+        importance: f32,
         expires_at: Option<DateTime<Utc>>,
         superseded_by: Option<MemoryId>,
     ) -> Self {
@@ -137,6 +149,8 @@ impl Memory {
             created_at,
             updated_at,
             last_accessed_at,
+            access_count,
+            importance,
             expires_at,
             superseded_by,
         }
@@ -188,6 +202,14 @@ impl Memory {
 
     pub fn last_accessed_at(&self) -> Option<DateTime<Utc>> {
         self.last_accessed_at
+    }
+
+    pub fn access_count(&self) -> u32 {
+        self.access_count
+    }
+
+    pub fn importance(&self) -> f32 {
+        self.importance
     }
 
     pub fn expires_at(&self) -> Option<DateTime<Utc>> {
@@ -255,12 +277,35 @@ impl Memory {
         self
     }
 
-    /// Records a recall. The SQLite repository does this in one UPDATE
-    /// rather than by rebuilding the aggregate, so this is the in-memory
-    /// path — used by the test double and by Phase 5's decay work.
+    /// Records a recall: stamps the time and increments the count.
+    ///
+    /// The SQLite repository does both in one UPDATE rather than by
+    /// rebuilding the aggregate — two concurrent recalls of the same
+    /// memory must both be counted, and a read-modify-write would lose
+    /// one. So this is the in-memory path, used by the test double.
     #[allow(dead_code)]
     pub fn mark_accessed(mut self, now: DateTime<Utc>) -> Self {
         self.last_accessed_at = Some(now);
+        // Saturating rather than wrapping: a memory recalled four
+        // billion times should stay at the top of the scale, not fall
+        // off the bottom of it.
+        self.access_count = self.access_count.saturating_add(1);
+        self
+    }
+
+    /// Sets the decay-weighted score. Clamped, because the value is only
+    /// meaningful as a bounded multiplier and a stored `NaN` would
+    /// poison every ranking comparison it touched.
+    ///
+    /// The in-memory counterpart of `MemoryRepository::set_importance`,
+    /// which writes the batch in SQL. Used by the test double.
+    #[allow(dead_code)]
+    pub fn with_importance(mut self, importance: f32) -> Self {
+        self.importance = if importance.is_nan() {
+            1.0
+        } else {
+            importance.clamp(0.0, 1.0)
+        };
         self
     }
 }

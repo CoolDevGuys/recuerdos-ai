@@ -359,6 +359,19 @@ impl MemoryRepository for InMemoryMemoryRepository {
         Ok(entries)
     }
 
+    fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
+        let mut memories = self.memories.lock().unwrap();
+        for memory in memories.iter_mut() {
+            if memory.user_id() != context.user_id() {
+                continue;
+            }
+            if let Some((_, importance)) = scores.iter().find(|(id, _)| *id == memory.id()) {
+                *memory = memory.clone().with_importance(*importance);
+            }
+        }
+        Ok(())
+    }
+
     fn touch_accessed(
         &self,
         context: &UserContext,

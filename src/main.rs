@@ -178,14 +178,9 @@ async fn run_consolidate(dry_run: bool, config_path: Option<&Path>) -> Result<()
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
     let wired = build_all(&config)?;
 
-    let runner = wired.consolidation.runner.ok_or_else(|| {
-        "consolidation needs a language model: set [understanding].provider to \
-         something other than \"none\". Deciding whether two memories say the same \
-         thing has no offline fallback."
-            .to_string()
-    })?;
-
-    consolidation::infrastructure::cli::run(runner, dry_run)
+    // Runs with or without a provider: expiry and decay need no model,
+    // and only merging is skipped without one.
+    consolidation::infrastructure::cli::run(wired.consolidation.runner.clone(), dry_run)
         .await
         .map_err(|e| e.to_string())
 }
@@ -225,17 +220,13 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
 
     let consolidation = std::sync::Arc::new(consolidation);
 
-    // The nightly job. `None` when it is switched off or has no model to
-    // ask, in which case nothing is scheduled at all.
-    let scheduler = match consolidation.runner.clone() {
-        Some(runner) => consolidation::infrastructure::consolidation_scheduler::start(
-            runner,
-            consolidation.enabled,
-            &consolidation.schedule,
-        )
-        .map_err(|e| e.to_string())?,
-        None => None,
-    };
+    // The nightly job. `None` when `[consolidation].enabled` is false.
+    let scheduler = consolidation::infrastructure::consolidation_scheduler::start(
+        std::sync::Arc::clone(&consolidation.runner),
+        consolidation.enabled,
+        &consolidation.schedule,
+    )
+    .map_err(|e| e.to_string())?;
 
     let state = bootstrap::state::AppState {
         identity,

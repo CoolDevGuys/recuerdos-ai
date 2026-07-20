@@ -1002,3 +1002,152 @@ fn merging_skips_a_member_that_is_already_retired() {
         "an already-retired memory was re-pointed"
     );
 }
+
+#[test]
+fn recall_bookkeeping_accumulates_across_calls() {
+    // Decay's only inputs. A stamp that overwrote the count, or a count
+    // that reset, would make every memory look equally unused and the
+    // nightly rescore a no-op nobody would notice.
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "a memory");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+
+    for hour in 1..=3 {
+        fixture
+            .memories
+            .touch_accessed(
+                &fixture.alex,
+                &[memory.id()],
+                now() + chrono::Duration::hours(hour),
+            )
+            .unwrap();
+    }
+
+    let stored = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.access_count(), 3);
+    assert_eq!(
+        stored.last_accessed_at(),
+        Some(now() + chrono::Duration::hours(3)),
+        "the stamp should be the most recent access, not the first"
+    );
+}
+
+#[test]
+fn touching_never_reaches_another_users_memory() {
+    let fixture = fixture();
+    let theirs = memory_for(&fixture.sam, "sam's memory");
+    fixture
+        .memories
+        .insert(&fixture.sam, &theirs, "test")
+        .unwrap();
+
+    fixture
+        .memories
+        .touch_accessed(&fixture.alex, &[theirs.id()], now())
+        .unwrap();
+
+    let stored = fixture
+        .memories
+        .find(&fixture.sam, theirs.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.access_count(), 0);
+    assert_eq!(stored.last_accessed_at(), None);
+}
+
+#[test]
+fn a_new_memory_starts_fully_important_and_round_trips_its_score() {
+    // The default matters: a memory written between two nightly runs
+    // must rank normally rather than being buried until something has
+    // measured it.
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "a memory");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+
+    let fresh = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.importance(), 1.0);
+    assert_eq!(fresh.access_count(), 0);
+
+    fixture
+        .memories
+        .set_importance(&fixture.alex, &[(memory.id(), 0.42)])
+        .unwrap();
+
+    let rescored = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+    assert!((rescored.importance() - 0.42).abs() < 1e-6);
+}
+
+#[test]
+fn rescoring_never_reaches_another_users_memory() {
+    let fixture = fixture();
+    let theirs = memory_for(&fixture.sam, "sam's memory");
+    fixture
+        .memories
+        .insert(&fixture.sam, &theirs, "test")
+        .unwrap();
+
+    fixture
+        .memories
+        .set_importance(&fixture.alex, &[(theirs.id(), 0.1)])
+        .unwrap();
+
+    let stored = fixture
+        .memories
+        .find(&fixture.sam, theirs.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.importance(),
+        1.0,
+        "another user's score was rewritten"
+    );
+}
+
+#[test]
+fn rescoring_leaves_the_audit_trail_alone() {
+    // A derived value, not a change anyone made. An entry per memory per
+    // night would bury the changes a user actually cares about.
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "a memory");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+    let before = fixture
+        .memories
+        .audit_trail(&fixture.alex, 100)
+        .unwrap()
+        .len();
+
+    fixture
+        .memories
+        .set_importance(&fixture.alex, &[(memory.id(), 0.5)])
+        .unwrap();
+
+    assert_eq!(
+        fixture
+            .memories
+            .audit_trail(&fixture.alex, 100)
+            .unwrap()
+            .len(),
+        before
+    );
+}

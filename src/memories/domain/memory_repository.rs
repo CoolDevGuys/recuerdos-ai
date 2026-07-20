@@ -115,8 +115,18 @@ pub trait MemoryRepository: Send + Sync {
 
     fn audit_trail(&self, context: &UserContext, limit: usize) -> Result<Vec<AuditEntry>>;
 
-    /// Records that these memories were returned by a recall. Off the
-    /// hot path; feeds Phase 5's importance decay.
+    /// Writes recomputed decay scores.
+    ///
+    /// Deliberately writes no audit entries and does not touch
+    /// `updated_at`. Importance is derived from access bookkeeping, not
+    /// asserted by anyone — auditing it would add an entry per memory per
+    /// night and bury the changes a user actually made under changes
+    /// nobody made.
+    fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()>;
+
+    /// Records that these memories were returned by a recall: stamps
+    /// `last_accessed_at` and increments `access_count`. Off the hot
+    /// path; the two are the whole input to importance decay.
     fn touch_accessed(
         &self,
         context: &UserContext,

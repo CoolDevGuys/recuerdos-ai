@@ -252,8 +252,22 @@ async fn a_dry_run_reports_what_it_would_merge_and_changes_nothing() {
 }
 
 #[tokio::test]
-async fn consolidation_without_a_provider_refuses_rather_than_guessing() {
+async fn without_a_provider_consolidation_still_expires_and_decays_but_never_merges() {
+    // The default configuration. Expiry is a timestamp comparison and
+    // decay is arithmetic, so both run with no provider anywhere; only
+    // merging — a judgement about meaning — is skipped. Tying the first
+    // two to a model would mean the common case silently keeps expired
+    // memories forever.
     let instance = Instance::degraded().await;
+
+    for _ in 0..3 {
+        instance
+            .post(
+                "/v1/memories:direct",
+                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+            )
+            .await;
+    }
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_recordagent"))
         .arg("consolidate")
@@ -262,11 +276,18 @@ async fn consolidation_without_a_provider_refuses_rather_than_guessing() {
         .output()
         .expect("failed to run recordagent consolidate");
 
-    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("[understanding].provider"),
+        output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("3 rescored"), "{stdout}");
+    assert!(stdout.contains("0 merged"), "{stdout}");
+    assert_eq!(
+        instance.search("pnpm").await.len(),
+        3,
+        "duplicates were merged without a model to judge them"
     );
 }
 

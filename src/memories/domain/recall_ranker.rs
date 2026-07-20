@@ -37,8 +37,24 @@
 //!   near-adjacent results, not enough to leapfrog a memory that is many
 //!   ranks better.
 //!
-//! Relevance leads; recency and confidence break ties among comparably
-//! relevant results. Both invariants are pinned by tests below.
+//! # Why importance shares confidence's band instead of getting its own
+//!
+//! Importance (`consolidation::domain::decay`) is the third signal, and
+//! it is deliberately *not* a third multiplier. Each floored band spans
+//! 1.25x, and they compound: two bands already span 1.56x, against the
+//! 1.33x that separates rank 1 from rank 20. A third would take the
+//! product to 1.95x and quietly make decay able to bury the best match
+//! in the corpus — precisely the failure the floor exists to prevent.
+//!
+//! So confidence and importance are multiplied *first* and floored
+//! *once*. Both answer the same question — how much is this memory
+//! worth, independent of the query — and treating them as one band means
+//! adding decay cannot widen the spread beyond what confidence alone
+//! already did. That property is pinned by a test below; anything that
+//! adds a fourth signal should join this band, not open another.
+//!
+//! Relevance leads; recency and quality break ties among comparably
+//! relevant results. All of it is pinned by tests below.
 
 use super::memory::Memory;
 use crate::shared::ids::MemoryId;
@@ -141,7 +157,7 @@ impl RecallRanker {
     fn score(&self, memory: &Memory, detail: MatchDetail, now: DateTime<Utc>) -> f32 {
         let relevance = reciprocal_rank(detail.vector_rank) + reciprocal_rank(detail.bm25_rank);
 
-        relevance * self.recency_multiplier(memory.created_at(), now) * floored(memory.confidence())
+        relevance * self.recency_multiplier(memory.created_at(), now) * quality(memory)
     }
 
     fn recency_multiplier(&self, created_at: DateTime<Utc>, now: DateTime<Utc>) -> f32 {
@@ -159,6 +175,13 @@ fn reciprocal_rank(rank: Option<usize>) -> f32 {
         Some(rank) => 1.0 / (RRF_K + rank as f32),
         None => 0.0,
     }
+}
+
+/// How much a memory is worth regardless of the query: how sure we are
+/// of it, and how much it is actually used. One band for both — see the
+/// module docs.
+fn quality(memory: &Memory) -> f32 {
+    floored(memory.confidence() * memory.importance())
 }
 
 /// Maps `0.0..=1.0` onto `MULTIPLIER_FLOOR..=1.0`.
@@ -215,6 +238,97 @@ mod tests {
 
     fn ordered(scored: &[ScoredMemory]) -> Vec<MemoryId> {
         scored.iter().map(|s| s.memory.id()).collect()
+    }
+
+    #[test]
+    fn a_decayed_memory_loses_a_tie_to_one_in_active_use() {
+        // What importance decay buys: two equally relevant memories,
+        // and the one people actually read comes first.
+        let used = memory().with_importance(1.0);
+        let ignored = memory().with_importance(crate::consolidation::domain::decay::MIN_IMPORTANCE);
+
+        let result = ranker().rank(
+            &ids(&[&ignored, &used]),
+            &ids(&[&ignored, &used]),
+            vec![used.clone(), ignored.clone()],
+            now(),
+        );
+
+        assert_eq!(
+            ordered(&result),
+            [used.id(), ignored.id()],
+            "the decayed memory outranked the one in active use"
+        );
+    }
+
+    #[test]
+    fn adding_decay_did_not_widen_the_multiplier_band() {
+        // The load-bearing property. Each floored band spans 1.25x and
+        // they compound; the bands are calibrated against RRF's rank
+        // spacing, so an extra one silently changes which memory wins
+        // every close call in the system. Confidence and importance
+        // therefore share a band: the worst case a memory can suffer for
+        // being uncertain *and* unused is the same MULTIPLIER_FLOOR it
+        // already suffered for being uncertain alone.
+        let best = memory_aged(0, 1.0).with_importance(1.0);
+        let worst_confidence = memory_aged(0, 0.0).with_importance(1.0);
+        let worst_both = memory_aged(0, 0.0).with_importance(0.0);
+
+        assert!((quality(&best) - 1.0).abs() < 1e-6);
+        assert!((quality(&worst_confidence) - MULTIPLIER_FLOOR).abs() < 1e-6);
+        assert!(
+            (quality(&worst_both) - MULTIPLIER_FLOOR).abs() < 1e-6,
+            "decay opened a second band: quality fell to {}, below the floor {MULTIPLIER_FLOOR}",
+            quality(&worst_both)
+        );
+    }
+
+    #[test]
+    fn decay_reorders_neighbours_without_leapfrogging_many_ranks() {
+        // The band is meant to break ties, not to re-sort the corpus.
+        // A decayed memory one rank better loses; a decayed memory many
+        // ranks better still wins.
+        let decayed = memory().with_importance(0.0);
+        let used = memory().with_importance(1.0);
+
+        let adjacent = ranker().rank(
+            &ids(&[&decayed, &used]),
+            &ids(&[&decayed, &used]),
+            vec![decayed.clone(), used.clone()],
+            now(),
+        );
+        assert_eq!(
+            ordered(&adjacent)[0],
+            used.id(),
+            "decay should break a near-tie"
+        );
+
+        // Now put twenty places between them.
+        let filler: Vec<Memory> = (0..19).map(|_| memory()).collect();
+        let mut ranking = vec![&decayed];
+        ranking.extend(filler.iter());
+        ranking.push(&used);
+        let mut candidates = vec![decayed.clone(), used.clone()];
+        candidates.extend(filler.iter().cloned());
+
+        // Compared to each other rather than to the whole list: the
+        // filler sits one rank behind the decayed memory, and a 1.25x
+        // band does swamp a single rank — that is the band doing its job.
+        // What it must not do is swamp twenty.
+        let distant = ordered(&ranker().rank(&ids(&ranking), &ids(&ranking), candidates, now()));
+        let place = |id| distant.iter().position(|found| *found == id).unwrap();
+
+        assert!(
+            place(decayed.id()) < place(used.id()),
+            "decay leapfrogged twenty ranks and buried the better match"
+        );
+    }
+
+    #[test]
+    fn a_memory_nothing_has_measured_yet_ranks_as_it_always_did() {
+        // Importance defaults to 1.0, so a memory saved between two
+        // nightly runs is not penalised for not having been scored.
+        assert_eq!(memory().importance(), 1.0);
     }
 
     #[test]
