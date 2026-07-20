@@ -136,6 +136,10 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         bootstrap::understanding_wiring::Understanding::build(&config, database, &memories)
             .map_err(|e| e.to_string())?;
 
+    let consolidation =
+        bootstrap::consolidation_wiring::Consolidation::build(&config, &memories, &understanding)
+            .map_err(|e| e.to_string())?;
+
     let identity = std::sync::Arc::new(identity);
     let understanding = std::sync::Arc::new(understanding);
 
@@ -162,6 +166,7 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         identity,
         memories: std::sync::Arc::new(memories),
         understanding,
+        consolidation: std::sync::Arc::new(consolidation),
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
     };
 

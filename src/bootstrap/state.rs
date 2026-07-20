@@ -1,6 +1,7 @@
 //! Shared axum state: what every handler and extractor can reach.
 
 use crate::bootstrap::config::AppConfig;
+use crate::bootstrap::consolidation_wiring::Consolidation;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::understanding_wiring::Understanding;
 use crate::bootstrap::wiring::Identity;
@@ -33,6 +34,7 @@ pub struct AppState {
     pub identity: Arc<Identity>,
     pub memories: Arc<Memories>,
     pub understanding: Arc<Understanding>,
+    pub consolidation: Arc<Consolidation>,
     pub auth_mode: AuthMode,
 }
 

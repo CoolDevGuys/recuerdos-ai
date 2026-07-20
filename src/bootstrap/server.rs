@@ -2,6 +2,7 @@
 //! baseline every later phase's routes build on.
 
 use crate::bootstrap::state::{AppState, AuthMode};
+use crate::consolidation::infrastructure::http as consolidation_http;
 use crate::identity::infrastructure::http::authenticated::Authenticated;
 use crate::memories::infrastructure::http as memories_http;
 use crate::understanding::infrastructure::http as understanding_http;
@@ -67,6 +68,11 @@ pub fn router(state: AppState) -> Router {
             get(memories_http::handlers::get_memory)
                 .patch(memories_http::handlers::update_memory)
                 .delete(memories_http::handlers::forget_memory),
+        )
+        // A finished session in, the few things that outlive it out.
+        .route(
+            "/v1/sessions/distill",
+            post(consolidation_http::handlers::distill_session),
         )
         .route("/v1/profile", get(memories_http::handlers::read_profile))
         .route("/v1/audit", get(memories_http::handlers::read_audit))

@@ -112,6 +112,37 @@ It will be available in future sessions.",
     output
 }
 
+/// What a session left behind.
+///
+/// Zero is the ordinary outcome and is phrased as a success. A session
+/// hook runs on every session a user has, most of which produce nothing
+/// durable — an agent told this looks like a failure would start
+/// reporting a broken memory service to the user once a day.
+pub fn render_distilled(memories: &[ToolMemory]) -> String {
+    if memories.is_empty() {
+        return "Nothing from this session needed remembering. That is the usual \
+                outcome — most sessions produce nothing that stays true after they \
+                end."
+            .to_string();
+    }
+
+    let mut output = format!(
+        "Distilled {} memor{} from this session:\n\n",
+        memories.len(),
+        if memories.len() == 1 { "y" } else { "ies" }
+    );
+    for memory in memories {
+        output.push_str(&format!(
+            "- [{}] {} (id {})\n",
+            memory.category,
+            memory.content.replace('\n', " "),
+            memory.id
+        ));
+    }
+    output.push_str("\nThey will be available in future sessions.");
+    output
+}
+
 /// The first half of `memory_forget`: what would be deleted, and how to
 /// actually do it. Explicitly states that nothing has been deleted yet,
 /// because a model that assumes otherwise will tell the user it has.

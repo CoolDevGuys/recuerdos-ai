@@ -9,7 +9,9 @@
 //! privileged back door — the shim is subject to the same authentication
 //! and the same per-user scoping.
 
-use super::memory_toolbox::{MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest, ToolMemory};
+use super::memory_toolbox::{
+    DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest, ToolMemory,
+};
 use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -144,6 +146,39 @@ impl MemoryToolbox for HttpMemoryToolbox {
             .iter()
             .map(parse_memory)
             .collect()
+    }
+
+    async fn distill(&self, request: DistillRequest) -> Result<Vec<ToolMemory>> {
+        let mut body = json!({
+            "content": request.content,
+            "tags": request.tags,
+        });
+        if let Some(session_id) = request.session_id {
+            body["session_id"] = json!(session_id);
+        }
+
+        let result = self
+            .request(reqwest::Method::POST, "/v1/sessions/distill", Some(body))
+            .await?;
+
+        // Same reasoning as `save`: distillation rewrites what it stores,
+        // and an agent reporting the session's own wording back to the
+        // user when we stored something else is quietly lying.
+        let ids: Vec<String> = result["memory_ids"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect();
+
+        let mut memories = Vec::with_capacity(ids.len());
+        for id in ids {
+            let memory = self
+                .request(reqwest::Method::GET, &format!("/v1/memories/{id}"), None)
+                .await?;
+            memories.push(parse_memory(&memory)?);
+        }
+        Ok(memories)
     }
 
     async fn find_candidates(&self, query: &str, limit: usize) -> Result<Vec<ToolMemory>> {

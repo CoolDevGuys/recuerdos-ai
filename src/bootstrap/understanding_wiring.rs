@@ -107,6 +107,14 @@ pub struct Understanding {
     /// Pinged after an enqueue so a worker picks the job up immediately
     /// rather than on its next poll.
     pub wake: Arc<Notify>,
+    /// The model itself, for the consolidation context to build its own
+    /// prompts on — distillation, merging, the profile digest.
+    ///
+    /// Handed over already decorated with retries, so every caller gets
+    /// the same backoff policy rather than each remembering to wrap it.
+    /// `None` means no provider is configured.
+    pub model: Option<Arc<dyn ChatModel>>,
+    pub taxonomy: Arc<Taxonomy>,
 }
 
 impl Understanding {
@@ -120,15 +128,18 @@ impl Understanding {
             config.understanding.taxonomy.extra_categories.clone(),
         ));
 
-        let pipeline: Arc<dyn IngestPipeline> = match model {
+        let pipeline: Arc<dyn IngestPipeline> = match &model {
             Some(model) => Arc::new(MemoryIngestor::new(
-                Arc::new(CandidateExtractor::new(Arc::clone(&model), taxonomy)),
+                Arc::new(CandidateExtractor::new(
+                    Arc::clone(model),
+                    Arc::clone(&taxonomy),
+                )),
                 Arc::new(MemoryReconciler::new(
                     Arc::clone(&memories.recaller),
                     Arc::clone(&memories.saver),
                     Arc::clone(&memories.forgetter),
                     Arc::clone(&memories.repository),
-                    model,
+                    Arc::clone(model),
                     config.understanding.reconcile,
                 )),
             )),
@@ -151,6 +162,8 @@ impl Understanding {
             pipeline,
             enabled,
             wake: Arc::new(Notify::new()),
+            model,
+            taxonomy,
         })
     }
 }

@@ -184,10 +184,19 @@ mod tests {
             )
             .unwrap(),
         );
+        let consolidation = Arc::new(
+            crate::bootstrap::consolidation_wiring::Consolidation::build(
+                &crate::bootstrap::config::AppConfig::default(),
+                &memories,
+                &understanding,
+            )
+            .unwrap(),
+        );
         let state = AppState {
             identity: Arc::clone(&identity),
             memories,
             understanding,
+            consolidation,
             auth_mode,
         };
 
