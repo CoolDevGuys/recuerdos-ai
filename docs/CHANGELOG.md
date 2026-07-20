@@ -3,6 +3,49 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.4.0-alpha — Phase 4: Understanding
+
+The differentiator: raw text in, understood memories out. A memory store
+stops being a log.
+
+- **`POST /v1/memories`** accepts raw content and returns `202` with a job
+  id; **`GET /v1/jobs/{id}`** reports what became of it. The work is a
+  model call that takes seconds — holding the request open for it would
+  make a client's timeout our problem and lose the work on a disconnect.
+- **Extraction** splits content into atomic, separately-recallable
+  memories with a category, tags and entities. One sentence about moving
+  hosts *and* a testing preference becomes two memories, not one blob.
+- **Reconciliation** decides ADD / UPDATE / DELETE / NOOP against the
+  memories most similar to each candidate. A contradiction supersedes
+  what it replaces instead of accumulating beside it, so recall stops
+  returning last quarter's answer alongside this quarter's. Superseded
+  memories are retained for audit and reachable with
+  `include_superseded=true`.
+- **Three providers** — Anthropic, any OpenAI-compatible endpoint, and
+  Ollama — behind one `ChatModel` contract, with retry, timeout and
+  malformed-JSON recovery shared across all of them so behaviour cannot
+  drift between them.
+- **A durable job queue and worker pool.** Jobs survive a restart, a
+  crashed worker's job is reclaimed rather than lost, and a poison job
+  dead-letters with its error instead of retrying forever.
+- **Still zero-egress by default.** `[understanding].provider` defaults to
+  `none`, and in that mode the same endpoints store content verbatim,
+  inferring only the category from unambiguous phrasing. Turning a
+  provider on requires no client changes.
+- **MCP `memory_save` runs the pipeline**, so an agent's save is
+  reconciled against what is already stored — and the tool says so
+  honestly, including when nothing was stored because the store already
+  knew it.
+- **`recordagent eval`** scores retrieval quality against a committed
+  baseline, and CI fails a PR that drops recall@5 by more than five
+  points. Nothing else in the suite would notice a ranking regression.
+  See [evaluation.md](evaluation.md).
+
+Known limitation: one eval case is committed failing — a query with no
+vocabulary in common with its memory ("book a restaurant" → "user is
+vegetarian") does not reach the top 5. It is kept as a real target rather
+than removed to flatter the score.
+
 ## v0.3.0-alpha — Phase 3: MCP server
 
 Claude Code, opencode and any other MCP client can now read and write the
