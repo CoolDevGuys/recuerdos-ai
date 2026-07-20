@@ -176,12 +176,19 @@ impl InMemoryMemoryRepository {
                 .any(|m| m.id() == id && m.user_id() == context.user_id())
     }
 
-    fn record(&self, context: &UserContext, id: MemoryId, operation: AuditOperation, actor: &str) {
+    fn record(
+        &self,
+        context: &UserContext,
+        id: MemoryId,
+        operation: AuditOperation,
+        actor: &str,
+        detail: &str,
+    ) {
         self.audit.lock().unwrap().push(AuditEntry {
             memory_id: id,
             operation,
             actor: actor.to_string(),
-            detail: String::new(),
+            detail: detail.to_string(),
             at: now(),
         });
         let _ = context;
@@ -191,7 +198,7 @@ impl InMemoryMemoryRepository {
 impl MemoryRepository for InMemoryMemoryRepository {
     fn insert(&self, context: &UserContext, memory: &Memory, actor: &str) -> Result<()> {
         self.memories.lock().unwrap().push(memory.clone());
-        self.record(context, memory.id(), AuditOperation::Add, actor);
+        self.record(context, memory.id(), AuditOperation::Add, actor, "");
         Ok(())
     }
 
@@ -216,16 +223,46 @@ impl MemoryRepository for InMemoryMemoryRepository {
         } else {
             AuditOperation::Update
         };
-        self.record(context, memory.id(), operation, actor);
+        self.record(context, memory.id(), operation, actor, "");
         Ok(())
     }
 
-    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<()> {
+    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()> {
         if !self.visible(context, id) {
             return Err(RaError::NotFound(format!("memory {id} not found")));
         }
         self.deleted.lock().unwrap().push(id);
-        self.record(context, id, AuditOperation::Delete, actor);
+        self.record(context, id, AuditOperation::Delete, actor, reason);
+        Ok(())
+    }
+
+    fn supersede(
+        &self,
+        context: &UserContext,
+        superseded: MemoryId,
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<()> {
+        if !self.visible(context, superseded) {
+            return Err(RaError::NotFound(format!("memory {superseded} not found")));
+        }
+
+        let mut memories = self.memories.lock().unwrap();
+        let memory = memories
+            .iter_mut()
+            .find(|m| m.id() == superseded)
+            .expect("visible implies present");
+        *memory = memory.clone().supersede(replacement, Utc::now());
+        drop(memories);
+
+        self.record(
+            context,
+            superseded,
+            AuditOperation::Supersede,
+            actor,
+            reason,
+        );
         Ok(())
     }
 

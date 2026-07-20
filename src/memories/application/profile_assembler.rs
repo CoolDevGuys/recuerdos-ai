@@ -407,7 +407,7 @@ mod tests {
         let deleted = fixture.save(&fixture.alex, "a deleted memory");
         fixture
             .memories
-            .delete(&fixture.alex, deleted.id(), "test")
+            .delete(&fixture.alex, deleted.id(), "test", "")
             .unwrap();
 
         let profile = assembler(&fixture).execute(&fixture.alex).unwrap();

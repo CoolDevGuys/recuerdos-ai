@@ -65,7 +65,12 @@ impl DirectMemorySaver {
         if let Err(error) = self.vectors.upsert(context, memory.id(), &embedding) {
             // Compensate: without its vector the memory is only half
             // findable, and nothing would ever tell the user.
-            if let Err(cleanup) = self.memories.delete(context, memory.id(), actor) {
+            if let Err(cleanup) = self.memories.delete(
+                context,
+                memory.id(),
+                actor,
+                "rolled back: the vector index write failed",
+            ) {
                 tracing::error!(
                     memory_id = %memory.id(),
                     %cleanup,

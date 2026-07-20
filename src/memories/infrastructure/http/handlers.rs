@@ -125,7 +125,7 @@ pub async fn forget_memory(
     let id = parse_id(&id)?;
     let memories = state.memories.clone();
 
-    blocking(move || memories.forgetter.execute(&context, id, ACTOR)).await?;
+    blocking(move || memories.forgetter.execute(&context, id, ACTOR, "")).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -201,7 +201,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
-    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<()> {
+    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()> {
         self.database.with_connection(|connection| {
             // COALESCE: deleting twice keeps the first deletion time, for
             // the same reason revoking a key twice does.
@@ -221,7 +221,54 @@ impl MemoryRepository for SqliteMemoryRepository {
                 return Err(not_found(id));
             }
 
-            Self::write_audit(connection, context, id, AuditOperation::Delete, actor, "")
+            Self::write_audit(
+                connection,
+                context,
+                id,
+                AuditOperation::Delete,
+                actor,
+                reason,
+            )
+        })
+    }
+
+    fn supersede(
+        &self,
+        context: &UserContext,
+        superseded: MemoryId,
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<()> {
+        self.database.with_connection(|connection| {
+            let affected = connection
+                .execute(
+                    // `deleted_at IS NULL`: a memory the user already
+                    // deleted must not be quietly resurrected into a
+                    // supersede chain.
+                    "UPDATE memories SET superseded_by = ?3, updated_at = ?4
+                     WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
+                    rusqlite::params![
+                        superseded.to_string(),
+                        context.user_id().to_string(),
+                        replacement.to_string(),
+                        Utc::now().to_rfc3339(),
+                    ],
+                )
+                .map_err(|e| map_sqlite_error(e, "memory supersede conflict"))?;
+
+            if affected == 0 {
+                return Err(not_found(superseded));
+            }
+
+            Self::write_audit(
+                connection,
+                context,
+                superseded,
+                AuditOperation::Supersede,
+                actor,
+                reason,
+            )
         })
     }
 
