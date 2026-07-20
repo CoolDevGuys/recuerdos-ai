@@ -86,6 +86,19 @@ impl Instance {
         (status, response.json().await.unwrap_or(Value::Null))
     }
 
+    async fn get(&self, path: &str) -> (reqwest::StatusCode, Value) {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.app.base_url))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .expect("request failed");
+
+        let status = response.status();
+        (status, response.json().await.unwrap_or(Value::Null))
+    }
+
     async fn distill(&self, content: &str) -> (reqwest::StatusCode, Value) {
         self.post("/v1/sessions/distill", json!({"content": content}))
             .await
@@ -123,6 +136,138 @@ impl Instance {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// Runs `recordagent consolidate` against a spawned app's data dir.
+///
+/// The nightly job has no HTTP surface — it is a timer and a CLI command
+/// — so this is the only way to drive it end to end. It runs as a
+/// separate process against the same SQLite file, which is exactly how an
+/// operator would run it.
+fn consolidate(instance: &Instance, model_url: &str, args: &[&str]) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_recordagent"));
+    command
+        .arg("consolidate")
+        .args(args)
+        .env("RECORDAGENT_STORAGE__PATH", instance.app.data_dir())
+        .env("RECORDAGENT_UNDERSTANDING__PROVIDER", "openai-compat")
+        .env("RECORDAGENT_UNDERSTANDING__MODEL", "mock")
+        .env("RECORDAGENT_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY")
+        .env("RECORDAGENT_UNDERSTANDING__BASE_URL", model_url)
+        .env("MOCK_MODEL_KEY", "not-a-real-key")
+        .env_remove("RECORDAGENT_LOG");
+
+    command
+        .output()
+        .expect("failed to run recordagent consolidate")
+}
+
+#[tokio::test]
+async fn five_phrasings_of_one_preference_become_one_memory() {
+    // The DoD scenario, end to end and out of process: seed duplicates
+    // over REST, run the CLI job, then ask REST what recall returns.
+    let instance = Instance::with_model(vec![json!({
+        "merge": true,
+        "content": "User uses pnpm as the package manager; never npm or yarn",
+        "category": "preference.coding",
+        "tags": ["tooling"],
+        "reason": "five phrasings of one package-manager preference",
+    })])
+    .await;
+
+    // Identical content, so the deterministic local embedder puts them in
+    // one cluster regardless of the configured threshold.
+    for _ in 0..5 {
+        instance
+            .post(
+                "/v1/memories:direct",
+                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+            )
+            .await;
+    }
+    assert_eq!(instance.search("pnpm").await.len(), 5);
+
+    let output = consolidate(&instance, &instance.model.uri(), &[]);
+    assert!(
+        output.status.success(),
+        "consolidate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("5 memories retired"), "{stdout}");
+
+    assert_eq!(
+        instance.search("package manager").await,
+        ["User uses pnpm as the package manager; never npm or yarn"],
+        "recall should return exactly one memory after consolidation"
+    );
+
+    // Superseded, not deleted — the originals are still in the trail.
+    let (status, audit) = instance.get("/v1/audit").await;
+    assert_eq!(status, 200, "{audit}");
+    let merges = audit["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no audit entries in {audit}"))
+        .iter()
+        .filter(|entry| entry["operation"] == "merge")
+        .count();
+    assert_eq!(merges, 5, "{audit}");
+}
+
+#[tokio::test]
+async fn a_dry_run_reports_what_it_would_merge_and_changes_nothing() {
+    let instance = Instance::with_model(vec![]).await;
+
+    for _ in 0..3 {
+        instance
+            .post(
+                "/v1/memories:direct",
+                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+            )
+            .await;
+    }
+
+    let output = consolidate(&instance, &instance.model.uri(), &["--dry-run"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("nothing was changed"), "{stdout}");
+    assert!(stdout.contains("would merge"), "{stdout}");
+    assert!(stdout.contains("User prefers pnpm"), "{stdout}");
+
+    assert_eq!(
+        instance.search("pnpm").await.len(),
+        3,
+        "a dry run modified the store"
+    );
+    assert!(
+        instance
+            .model
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty(),
+        "a dry run called the model"
+    );
+}
+
+#[tokio::test]
+async fn consolidation_without_a_provider_refuses_rather_than_guessing() {
+    let instance = Instance::degraded().await;
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_recordagent"))
+        .arg("consolidate")
+        .env("RECORDAGENT_STORAGE__PATH", instance.app.data_dir())
+        .env_remove("RECORDAGENT_LOG")
+        .output()
+        .expect("failed to run recordagent consolidate");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("[understanding].provider"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]

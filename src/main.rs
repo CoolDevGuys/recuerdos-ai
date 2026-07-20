@@ -70,6 +70,15 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Merge duplicate memories now, instead of waiting for the timer.
+    Consolidate {
+        /// Report what would be merged and change nothing. Calls no
+        /// model, so it costs nothing to run.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Manage users.
     User {
         #[command(subcommand)]
@@ -108,6 +117,9 @@ async fn main() {
             config.as_deref(),
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
+        Command::Consolidate { dry_run, config } => {
+            run_consolidate(dry_run, config.as_deref()).await
+        }
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
     };
@@ -118,27 +130,76 @@ async fn main() {
     }
 }
 
+/// Every context, wired.
+///
+/// Both `serve` and `consolidate` need the whole graph — the nightly job
+/// touches identity (to walk users), memories (to read and write them)
+/// and understanding (for the model) — so building it lives in one place
+/// rather than being assembled twice and drifting.
+struct Wired {
+    identity: bootstrap::wiring::Identity,
+    memories: bootstrap::memories_wiring::Memories,
+    understanding: bootstrap::understanding_wiring::Understanding,
+    consolidation: bootstrap::consolidation_wiring::Consolidation,
+}
+
+fn build_all(config: &bootstrap::config::AppConfig) -> Result<Wired, String> {
+    // Every context shares one database handle: SQLite has a single
+    // writer, and two handles would mean two connections contending for
+    // the same file rather than queueing behind one mutex.
+    let database = bootstrap::wiring::open_database(config).map_err(|e| e.to_string())?;
+    let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
+        .map_err(|e| e.to_string())?;
+    let memories =
+        bootstrap::memories_wiring::Memories::build(config, std::sync::Arc::clone(&database))
+            .map_err(|e| e.to_string())?;
+    let understanding =
+        bootstrap::understanding_wiring::Understanding::build(config, database, &memories)
+            .map_err(|e| e.to_string())?;
+    let consolidation = bootstrap::consolidation_wiring::Consolidation::build(
+        config,
+        &identity,
+        &memories,
+        &understanding,
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(Wired {
+        identity,
+        memories,
+        understanding,
+        consolidation,
+    })
+}
+
+async fn run_consolidate(dry_run: bool, config_path: Option<&Path>) -> Result<(), String> {
+    bootstrap::server::init_tracing();
+
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let wired = build_all(&config)?;
+
+    let runner = wired.consolidation.runner.ok_or_else(|| {
+        "consolidation needs a language model: set [understanding].provider to \
+         something other than \"none\". Deciding whether two memories say the same \
+         thing has no offline fallback."
+            .to_string()
+    })?;
+
+    consolidation::infrastructure::cli::run(runner, dry_run)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     bootstrap::server::init_tracing();
 
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
-
-    // Both contexts share one database handle: SQLite has a single
-    // writer, and two handles would mean two connections contending for
-    // the same file rather than queueing behind one mutex.
-    let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
-    let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
-        .map_err(|e| e.to_string())?;
-    let memories =
-        bootstrap::memories_wiring::Memories::build(&config, std::sync::Arc::clone(&database))
-            .map_err(|e| e.to_string())?;
-    let understanding =
-        bootstrap::understanding_wiring::Understanding::build(&config, database, &memories)
-            .map_err(|e| e.to_string())?;
-
-    let consolidation =
-        bootstrap::consolidation_wiring::Consolidation::build(&config, &memories, &understanding)
-            .map_err(|e| e.to_string())?;
+    let Wired {
+        identity,
+        memories,
+        understanding,
+        consolidation,
+    } = build_all(&config)?;
 
     let identity = std::sync::Arc::new(identity);
     let understanding = std::sync::Arc::new(understanding);
@@ -162,11 +223,25 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    let consolidation = std::sync::Arc::new(consolidation);
+
+    // The nightly job. `None` when it is switched off or has no model to
+    // ask, in which case nothing is scheduled at all.
+    let scheduler = match consolidation.runner.clone() {
+        Some(runner) => consolidation::infrastructure::consolidation_scheduler::start(
+            runner,
+            consolidation.enabled,
+            &consolidation.schedule,
+        )
+        .map_err(|e| e.to_string())?,
+        None => None,
+    };
+
     let state = bootstrap::state::AppState {
         identity,
         memories: std::sync::Arc::new(memories),
         understanding,
-        consolidation: std::sync::Arc::new(consolidation),
+        consolidation,
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
     };
 
@@ -175,6 +250,9 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     // After the listener drains, so a job enqueued by the last in-flight
     // request still gets picked up rather than waiting for a restart.
     workers.shutdown().await;
+    if let Some(scheduler) = scheduler {
+        scheduler.shutdown().await;
+    }
 
     outcome.map_err(|e| format!("server error: {e}"))
 }

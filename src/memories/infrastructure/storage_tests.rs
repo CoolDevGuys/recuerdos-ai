@@ -866,3 +866,139 @@ fn each_user_gets_their_own_index_directory() {
     assert!(alex_dir.is_dir(), "expected a per-user index directory");
     assert!(sam_dir.is_dir());
 }
+
+#[test]
+fn merging_retires_a_whole_cluster_and_the_trail_reads_back() {
+    // The read-back half is the point. Every audit operation is written
+    // as a string and parsed on the way out, and the two lists live in
+    // different files — so an operation that writes fine and cannot be
+    // read turns `GET /v1/audit` into a 500 for that user, permanently,
+    // for every entry after it.
+    let fixture = fixture();
+    let cluster: Vec<Memory> = (0..3)
+        .map(|index| {
+            let memory = memory_for(&fixture.alex, &format!("phrasing {index}"));
+            fixture
+                .memories
+                .insert(&fixture.alex, &memory, "test")
+                .unwrap();
+            memory
+        })
+        .collect();
+    let replacement = memory_for(&fixture.alex, "the merged memory");
+    fixture
+        .memories
+        .insert(&fixture.alex, &replacement, "consolidation")
+        .unwrap();
+
+    let ids: Vec<MemoryId> = cluster.iter().map(Memory::id).collect();
+    let retired = fixture
+        .memories
+        .merge(
+            &fixture.alex,
+            &ids,
+            replacement.id(),
+            "consolidation",
+            "three phrasings of one preference",
+        )
+        .unwrap();
+
+    assert_eq!(retired, 3);
+    for id in &ids {
+        let stored = fixture.memories.find(&fixture.alex, *id).unwrap().unwrap();
+        assert_eq!(
+            stored.superseded_by(),
+            Some(replacement.id()),
+            "a cluster member was not retired"
+        );
+    }
+
+    let trail = fixture.memories.audit_trail(&fixture.alex, 100).unwrap();
+    let merges: Vec<_> = trail
+        .iter()
+        .filter(|entry| entry.operation == AuditOperation::Merge)
+        .collect();
+    assert_eq!(merges.len(), 3);
+    assert!(merges[0].detail.contains("three phrasings"));
+}
+
+#[test]
+fn merging_skips_members_another_user_owns() {
+    // A cluster is built from one user's memories, but the repository is
+    // the last line of defence and must not take an id on trust.
+    let fixture = fixture();
+    let theirs = memory_for(&fixture.sam, "sam's memory");
+    fixture
+        .memories
+        .insert(&fixture.sam, &theirs, "test")
+        .unwrap();
+    let replacement = memory_for(&fixture.alex, "alex's merged memory");
+    fixture
+        .memories
+        .insert(&fixture.alex, &replacement, "test")
+        .unwrap();
+
+    let retired = fixture
+        .memories
+        .merge(
+            &fixture.alex,
+            &[theirs.id()],
+            replacement.id(),
+            "consolidation",
+            "should not happen",
+        )
+        .unwrap();
+
+    assert_eq!(retired, 0, "another user's memory was retired");
+    assert!(
+        !fixture
+            .memories
+            .find(&fixture.sam, theirs.id())
+            .unwrap()
+            .unwrap()
+            .is_superseded()
+    );
+}
+
+#[test]
+fn merging_skips_a_member_that_is_already_retired() {
+    // Clusters are snapshots. Re-pointing a memory something else already
+    // superseded would rewrite history.
+    let fixture = fixture();
+    let first = memory_for(&fixture.alex, "already merged away");
+    let earlier = memory_for(&fixture.alex, "the earlier replacement");
+    let replacement = memory_for(&fixture.alex, "the new replacement");
+    for memory in [&first, &earlier, &replacement] {
+        fixture
+            .memories
+            .insert(&fixture.alex, memory, "test")
+            .unwrap();
+    }
+    fixture
+        .memories
+        .supersede(&fixture.alex, first.id(), earlier.id(), "test", "")
+        .unwrap();
+
+    let retired = fixture
+        .memories
+        .merge(
+            &fixture.alex,
+            &[first.id()],
+            replacement.id(),
+            "consolidation",
+            "",
+        )
+        .unwrap();
+
+    assert_eq!(retired, 0);
+    assert_eq!(
+        fixture
+            .memories
+            .find(&fixture.alex, first.id())
+            .unwrap()
+            .unwrap()
+            .superseded_by(),
+        Some(earlier.id()),
+        "an already-retired memory was re-pointed"
+    );
+}

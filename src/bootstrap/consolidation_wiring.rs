@@ -9,7 +9,11 @@
 use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::understanding_wiring::Understanding;
+use crate::bootstrap::wiring::Identity;
+use crate::consolidation::application::consolidation_runner::ConsolidationRunner;
+use crate::consolidation::application::memory_merger::MemoryMerger;
 use crate::consolidation::application::session_distiller::SessionDistiller;
+use crate::identity::application::background_user_resolver::BackgroundUserResolver;
 use crate::shared::error::Result;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
@@ -20,19 +24,54 @@ use std::sync::Arc;
 
 pub struct Consolidation {
     pub session_distiller: Arc<SessionDistiller>,
+    /// `None` when no provider is configured. Merging is a judgement
+    /// about meaning, and there is no heuristic fallback for it — a
+    /// degraded install keeps its duplicates, which is the safe outcome.
+    pub runner: Option<Arc<ConsolidationRunner>>,
+    pub enabled: bool,
+    pub schedule: String,
 }
 
 impl Consolidation {
     pub fn build(
         config: &AppConfig,
+        identity: &Identity,
         memories: &Memories,
         understanding: &Understanding,
     ) -> Result<Self> {
+        let runner = understanding.model.as_ref().map(|model| {
+            Arc::new(ConsolidationRunner::new(
+                Arc::clone(&identity.users),
+                Arc::new(BackgroundUserResolver::new(Arc::clone(&identity.users))),
+                Arc::clone(&memories.repository),
+                Arc::clone(&memories.embedder),
+                Arc::new(MemoryMerger::new(
+                    Arc::clone(&memories.saver),
+                    Arc::clone(&memories.repository),
+                    Arc::clone(model),
+                    Arc::clone(&understanding.taxonomy),
+                )),
+                Arc::clone(&identity.clock),
+                config.consolidation.similarity_threshold as f32,
+            ))
+        });
+
+        if runner.is_none() && config.consolidation.enabled {
+            tracing::info!(
+                "[consolidation].enabled = true but no [understanding].provider is set: \
+                 duplicate memories will not be merged. Merging is a judgement about \
+                 meaning and has no offline fallback."
+            );
+        }
+
         Ok(Self {
             session_distiller: Arc::new(SessionDistiller::new(
                 session_pipeline(config, memories, understanding),
                 understanding.enabled,
             )),
+            runner,
+            enabled: config.consolidation.enabled,
+            schedule: config.consolidation.schedule.clone(),
         })
     }
 }

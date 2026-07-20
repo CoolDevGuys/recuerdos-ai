@@ -187,6 +187,7 @@ mod tests {
         let consolidation = Arc::new(
             crate::bootstrap::consolidation_wiring::Consolidation::build(
                 &crate::bootstrap::config::AppConfig::default(),
+                &identity,
                 &memories,
                 &understanding,
             )

@@ -285,8 +285,16 @@ impl AppConfig {
             );
         }
 
-        if self.consolidation.schedule.trim().is_empty() {
-            issues.push("[consolidation].schedule is empty".to_string());
+        // Checked here rather than only when the scheduler starts: an
+        // unrecognised schedule would otherwise mean consolidation
+        // silently never runs, which looks exactly like it running and
+        // finding nothing.
+        if let Err(error) =
+            crate::consolidation::infrastructure::consolidation_scheduler::interval_for(
+                &self.consolidation.schedule,
+            )
+        {
+            issues.push(error.to_string().replace("validation failed: ", ""));
         }
         if !(0.0..=1.0).contains(&self.consolidation.similarity_threshold) {
             issues.push(format!(

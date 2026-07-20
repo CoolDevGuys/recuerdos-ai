@@ -19,6 +19,14 @@ pub enum AuditOperation {
     Update,
     Delete,
     Supersede,
+    /// Retired by consolidation, folded into a merged memory.
+    ///
+    /// Distinct from `Supersede` even though the mechanism is identical,
+    /// because the *cause* is what the trail is read for: a supersede
+    /// means the user said something new, a merge means nothing changed
+    /// and the store tidied itself. "Why did five of my memories become
+    /// one overnight?" is only answerable if those two look different.
+    Merge,
 }
 
 impl AuditOperation {
@@ -28,6 +36,7 @@ impl AuditOperation {
             AuditOperation::Update => "update",
             AuditOperation::Delete => "delete",
             AuditOperation::Supersede => "supersede",
+            AuditOperation::Merge => "merge",
         }
     }
 }
@@ -70,6 +79,30 @@ pub trait MemoryRepository: Send + Sync {
         actor: &str,
         reason: &str,
     ) -> Result<()>;
+
+    /// Retires a whole cluster into `replacement`, atomically.
+    ///
+    /// Separate from calling [`supersede`](Self::supersede) in a loop for
+    /// two reasons. It is one transaction: consolidation replaces five
+    /// memories with one, and failing halfway would leave the store with
+    /// two active memories saying the same thing plus three pointing at a
+    /// merged memory that only partly replaced them. And it records
+    /// [`AuditOperation::Merge`], so the trail distinguishes "the user
+    /// changed their mind" from "the store tidied itself".
+    ///
+    /// Ids not belonging to this user, already deleted, or already
+    /// superseded are skipped rather than failing the merge — a cluster
+    /// is assembled from a snapshot, and by the time it is applied the
+    /// user may have deleted one of its members themselves. Returns how
+    /// many were actually retired.
+    fn merge(
+        &self,
+        context: &UserContext,
+        superseded: &[MemoryId],
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<usize>;
 
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>>;
 

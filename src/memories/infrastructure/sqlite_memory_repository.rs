@@ -272,6 +272,68 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn merge(
+        &self,
+        context: &UserContext,
+        superseded: &[MemoryId],
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        self.database.with_connection(|connection| {
+            // An explicit transaction, unlike the single-statement
+            // mutations above: half a merge is a worse state than either
+            // end of it.
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|e| map_sqlite_error(e, "could not begin a merge"))?;
+
+            let mut retired = 0usize;
+            for id in superseded {
+                // `superseded_by IS NULL` as well as `deleted_at IS NULL`:
+                // a cluster is a snapshot, and re-pointing a memory that
+                // something else already retired would rewrite history.
+                let affected = transaction
+                    .execute(
+                        "UPDATE memories SET superseded_by = ?3, updated_at = ?4
+                         WHERE id = ?1 AND user_id = ?2
+                           AND deleted_at IS NULL AND superseded_by IS NULL",
+                        rusqlite::params![
+                            id.to_string(),
+                            context.user_id().to_string(),
+                            replacement.to_string(),
+                            Utc::now().to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|e| map_sqlite_error(e, "memory merge conflict"))?;
+
+                if affected == 0 {
+                    tracing::debug!(
+                        memory_id = %id,
+                        "skipping a cluster member that is already gone or already retired"
+                    );
+                    continue;
+                }
+
+                Self::write_audit(
+                    &transaction,
+                    context,
+                    *id,
+                    AuditOperation::Merge,
+                    actor,
+                    reason,
+                )?;
+                retired += 1;
+            }
+
+            transaction
+                .commit()
+                .map_err(|e| map_sqlite_error(e, "could not commit a merge"))?;
+
+            Ok(retired)
+        })
+    }
+
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>> {
         self.database.with_connection(|connection| {
             optional(connection.query_row(
@@ -525,6 +587,7 @@ fn build_audit_entry(
             "update" => AuditOperation::Update,
             "delete" => AuditOperation::Delete,
             "supersede" => AuditOperation::Supersede,
+            "merge" => AuditOperation::Merge,
             other => {
                 return Err(RaError::Internal(format!(
                     "stored audit operation {other:?} is unknown"
