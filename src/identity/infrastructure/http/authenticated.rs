@@ -163,6 +163,7 @@ mod tests {
     /// production write route to exercise yet.
     fn app(auth_mode: AuthMode) -> (Router, Arc<Identity>) {
         let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+        let shared_database = Arc::clone(&database);
         let identity = Arc::new(Identity::from_database(Arc::clone(&database)).unwrap());
         // A tmp dir per test app, so the tantivy indexes don't collide.
         let index_dir = tempfile::tempdir().unwrap();
@@ -184,10 +185,21 @@ mod tests {
             )
             .unwrap(),
         );
+        let consolidation = Arc::new(
+            crate::bootstrap::consolidation_wiring::Consolidation::build(
+                &crate::bootstrap::config::AppConfig::default(),
+                &identity,
+                &memories,
+                &understanding,
+                shared_database,
+            )
+            .unwrap(),
+        );
         let state = AppState {
             identity: Arc::clone(&identity),
             memories,
             understanding,
+            consolidation,
             auth_mode,
         };
 

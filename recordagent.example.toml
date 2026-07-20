@@ -58,8 +58,24 @@ max_attempts = 3
 extra_categories = []
 
 [consolidation]
+# The nightly tidy-up: near-duplicate memories are grouped, merged into
+# the one memory that says what all of them said, and the originals
+# superseded (retained, hidden from recall, in the audit trail).
+#
+# Needs an [understanding] provider — deciding whether two memories mean
+# the same thing has no offline fallback. Without one this does nothing,
+# and duplicates simply accumulate.
 enabled = true
+# hourly | daily | weekly. Measured from process start rather than being
+# a wall-clock time: RecordAgent runs on laptops, and a laptop is asleep
+# at 3am. The first run is one interval after startup, so a daemon that
+# restarts often does not consolidate (and pay for it) every time.
 schedule = "daily"
+# How alike two memories must be to be considered the same thing, as
+# cosine similarity of their embeddings. High on purpose: this is the
+# only thing between a chain of loosely-related memories and a merge
+# that loses a fact. Lower it and the model is asked about more pairs;
+# it still gets the last word and is prompted to decline when unsure.
 similarity_threshold = 0.92
 
 [retrieval]

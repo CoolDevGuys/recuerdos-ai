@@ -67,6 +67,16 @@ pub struct RecallRequest {
     pub limit: Option<usize>,
 }
 
+/// A finished session, handed over to be reduced to what outlives it.
+#[derive(Debug, Clone)]
+pub struct DistillRequest {
+    /// The transcript, or a summary of it.
+    pub content: String,
+    /// The client's own id for the session.
+    pub session_id: Option<String>,
+    pub tags: Vec<String>,
+}
+
 /// Executes what the MCP tools ask for.
 ///
 /// Async because one implementation is an HTTP client. The in-process one
@@ -77,6 +87,10 @@ pub trait MemoryToolbox: Send + Sync {
     async fn save(&self, request: SaveRequest) -> Result<SaveOutcome>;
 
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>>;
+
+    /// Distils a finished session. Returns what survived it — commonly
+    /// nothing, which is a correct answer and not an error.
+    async fn distill(&self, request: DistillRequest) -> Result<Vec<ToolMemory>>;
 
     /// Finds deletion candidates. Never deletes — `memory_forget` shows
     /// these and requires a second, explicit call.

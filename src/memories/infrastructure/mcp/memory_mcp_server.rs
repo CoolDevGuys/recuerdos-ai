@@ -4,7 +4,7 @@
 //! method, and renders the result — the same shape as the REST handlers,
 //! over a different protocol. No memory rules live here.
 
-use super::memory_toolbox::{MemoryToolbox, RecallRequest, SaveRequest};
+use super::memory_toolbox::{DistillRequest, MemoryToolbox, RecallRequest, SaveRequest};
 use super::tool_text;
 use crate::shared::error::RaError;
 use rmcp::handler::server::wrapper::Parameters;
@@ -40,6 +40,17 @@ pub struct RecallParams {
     pub categories: Vec<String>,
     /// How many to return. Defaults to the server's configured limit.
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DistillParams {
+    /// The session: a summary of what happened, or the transcript itself.
+    pub content: String,
+    /// Your own id for this session, if you have one.
+    pub session_id: Option<String>,
+    /// Tags applied to everything the session yields.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -142,6 +153,42 @@ impl MemoryMcpServer {
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
             tool_text::render_recall(&memories),
+        )]))
+    }
+
+    /// Reduce a finished session to the few things worth carrying into the next one.
+    ///
+    /// Call this at the end of a working session, or when the conversation is about to
+    /// be compacted — pass a summary of what happened. It extracts only what stays true
+    /// after this session ends: conventions that were established, decisions and their
+    /// reasons, durable facts about the system, and root causes worth not rediscovering.
+    ///
+    /// Everything about the task itself is deliberately discarded — what was being
+    /// built, what got done, what is still failing. Do not pre-filter the summary to
+    /// "important" parts; pass what actually happened and let the extraction decide.
+    ///
+    /// Returning nothing is the normal outcome. Most sessions produce no durable
+    /// memories, and that is a success, not a failure to report to the user.
+    ///
+    /// This is not a replacement for memory_save. Save a preference the moment the user
+    /// states it — do not wait for the end of the session to batch it up.
+    #[tool(name = "session_distill")]
+    async fn session_distill(
+        &self,
+        Parameters(params): Parameters<DistillParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let memories = self
+            .toolbox
+            .distill(DistillRequest {
+                content: params.content,
+                session_id: params.session_id,
+                tags: params.tags,
+            })
+            .await
+            .map_err(to_mcp_error)?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            tool_text::render_distilled(&memories),
         )]))
     }
 

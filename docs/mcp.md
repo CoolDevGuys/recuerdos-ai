@@ -151,28 +151,75 @@ gone from every future session.
 
 If a memory is merely out of date, save the corrected version instead.
 
+## Tool: `session_distill`
+
+Reduces a finished session to the few things worth carrying into the next
+one. Call it at the end of a working session, or when the conversation is
+about to be compacted.
+
+```json
+{"content": "…a summary of what happened in this session…",
+ "session_id": "s-42"}
+```
+
+```
+Distilled 2 memories from this session:
+
+- [experience] Session tokens expired early because the refresh timer used local time instead of UTC (id mem_01J…)
+- [preference.coding] The team writes table-driven tests for new Go packages (id mem_01K…)
+
+They will be available in future sessions.
+```
+
+Pass what actually happened — do not pre-filter to the "important" parts.
+Everything about the task itself is discarded on purpose: what was being
+built, what got done, what is still failing. What survives is conventions
+established, decisions and their reasons, durable facts about the system,
+and root causes worth not rediscovering.
+
+**Returning nothing is the normal outcome** and is reported as a success.
+Most sessions produce no durable memories.
+
+This is not a replacement for `memory_save`. Save a preference the moment
+the user states it rather than batching it up for the end of the session.
+
+Needs a provider: with `[understanding].provider = "none"` the tool
+returns an error naming the setting, rather than storing the transcript
+whole.
+
 ## Resource: `memory://profile`
 
-A markdown digest of the user's standing preferences, decisions and
-durable facts, grouped by category.
+A markdown briefing on the user, read at the start of a session. It
+exists because recall answers a question, and an agent that hasn't asked
+one yet still needs to know you forbid barrel files.
 
 ```markdown
 # Memory profile: alex (updated 2026-07-20)
 
-## Coding preferences
-- User forbids barrel files and index.ts re-exports _(typescript)_
+## How they work
 
-## Decisions
-- SQLite over Postgres for installer size
+- Uses pnpm; never npm or yarn
+- No barrel files or index.ts re-exports
+- SQLite over Postgres, chosen for installer size
+
+## About them
+
+- Vegetarian
 ```
 
-Read it at the start of a session. It exists because recall answers a
-question, and an agent that hasn't asked one yet still needs to know you
-forbid barrel files.
+With a provider configured, this is **written by a model** from the
+user's memories and cached until those memories change — so it
+compresses ("uses pnpm, Vitest and Biome" in one line) rather than
+listing forty preferences and truncating at eight. Regeneration happens
+per half: saving a coding preference does not rewrite the personal
+section.
 
-Capped at roughly 1500 tokens, with a per-category cap so one prolific
-category cannot crowd out the rest. When it truncates it says so and
-points at `memory_recall` for the remainder. Whatever it returns is rent
+Without a provider it is **assembled** instead: the highest-value
+memories per category, grouped under category headings. Same route, same
+media type, same shape — a client cannot tell which it got, and does not
+need to.
+
+Capped at roughly 1500 tokens either way. Whatever it returns is rent
 paid on every session forever, which is why it is bounded rather than
 growing with the corpus.
 
@@ -214,7 +261,7 @@ carries nothing else.
 
 **A tool returns "not permitted"** — check the key's scopes.
 `memory_save` and `memory_forget` need `write`; `memory_recall` and the
-profile need `read`.
+profile need `read`. `session_distill` needs `write`.
 
 ## Not yet implemented
 

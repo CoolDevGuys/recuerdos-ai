@@ -13,7 +13,7 @@
 use crate::shared::error::{RaError, Result};
 use crate::understanding::domain::candidate::{Candidate, RawCandidate};
 use crate::understanding::domain::chat_model::ChatModel;
-use crate::understanding::domain::extraction_prompt::{SourceHints, extraction_request};
+use crate::understanding::domain::extraction_prompt::{Lens, SourceHints, extraction_request};
 use crate::understanding::domain::taxonomy::Taxonomy;
 use serde_json::Value;
 use std::sync::Arc;
@@ -21,11 +21,30 @@ use std::sync::Arc;
 pub struct CandidateExtractor {
     model: Arc<dyn ChatModel>,
     taxonomy: Arc<Taxonomy>,
+    lens: Lens,
 }
 
 impl CandidateExtractor {
+    /// Extracts from content a caller submitted to be remembered.
     pub fn new(model: Arc<dyn ChatModel>, taxonomy: Arc<Taxonomy>) -> Self {
-        Self { model, taxonomy }
+        Self {
+            model,
+            taxonomy,
+            lens: Lens::Submission,
+        }
+    }
+
+    /// Extracts from a finished session, which needs the far stricter
+    /// question — see [`Lens`]. Everything after the model call is
+    /// identical, which is the point: distillation reuses the whole
+    /// validation, normalisation and reconciliation path rather than
+    /// growing a parallel one.
+    pub fn for_sessions(model: Arc<dyn ChatModel>, taxonomy: Arc<Taxonomy>) -> Self {
+        Self {
+            model,
+            taxonomy,
+            lens: Lens::Session,
+        }
     }
 
     /// Extracts candidates from `content`.
@@ -41,7 +60,7 @@ impl CandidateExtractor {
             ));
         }
 
-        let request = extraction_request(&self.taxonomy, content, hints);
+        let request = extraction_request(&self.taxonomy, self.lens, content, hints);
         let answer = self.model.complete_structured(&request).await?;
 
         Ok(self.harvest(answer, hints))

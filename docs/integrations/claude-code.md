@@ -106,7 +106,7 @@ posts the summary to RecordAgent:
         "hooks": [
           {
             "type": "command",
-            "command": "jq -Rs '{content: ., client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/memories >/dev/null || true"
+            "command": "jq -Rs '{content: ., client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/sessions/distill >/dev/null || true"
           }
         ]
       }
@@ -115,16 +115,25 @@ posts the summary to RecordAgent:
 }
 ```
 
-This posts to `/v1/memories`, which runs the extraction pipeline: the two
-or three durable facts get pulled out of the session and the rest is
-discarded. The request returns a job id immediately, so compaction is
-never held up waiting for a model.
+This posts to `/v1/sessions/distill`, which asks the extraction pipeline
+a stricter question than an ordinary save does: *what is still true after
+this session ends?* The two or three durable facts get pulled out — a
+convention that was established, a root cause worth not rediscovering —
+and everything about the task itself is discarded.
 
-**It is only worth enabling with a provider configured.** With
-`[understanding].provider = "none"` there is nothing to do the extracting,
-and this stores the entire summary as one coarse memory that will crowd
-out better ones on every future recall. In that mode, prefer letting the
-model call `memory_save` deliberately: one good memory beats a transcript.
+The request is synchronous, because a hook has nowhere to put a job id
+and no next turn in which to poll. It is fast enough not to be felt, and
+the `|| true` means a slow or unreachable daemon never blocks compaction.
+
+Most sessions distil to nothing, which is the correct outcome and not a
+sign the hook is broken.
+
+**It only works with a provider configured.** With
+`[understanding].provider = "none"` the endpoint returns `400` rather
+than storing your whole transcript as one coarse memory — that memory
+would be unrecallable and would crowd out better ones on every future
+recall. In that mode, prefer letting the model call `memory_save`
+deliberately: one good memory beats a transcript.
 
 ## What to expect
 

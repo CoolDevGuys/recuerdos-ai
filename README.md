@@ -20,13 +20,15 @@ memories strictly. See [project-plan.md](project-plan.md) for the full
 design and [implementation-plan.md](implementation-plan.md) for the phased
 build plan.
 
-> **Status: Phase 4 — Understanding.** Claude Code and opencode can read
+> **Status: Phase 5 — Consolidation.** Claude Code and opencode can read
 > and write your memories over MCP. Storage is hybrid semantic + keyword
-> search, strictly per user. Raw text can now be submitted to
-> `POST /v1/memories`, which extracts the durable facts from it and
-> supersedes anything they contradict — so a memory store stops being a
-> log. That pipeline is opt-in: `[understanding].provider` defaults to
-> `none`, and everything works offline without it.
+> search, strictly per user. Raw text submitted to `POST /v1/memories` is
+> split into durable facts that supersede anything they contradict, a
+> finished session can be distilled down to what outlives it, and a
+> nightly job merges duplicates, retires what has expired and demotes
+> what nobody reads — so the store stays clean instead of only growing.
+> The model-backed parts are opt-in: `[understanding].provider` defaults
+> to `none`, and everything else works offline without it.
 
 ## Prerequisites
 
@@ -199,8 +201,8 @@ See [docs/configuration.md](docs/configuration.md).
 | 1 — Identity | Users, API keys, per-user isolation | ✅ |
 | 2 — Memories | Store + hybrid search (REST) | ✅ |
 | 3 — MCP server | Claude Code / opencode integration | ✅ |
-| 4 — Understanding | Extraction, labeling, reconciliation | ⬜ |
-| 5 — Consolidation | Dedup/merge, decay, profile digest | ⬜ |
+| 4 — Understanding | Extraction, labeling, reconciliation | ✅ |
+| 5 — Consolidation | Dedup/merge, decay, profile digest | ✅ |
 | 6 — Release | SDK, docs, packaging | ⬜ |
 
 ## Architecture

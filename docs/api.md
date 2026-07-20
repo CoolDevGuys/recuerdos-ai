@@ -1,6 +1,6 @@
 # REST API
 
-**Status: Phase 4.** Authentication, the memory endpoints, the profile and
+**Status: Phase 5.** Authentication, the memory endpoints, the profile and
 the async understanding pipeline are live; agents can also reach all of it
 over [MCP](mcp.md).
 See [implementation-plan.md](../implementation-plan.md) for what lands when.
@@ -300,12 +300,57 @@ Requires `read`. `?format=markdown` (default) or `?format=json`, plus
 Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
 
+### `POST /v1/sessions/distill`
+
+Requires `write`. Reduces a finished session to the few things that
+outlive it.
+
+```bash
+curl -X POST localhost:7070/v1/sessions/distill \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+    "content": "…a transcript, or a summary of one…",
+    "session_id": "s-42",
+    "client": "claude-code"}'
+```
+
+```json
+{"memory_ids": ["mem_01J…", "mem_01K…"], "distilled": 2}
+```
+
+| field | |
+|---|---|
+| `content` | The session. Required, and capped at 200 000 characters — summarize anything longer. |
+| `session_id` | Your own id for the session, recorded on every memory it produces. |
+| `client` | Recorded as the source. Defaults to `session-distill`. |
+| `tags` | Applied to everything the session yields. |
+
+Synchronous, unlike `POST /v1/memories`: the caller is a session-end hook
+with nowhere to put a job id and no next turn in which to poll.
+
+`"distilled": 0` is the ordinary outcome — most sessions produce nothing
+that stays true after they end — and is a success, not a failure.
+
+This is the same extraction and reconciliation pipeline as
+`POST /v1/memories`, asked a stricter question: *what is still true after
+this session ends?* A convention established in this session that
+contradicts an older one supersedes it rather than landing beside it.
+
+**Requires a provider.** With `[understanding].provider = "none"` this
+returns `400`. It is the one endpoint that does not degrade to storing
+content verbatim — a whole transcript as a single memory is unrecallable
+and would be spent from a context window on every match, which is worse
+than storing nothing.
+
 ### `GET /v1/profile`
 
 Requires `read`. Returns the markdown digest described in
 [mcp.md](mcp.md#resource-memoryprofile) — the user's standing
-preferences, decisions and durable facts, grouped by category and capped
-at roughly 1500 tokens.
+preferences, decisions and durable facts, capped at roughly 1500 tokens.
+
+With a provider configured this is written by a model and cached until
+the memories under it change; without one it is assembled from the
+memories directly. The route, the media type and the shape are identical
+either way.
 
 The same content the MCP `memory://profile` resource serves, so an agent
 and a shell script see one profile.
@@ -327,7 +372,7 @@ would otherwise produce a category nothing ever matches.
 
 ## Not yet implemented
 
-`POST /v1/sessions/distill` (submit a whole transcript), and `GET /metrics`.
+`GET /metrics`.
 
 See [project-plan.md §9](../project-plan.md#9-api-design-rest--mcp) for the
 full design.

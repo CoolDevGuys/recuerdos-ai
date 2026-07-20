@@ -19,6 +19,14 @@ pub enum AuditOperation {
     Update,
     Delete,
     Supersede,
+    /// Retired by consolidation, folded into a merged memory.
+    ///
+    /// Distinct from `Supersede` even though the mechanism is identical,
+    /// because the *cause* is what the trail is read for: a supersede
+    /// means the user said something new, a merge means nothing changed
+    /// and the store tidied itself. "Why did five of my memories become
+    /// one overnight?" is only answerable if those two look different.
+    Merge,
 }
 
 impl AuditOperation {
@@ -28,6 +36,7 @@ impl AuditOperation {
             AuditOperation::Update => "update",
             AuditOperation::Delete => "delete",
             AuditOperation::Supersede => "supersede",
+            AuditOperation::Merge => "merge",
         }
     }
 }
@@ -71,6 +80,30 @@ pub trait MemoryRepository: Send + Sync {
         reason: &str,
     ) -> Result<()>;
 
+    /// Retires a whole cluster into `replacement`, atomically.
+    ///
+    /// Separate from calling [`supersede`](Self::supersede) in a loop for
+    /// two reasons. It is one transaction: consolidation replaces five
+    /// memories with one, and failing halfway would leave the store with
+    /// two active memories saying the same thing plus three pointing at a
+    /// merged memory that only partly replaced them. And it records
+    /// [`AuditOperation::Merge`], so the trail distinguishes "the user
+    /// changed their mind" from "the store tidied itself".
+    ///
+    /// Ids not belonging to this user, already deleted, or already
+    /// superseded are skipped rather than failing the merge — a cluster
+    /// is assembled from a snapshot, and by the time it is applied the
+    /// user may have deleted one of its members themselves. Returns how
+    /// many were actually retired.
+    fn merge(
+        &self,
+        context: &UserContext,
+        superseded: &[MemoryId],
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<usize>;
+
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>>;
 
     /// Fetches many by id, in one round trip. Ids belonging to another
@@ -82,8 +115,18 @@ pub trait MemoryRepository: Send + Sync {
 
     fn audit_trail(&self, context: &UserContext, limit: usize) -> Result<Vec<AuditEntry>>;
 
-    /// Records that these memories were returned by a recall. Off the
-    /// hot path; feeds Phase 5's importance decay.
+    /// Writes recomputed decay scores.
+    ///
+    /// Deliberately writes no audit entries and does not touch
+    /// `updated_at`. Importance is derived from access bookkeeping, not
+    /// asserted by anyone — auditing it would add an entry per memory per
+    /// night and bury the changes a user actually made under changes
+    /// nobody made.
+    fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()>;
+
+    /// Records that these memories were returned by a recall: stamps
+    /// `last_accessed_at` and increments `access_count`. Off the hot
+    /// path; the two are the whole input to importance decay.
     fn touch_accessed(
         &self,
         context: &UserContext,

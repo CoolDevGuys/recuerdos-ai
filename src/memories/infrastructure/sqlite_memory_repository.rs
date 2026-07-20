@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 const COLUMNS: &str = "id, user_id, content, category, tags, entities, confidence, \
                        source_client, source_session_id, created_at, updated_at, \
-                       last_accessed_at, expires_at, superseded_by";
+                       last_accessed_at, access_count, importance, expires_at, \
+                       superseded_by";
 
 /// Phase 2 gives each user a single collection. It exists so the
 /// embedding model can be pinned per collection (see V2__memories.sql);
@@ -272,6 +273,68 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn merge(
+        &self,
+        context: &UserContext,
+        superseded: &[MemoryId],
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        self.database.with_connection(|connection| {
+            // An explicit transaction, unlike the single-statement
+            // mutations above: half a merge is a worse state than either
+            // end of it.
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|e| map_sqlite_error(e, "could not begin a merge"))?;
+
+            let mut retired = 0usize;
+            for id in superseded {
+                // `superseded_by IS NULL` as well as `deleted_at IS NULL`:
+                // a cluster is a snapshot, and re-pointing a memory that
+                // something else already retired would rewrite history.
+                let affected = transaction
+                    .execute(
+                        "UPDATE memories SET superseded_by = ?3, updated_at = ?4
+                         WHERE id = ?1 AND user_id = ?2
+                           AND deleted_at IS NULL AND superseded_by IS NULL",
+                        rusqlite::params![
+                            id.to_string(),
+                            context.user_id().to_string(),
+                            replacement.to_string(),
+                            Utc::now().to_rfc3339(),
+                        ],
+                    )
+                    .map_err(|e| map_sqlite_error(e, "memory merge conflict"))?;
+
+                if affected == 0 {
+                    tracing::debug!(
+                        memory_id = %id,
+                        "skipping a cluster member that is already gone or already retired"
+                    );
+                    continue;
+                }
+
+                Self::write_audit(
+                    &transaction,
+                    context,
+                    *id,
+                    AuditOperation::Merge,
+                    actor,
+                    reason,
+                )?;
+                retired += 1;
+            }
+
+            transaction
+                .commit()
+                .map_err(|e| map_sqlite_error(e, "could not commit a merge"))?;
+
+            Ok(retired)
+        })
+    }
+
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>> {
         self.database.with_connection(|connection| {
             optional(connection.query_row(
@@ -376,6 +439,46 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
+        if scores.is_empty() {
+            return Ok(());
+        }
+
+        self.database.with_connection(|connection| {
+            // One transaction for the whole batch. Not for atomicity —
+            // half-updated decay scores would be harmless — but because
+            // SQLite commits each statement separately otherwise, and a
+            // nightly job over a few thousand memories would mean a few
+            // thousand fsyncs.
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|e| map_sqlite_error(e, "could not begin an importance update"))?;
+
+            {
+                let mut statement = transaction
+                    .prepare(
+                        "UPDATE memories SET importance = ?3
+                         WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
+                    )
+                    .map_err(|e| map_sqlite_error(e, "importance update conflict"))?;
+
+                for (id, importance) in scores {
+                    statement
+                        .execute(rusqlite::params![
+                            id.to_string(),
+                            context.user_id().to_string(),
+                            importance,
+                        ])
+                        .map_err(|e| map_sqlite_error(e, "importance update conflict"))?;
+                }
+            }
+
+            transaction
+                .commit()
+                .map_err(|e| map_sqlite_error(e, "could not commit an importance update"))
+        })
+    }
+
     fn touch_accessed(
         &self,
         context: &UserContext,
@@ -391,7 +494,11 @@ impl MemoryRepository for SqliteMemoryRepository {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "UPDATE memories SET last_accessed_at = ?1
+                // The count is incremented in SQL rather than read,
+                // bumped and written back: two concurrent recalls of the
+                // same memory must both be counted, and a read-modify-write
+                // would lose one of them.
+                "UPDATE memories SET last_accessed_at = ?1, access_count = access_count + 1
                  WHERE user_id = ?2 AND id IN ({placeholders})"
             );
 
@@ -458,8 +565,10 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Result<Memory>> {
         row.get::<_, String>(9)?,
         row.get::<_, String>(10)?,
         row.get::<_, Option<String>>(11)?,
-        row.get::<_, Option<String>>(12)?,
-        row.get::<_, Option<String>>(13)?,
+        row.get::<_, u32>(12)?,
+        row.get::<_, f32>(13)?,
+        row.get::<_, Option<String>>(14)?,
+        row.get::<_, Option<String>>(15)?,
     ))
 }
 
@@ -477,6 +586,8 @@ fn build_memory(
     created_at: String,
     updated_at: String,
     last_accessed_at: Option<String>,
+    access_count: u32,
+    importance: f32,
     expires_at: Option<String>,
     superseded_by: Option<String>,
 ) -> Result<Memory> {
@@ -500,6 +611,8 @@ fn build_memory(
             .as_deref()
             .map(parse_timestamp)
             .transpose()?,
+        access_count,
+        importance,
         expires_at.as_deref().map(parse_timestamp).transpose()?,
         superseded_by
             .map(|id| {
@@ -525,6 +638,7 @@ fn build_audit_entry(
             "update" => AuditOperation::Update,
             "delete" => AuditOperation::Delete,
             "supersede" => AuditOperation::Supersede,
+            "merge" => AuditOperation::Merge,
             other => {
                 return Err(RaError::Internal(format!(
                     "stored audit operation {other:?} is unknown"

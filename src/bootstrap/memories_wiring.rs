@@ -36,6 +36,10 @@ pub struct Memories {
     /// Exposed for the audit endpoint, which reads the trail directly
     /// rather than through a use case of its own.
     pub repository: Arc<dyn MemoryRepository>,
+    /// Exposed for consolidation, which compares memories against each
+    /// other rather than against a query and so needs the vectors
+    /// directly — see `consolidation::application::consolidation_runner`.
+    pub embedder: Arc<dyn Embedder>,
     /// Config echoes the handlers need when parsing requests.
     pub extra_categories: Vec<String>,
     pub default_limit: usize,
@@ -122,6 +126,7 @@ impl Memories {
                 Arc::clone(&clock),
             )),
             repository,
+            embedder,
             extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,
         })

@@ -11,6 +11,7 @@
 //! integration suite.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::identity::domain::user_repository::UserRepository;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
@@ -65,6 +66,11 @@ pub struct Fixture {
     pub embedder: Arc<FallibleEmbedder>,
     pub alex: UserContext,
     pub sam: UserContext,
+    /// The real (SQLite-backed, in-memory) user table the two contexts
+    /// above were authenticated against. Consolidation is the one thing
+    /// that walks every user rather than being handed one, so it needs
+    /// the same table those contexts came from.
+    pub users: Arc<dyn UserRepository>,
 }
 
 impl Fixture {
@@ -80,6 +86,7 @@ impl Fixture {
             embedder: Arc::new(FallibleEmbedder::default()),
             alex: authenticate(&identity, "alex"),
             sam: authenticate(&identity, "sam"),
+            users: Arc::clone(&identity.users),
         }
     }
 
@@ -266,6 +273,42 @@ impl MemoryRepository for InMemoryMemoryRepository {
         Ok(())
     }
 
+    fn merge(
+        &self,
+        context: &UserContext,
+        superseded: &[MemoryId],
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<usize> {
+        let mut retired = 0usize;
+
+        for id in superseded {
+            // Mirrors the real adapter's skip conditions rather than its
+            // atomicity: a double that returned errors where SQLite skips
+            // would let a use case pass here and fail in production.
+            if !self.visible(context, *id) {
+                continue;
+            }
+
+            let mut memories = self.memories.lock().unwrap();
+            let memory = memories
+                .iter_mut()
+                .find(|m| m.id() == *id)
+                .expect("visible implies present");
+            if memory.is_superseded() {
+                continue;
+            }
+            *memory = memory.clone().supersede(replacement, Utc::now());
+            drop(memories);
+
+            self.record(context, *id, AuditOperation::Merge, actor, reason);
+            retired += 1;
+        }
+
+        Ok(retired)
+    }
+
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>> {
         Ok(self
             .memories
@@ -314,6 +357,19 @@ impl MemoryRepository for InMemoryMemoryRepository {
         entries.reverse();
         entries.truncate(limit);
         Ok(entries)
+    }
+
+    fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
+        let mut memories = self.memories.lock().unwrap();
+        for memory in memories.iter_mut() {
+            if memory.user_id() != context.user_id() {
+                continue;
+            }
+            if let Some((_, importance)) = scores.iter().find(|(id, _)| *id == memory.id()) {
+                *memory = memory.clone().with_importance(*importance);
+            }
+        }
+        Ok(())
     }
 
     fn touch_accessed(

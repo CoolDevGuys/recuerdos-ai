@@ -173,26 +173,6 @@ pub async fn export_memories(
     Ok((headers, body))
 }
 
-/// The same digest the MCP `memory://profile` resource returns.
-///
-/// Exposed over REST too because the profile is useful to any client, not
-/// just MCP ones — and because the stdio shim reads it from here, which
-/// is what keeps both transports showing an identical profile.
-pub async fn read_profile(
-    State(state): State<AppState>,
-    ReadAccess(context): ReadAccess,
-) -> Result<impl IntoResponse> {
-    let memories = state.memories.clone();
-    let profile = blocking(move || memories.profile_assembler.execute(&context)).await?;
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/markdown; charset=utf-8".parse().unwrap(),
-    );
-    Ok((headers, profile))
-}
-
 #[derive(Debug, Deserialize)]
 pub struct AuditParams {
     #[serde(default)]
