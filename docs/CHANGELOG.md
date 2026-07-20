@@ -3,6 +3,48 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.5.0-alpha — Phase 5: Consolidation
+
+Memory that stays clean over time. Until now the store only grew; this
+phase is everything that makes it shrink again.
+
+- **`POST /v1/sessions/distill`** and the **`session_distill` MCP tool**
+  reduce a finished session to the few things that outlive it. Same
+  pipeline as ordinary ingestion, asked a stricter question — *what is
+  still true after this session ends?* — so the conventions and root
+  causes survive and the task chatter does not. Most sessions distil to
+  nothing, which is the correct answer.
+- **A nightly consolidation job**, also runnable as
+  `recordagent consolidate [--dry-run]`. Near-duplicates within a user's
+  category are grouped by similarity, and the model writes the one memory
+  that says what all of them said. Five phrasings of one preference
+  become one active memory and five superseded ones, each with a `merge`
+  audit entry carrying the reasoning.
+- **The threshold proposes, the model disposes.** Similarity gets
+  memories into a cluster but cannot tell whether they mean the same
+  thing — "prefers pnpm" and "prefers Vitest" are very close in embedding
+  space and are two facts. The merge prompt argues *against* merging, and
+  every unusable answer parses as keep-separate: a duplicate surviving
+  one more night is cheap, a merged-away fact is not.
+- **TTL expiry.** Memories past their `expires_at` are retired with an
+  audit entry naming the date. Retired, not erased — `expires_at` is a
+  promise a memory stops being used, not that it stops existing.
+- **Importance decay.** Memories are rescored from how recently and how
+  often they were actually recalled, feeding recall ranking. It only ever
+  demotes, and never below a floor well above zero: an architecture
+  decision nobody has read this year has to lose ties, not vanish.
+- **An LLM-written `memory://profile`.** Generated per half (how they
+  work / about them) and cached until the memories under it change, so it
+  compresses forty preferences into a paragraph instead of truncating at
+  eight. Staleness is derived from the memories themselves rather than a
+  dirty flag every write path has to remember to set.
+- **Graceful degradation throughout.** Expiry and decay need no provider
+  and run everywhere. Merging and the written digest need one and are
+  simply skipped without it — the profile falls back to assembly, and the
+  resource contract does not change. Distillation is the single exception:
+  it refuses rather than storing a transcript whole, because that memory
+  would be unrecallable and would cost a context window on every match.
+
 ## v0.4.0-alpha — Phase 4: Understanding
 
 The differentiator: raw text in, understood memories out. A memory store

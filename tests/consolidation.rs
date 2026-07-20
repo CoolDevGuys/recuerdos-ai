@@ -99,6 +99,28 @@ impl Instance {
         (status, response.json().await.unwrap_or(Value::Null))
     }
 
+    /// The profile, as any client reads it.
+    async fn profile(&self) -> String {
+        let response = self
+            .http
+            .get(format!("{}/v1/profile", self.app.base_url))
+            .bearer_auth(&self.key)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(response.status(), 200);
+        response.text().await.expect("a markdown body")
+    }
+
+    async fn model_calls(&self) -> usize {
+        self.model
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len()
+    }
+
     async fn distill(&self, content: &str) -> (reqwest::StatusCode, Value) {
         self.post("/v1/sessions/distill", json!({"content": content}))
             .await
@@ -440,4 +462,67 @@ async fn distilling_requires_the_write_scope() {
         .expect("request failed");
 
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn the_profile_is_generated_once_and_reused_until_memories_change() {
+    // The resource contract is unchanged from Phase 3 — same route, same
+    // media type, same markdown — but the body is now written rather
+    // than listed, and cached. Caching is the load-bearing part: this is
+    // read at the start of every session by every client.
+    let instance = Instance::with_model(vec![
+        json!({"digest": "- Uses pnpm, never npm or yarn"}),
+        json!({"digest": "- Uses pnpm and Vitest; never npm or yarn"}),
+    ])
+    .await;
+
+    instance
+        .post(
+            "/v1/memories:direct",
+            json!({"content": "prefers pnpm", "category": "preference.coding"}),
+        )
+        .await;
+
+    let first = instance.profile().await;
+    assert!(first.starts_with("# Memory profile: alex"), "{first}");
+    assert!(first.contains("## How they work"), "{first}");
+    assert!(first.contains("Uses pnpm, never npm or yarn"), "{first}");
+
+    // Nothing changed: served from cache, no second model call.
+    assert_eq!(instance.profile().await, first);
+    assert_eq!(instance.model_calls().await, 1);
+
+    // A new memory makes it stale, and it regenerates.
+    instance
+        .post(
+            "/v1/memories:direct",
+            json!({"content": "prefers vitest", "category": "preference.coding"}),
+        )
+        .await;
+
+    let second = instance.profile().await;
+    assert!(second.contains("Uses pnpm and Vitest"), "{second}");
+    assert_eq!(instance.model_calls().await, 2);
+}
+
+#[tokio::test]
+async fn without_a_provider_the_profile_falls_back_to_assembly() {
+    // The degraded default. The resource must still answer, with the
+    // memories listed rather than summarised.
+    let instance = Instance::degraded().await;
+
+    instance
+        .post(
+            "/v1/memories:direct",
+            json!({"content": "User forbids barrel files", "category": "preference.coding"}),
+        )
+        .await;
+
+    let profile = instance.profile().await;
+
+    assert!(profile.starts_with("# Memory profile: alex"), "{profile}");
+    assert!(
+        profile.contains("User forbids barrel files"),
+        "assembly should list the memory verbatim: {profile}"
+    );
 }

@@ -163,6 +163,7 @@ mod tests {
     /// production write route to exercise yet.
     fn app(auth_mode: AuthMode) -> (Router, Arc<Identity>) {
         let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+        let shared_database = Arc::clone(&database);
         let identity = Arc::new(Identity::from_database(Arc::clone(&database)).unwrap());
         // A tmp dir per test app, so the tantivy indexes don't collide.
         let index_dir = tempfile::tempdir().unwrap();
@@ -190,6 +191,7 @@ mod tests {
                 &identity,
                 &memories,
                 &understanding,
+                shared_database,
             )
             .unwrap(),
         );

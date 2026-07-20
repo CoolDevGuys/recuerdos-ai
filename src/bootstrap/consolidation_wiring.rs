@@ -13,7 +13,10 @@ use crate::bootstrap::wiring::Identity;
 use crate::consolidation::application::consolidation_runner::ConsolidationRunner;
 use crate::consolidation::application::memory_maintainer::MemoryMaintainer;
 use crate::consolidation::application::memory_merger::MemoryMerger;
+use crate::consolidation::application::profile_digest_writer::ProfileDigestWriter;
 use crate::consolidation::application::session_distiller::SessionDistiller;
+use crate::consolidation::domain::profile_digest::ProfileDigestStore;
+use crate::consolidation::infrastructure::sqlite_profile_digest_store::SqliteProfileDigestStore;
 use crate::shared::error::Result;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
@@ -28,6 +31,9 @@ pub struct Consolidation {
     /// has work to do in every installation; only merging is conditional
     /// on a provider — see `ConsolidationRunner`.
     pub runner: Arc<ConsolidationRunner>,
+    /// Serves `GET /v1/profile` and the `memory://profile` resource.
+    /// Falls back to the memories context's assembler without a model.
+    pub profile_digest_writer: Arc<ProfileDigestWriter>,
     pub enabled: bool,
     pub schedule: String,
 }
@@ -38,6 +44,7 @@ impl Consolidation {
         identity: &Identity,
         memories: &Memories,
         understanding: &Understanding,
+        database: Arc<crate::shared::sqlite::SqliteDatabase>,
     ) -> Result<Self> {
         let merger = understanding.model.as_ref().map(|model| {
             Arc::new(MemoryMerger::new(
@@ -76,6 +83,13 @@ impl Consolidation {
                 understanding.enabled,
             )),
             runner,
+            profile_digest_writer: Arc::new(ProfileDigestWriter::new(
+                Arc::clone(&memories.repository),
+                Arc::new(SqliteProfileDigestStore::new(database)) as Arc<dyn ProfileDigestStore>,
+                Arc::clone(&memories.profile_assembler),
+                understanding.model.clone(),
+                Arc::clone(&identity.clock),
+            )),
             enabled: config.consolidation.enabled,
             schedule: config.consolidation.schedule.clone(),
         })

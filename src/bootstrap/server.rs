@@ -74,7 +74,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/sessions/distill",
             post(consolidation_http::handlers::distill_session),
         )
-        .route("/v1/profile", get(memories_http::handlers::read_profile))
+        .route(
+            "/v1/profile",
+            get(consolidation_http::handlers::read_profile),
+        )
         .route("/v1/audit", get(memories_http::handlers::read_audit))
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(

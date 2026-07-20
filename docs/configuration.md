@@ -3,8 +3,8 @@
 **Status: Phase 2.** Every key below is loaded and validated today.
 `[auth]`, `[storage]`, `[embeddings]`, `[retrieval]` and
 `[understanding.taxonomy].extra_categories` are enforced; the remaining
-`[understanding]` and `[consolidation]` keys configure features that
-arrive in Phases 4 and 5.
+`[understanding]` and `[consolidation]` configure the model-backed
+features; both degrade to something useful without a provider.
 
 ## Precedence
 
@@ -31,6 +31,10 @@ with its default and an explanatory comment. Highlights:
   reconciliation are opt-in, and with no provider configured there is zero
   LLM egress. Submitted content is stored verbatim instead; see
   [api.md](api.md#without-a-provider) for exactly what changes.
+- `[consolidation].enabled` defaults to `true`. Expiry and importance
+  decay run regardless of provider — both are arithmetic. Merging
+  duplicates needs `[understanding].provider`, because deciding whether
+  two memories mean the same thing has no offline fallback.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation
@@ -132,3 +136,75 @@ indexes at `<path>/text-index/<user-id>/`. Both are created, along with
 any missing parent directories, on first use. Schema migrations run
 automatically at startup and are idempotent. Backup is `cp` of the data
 directory (stop the daemon first, or copy the WAL files with it).
+
+## Consolidation
+
+```toml
+[consolidation]
+enabled = true
+schedule = "daily"              # hourly | daily | weekly
+similarity_threshold = 0.92
+```
+
+The nightly tidy-up. Three things happen in one pass, per user:
+
+1. **Expiry.** Memories past their `expires_at` are retired — soft
+   deleted, with an audit entry naming the date they hit. `expires_at` is
+   a promise that a memory stops being *used*, not that it stops
+   existing.
+2. **Decay.** `importance` is recomputed from how recently and how often
+   each memory was actually recalled, and feeds recall ranking as a
+   bounded multiplier. It only ever demotes, and never below a floor well
+   above zero: a decision from last year that nobody has looked at since
+   must lose ties, not disappear.
+3. **Merging.** Near-duplicates within one user's category are grouped
+   and replaced by the single memory that says what all of them said. The
+   originals are superseded, not deleted, each with a `merge` audit entry
+   carrying the model's reasoning.
+
+Only the third needs a provider.
+
+### Running it by hand
+
+```bash
+recordagent consolidate --dry-run   # report what would merge; changes nothing
+recordagent consolidate             # apply
+```
+
+`--dry-run` calls no model, so it costs nothing to run. It prints each
+cluster's contents rather than its ids, because the point is for a person
+to judge whether the grouping is right.
+
+### `schedule`
+
+An interval from process start, not a wall-clock time. A cron expression
+would let you pick 3am, which sounds better than it is: RecordAgent runs
+on laptops, and a laptop is asleep at 3am. The first run is one interval
+*after* startup, so a daemon that restarts often does not consolidate —
+and pay for it — every time.
+
+### `similarity_threshold`
+
+How alike two memories must be to be *considered* the same thing, as
+cosine similarity of their embeddings. High on purpose: it is the only
+thing standing between a chain of loosely-related memories and a merge
+that loses a fact.
+
+Passing the threshold only earns a memory a place in a cluster. The model
+gets the last word and is prompted to decline when unsure — "prefers
+pnpm" and "prefers Vitest" sit very close in embedding space and are two
+different true things.
+
+## The profile digest
+
+`GET /v1/profile` and the MCP `memory://profile` resource return a
+briefing on the user, capped at roughly 1500 tokens.
+
+With `[understanding].provider` set, it is written by a model and cached
+until the memories under it change — so it compresses rather than listing
+and truncating. Staleness is detected by comparing the memories against
+what the digest was built from, so no write path has to remember to
+invalidate anything.
+
+Without a provider, it is assembled from the highest-value memories per
+category instead. Same route, same media type, same shape.

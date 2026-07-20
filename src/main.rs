@@ -148,6 +148,7 @@ fn build_all(config: &bootstrap::config::AppConfig) -> Result<Wired, String> {
     // writer, and two handles would mean two connections contending for
     // the same file rather than queueing behind one mutex.
     let database = bootstrap::wiring::open_database(config).map_err(|e| e.to_string())?;
+    let shared_database = std::sync::Arc::clone(&database);
     let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
         .map_err(|e| e.to_string())?;
     let memories =
@@ -161,6 +162,7 @@ fn build_all(config: &bootstrap::config::AppConfig) -> Result<Wired, String> {
         &identity,
         &memories,
         &understanding,
+        shared_database,
     )
     .map_err(|e| e.to_string())?;
 
