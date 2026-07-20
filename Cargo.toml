@@ -13,7 +13,7 @@ name = "recordagent"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout", "request-id", "util"] }
@@ -47,6 +47,7 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 rmcp = { version = "2.2.0", features = ["client", "transport-child-process"] }
+wiremock = "0.6"
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }

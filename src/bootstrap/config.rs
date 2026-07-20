@@ -113,6 +113,12 @@ pub struct UnderstandingConfig {
     pub provider: String,
     pub model: String,
     pub api_key_env: String,
+    /// Where to reach the provider. Empty means "the provider's usual
+    /// address", which is what almost everyone wants; it exists for
+    /// OpenAI-compatible gateways (OpenRouter, Groq, a local vLLM) and
+    /// for a non-default Ollama host — and it is what the contract tests
+    /// point at a mock server.
+    pub base_url: String,
     pub reconcile: bool,
     pub taxonomy: TaxonomyConfig,
 }
@@ -125,6 +131,7 @@ impl Default for UnderstandingConfig {
             provider: "none".to_string(),
             model: "claude-haiku-4-5".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: String::new(),
             reconcile: true,
             taxonomy: TaxonomyConfig::default(),
         }

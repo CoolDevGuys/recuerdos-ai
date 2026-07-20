@@ -6,4 +6,5 @@ pub mod config;
 pub mod memories_wiring;
 pub mod server;
 pub mod state;
+pub mod understanding_wiring;
 pub mod wiring;
