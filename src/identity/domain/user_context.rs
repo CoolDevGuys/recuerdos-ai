@@ -58,6 +58,29 @@ impl UserContext {
         }
     }
 
+    /// Mints the context a background worker acts under.
+    ///
+    /// Async ingestion is the reason this exists: a job outlives the
+    /// request that enqueued it, so by the time it runs there is no key
+    /// to authenticate. The guarantee is preserved by *where the user id
+    /// comes from* — the job row, written by a handler that had already
+    /// authenticated as that user, and never from anything a caller
+    /// supplies at claim time.
+    ///
+    /// Narrower than [`Self::unauthenticated`] on purpose: read and write
+    /// only. A background job has no business revoking keys, and carrying
+    /// Admin here would make the worker the widest-privileged code in the
+    /// process. It also carries no key id, so the audit trail can tell
+    /// pipeline writes from a client's.
+    pub(in crate::identity) fn background(user_id: UserId, handle: String) -> Self {
+        Self {
+            user_id,
+            handle,
+            key_id: None,
+            scopes: vec![Scope::Read, Scope::Write],
+        }
+    }
+
     /// Whose data this request may touch. Phase 1 has no data to scope
     /// yet; from Phase 2 every repository call takes this.
     #[allow(dead_code)]
@@ -141,5 +164,21 @@ mod tests {
         let ctx = UserContext::unauthenticated(UserId::new(), "default".into());
         assert_eq!(ctx.key_id(), None);
         assert!(ctx.require(Scope::Write).is_ok());
+    }
+
+    #[test]
+    fn a_background_context_can_read_and_write_but_is_not_admin() {
+        // The ingestion worker runs under this. Granting it Admin would
+        // make the widest-privileged code in the process the part that
+        // runs unattended on model output.
+        let ctx = UserContext::background(UserId::new(), "alex".into());
+
+        assert!(ctx.require(Scope::Read).is_ok());
+        assert!(ctx.require(Scope::Write).is_ok());
+        assert!(
+            ctx.require(Scope::Admin).is_err(),
+            "a background job has no business administering keys"
+        );
+        assert_eq!(ctx.key_id(), None, "audit must distinguish pipeline writes");
     }
 }

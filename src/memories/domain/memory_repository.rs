@@ -51,7 +51,25 @@ pub trait MemoryRepository: Send + Sync {
     /// Soft delete: the row is retained and the audit entry written, but
     /// the memory stops appearing in recall. Hard deletion belongs to the
     /// governance path (project-plan.md §15), not to ordinary use.
-    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<()>;
+    ///
+    /// `reason` lands in the audit trail. "Why did my memory disappear?"
+    /// is the question the trail exists to answer, and it can only do so
+    /// if whoever removed the memory said why.
+    fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()>;
+
+    /// Marks `superseded` as replaced by `replacement`.
+    ///
+    /// Distinct from `update` even though both write the back-link: this
+    /// one carries the rationale into the audit trail, which is what
+    /// makes a reconciliation decision reviewable months later.
+    fn supersede(
+        &self,
+        context: &UserContext,
+        superseded: MemoryId,
+        replacement: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<()>;
 
     fn find(&self, context: &UserContext, id: MemoryId) -> Result<Option<Memory>>;
 

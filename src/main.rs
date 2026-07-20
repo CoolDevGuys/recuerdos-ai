@@ -41,6 +41,27 @@ enum Command {
         #[arg(long, default_value = "mcp")]
         client: String,
     },
+    /// Score retrieval quality against the committed eval set.
+    ///
+    /// Hidden because it is a development and CI tool, not something an
+    /// operator runs. Needs the embedding model on disk — the scores are
+    /// meaningless without the real one.
+    #[command(hide = true)]
+    Eval {
+        #[arg(long, default_value = "eval/cases.toml")]
+        cases: PathBuf,
+        /// Compare against this baseline and fail on a regression.
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// How many percentage points recall@5 may drop before failing.
+        #[arg(long, default_value_t = 5.0)]
+        max_drop: f64,
+        /// Record the current scores as the new baseline instead.
+        #[arg(long)]
+        write_baseline: Option<PathBuf>,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Download the local embedding model into the cache directory.
     ///
     /// Run at image build time so a container never downloads at
@@ -73,6 +94,19 @@ async fn main() {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
         Command::Mcp { client } => run_mcp(&client).await,
+        Command::Eval {
+            cases,
+            baseline,
+            max_drop,
+            write_baseline,
+            config,
+        } => run_eval(
+            &cases,
+            baseline.as_deref(),
+            max_drop,
+            write_baseline.as_deref(),
+            config.as_deref(),
+        ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
@@ -95,18 +129,49 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
     let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
     let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
         .map_err(|e| e.to_string())?;
-    let memories = bootstrap::memories_wiring::Memories::build(&config, database)
-        .map_err(|e| e.to_string())?;
+    let memories =
+        bootstrap::memories_wiring::Memories::build(&config, std::sync::Arc::clone(&database))
+            .map_err(|e| e.to_string())?;
+    let understanding =
+        bootstrap::understanding_wiring::Understanding::build(&config, database, &memories)
+            .map_err(|e| e.to_string())?;
+
+    let identity = std::sync::Arc::new(identity);
+    let understanding = std::sync::Arc::new(understanding);
+
+    // Workers start before the listener binds. Anything left pending by
+    // the previous process is already draining by the time the first new
+    // request can arrive.
+    let workers = understanding::infrastructure::ingest_workers::IngestWorkers {
+        queue: std::sync::Arc::clone(&understanding.queue),
+        pipeline: std::sync::Arc::clone(&understanding.pipeline),
+        users: std::sync::Arc::new(
+            identity::application::background_user_resolver::BackgroundUserResolver::new(
+                std::sync::Arc::clone(&identity.users),
+            ),
+        ),
+        clock: std::sync::Arc::clone(&identity.clock),
+        max_attempts: config.understanding.max_attempts,
+        wake: std::sync::Arc::clone(&understanding.wake),
+    }
+    .start(config.understanding.workers)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let state = bootstrap::state::AppState {
-        identity: std::sync::Arc::new(identity),
+        identity,
         memories: std::sync::Arc::new(memories),
+        understanding,
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
     };
 
-    bootstrap::server::serve(&config.server.host, config.server.port, state)
-        .await
-        .map_err(|e| format!("server error: {e}"))
+    let outcome = bootstrap::server::serve(&config.server.host, config.server.port, state).await;
+
+    // After the listener drains, so a job enqueued by the last in-flight
+    // request still gets picked up rather than waiting for a restart.
+    workers.shutdown().await;
+
+    outcome.map_err(|e| format!("server error: {e}"))
 }
 
 async fn run_mcp(client_name: &str) -> Result<(), String> {
@@ -116,6 +181,31 @@ async fn run_mcp(client_name: &str) -> Result<(), String> {
     memories::infrastructure::mcp::stdio_shim::serve_stdio(client_name)
         .await
         .map_err(|e| e.to_string())
+}
+
+fn run_eval(
+    cases: &Path,
+    baseline: Option<&Path>,
+    max_drop: f64,
+    write_baseline: Option<&Path>,
+    config_path: Option<&Path>,
+) -> Result<(), String> {
+    // The model cache is the one thing the eval needs from config; its
+    // data directory is a throwaway it creates itself, so that running
+    // the eval can never touch a real store.
+    let cache_dir = bootstrap::config::AppConfig::load(config_path)
+        .map(|config| config.model_cache_dir())
+        .map_err(|e| e.to_string())?;
+
+    let report = bootstrap::eval::run(cases, Some(&cache_dir)).map_err(|e| e.to_string())?;
+
+    if let Some(path) = write_baseline {
+        return bootstrap::eval::write_baseline(&report, path).map_err(|e| e.to_string());
+    }
+    if let Some(path) = baseline {
+        return bootstrap::eval::compare(&report, path, max_drop).map_err(|e| e.to_string());
+    }
+    Ok(())
 }
 
 fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {

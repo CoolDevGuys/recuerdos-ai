@@ -303,7 +303,7 @@ mod tests {
         let memory = fixture.save(&fixture.alex, "a note about pnpm");
         fixture
             .memories
-            .delete(&fixture.alex, memory.id(), "test")
+            .delete(&fixture.alex, memory.id(), "test", "")
             .unwrap();
 
         assert!(

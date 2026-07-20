@@ -33,16 +33,46 @@ jobs:
           cache-from: type=gha,scope=dev-image
           cache-to: type=gha,mode=max,scope=dev-image
 
+      # Registry and git checkouts only — deliberately not `target/`.
+      # Restoring a build directory on top of a runner that also holds the
+      # dev image and buildx cache is what exhausted the disk; it also
+      # exceeded actions/cache's 10 GB per-entry limit, so it was costing
+      # us upload time without ever being restorable.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             .ci-cache/cargo-registry
             .ci-cache/cargo-git
-            target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
+
+      # `check-native` runs the test suite too, and those suites spawn real
+      # daemons that load the embedding model at startup. Without this the
+      # model is absent, every spawned daemon tries to download its own
+      # copy at once, and they all blow the health-check timeout — a
+      # failure that reads as "the tests are broken" rather than "the model
+      # is missing". Locally the model is always mounted by
+      # docker-compose, which is why this only ever bites in CI.
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/models
+          key: models-${{ runner.os }}-bge-small-en-v1.5
+
+      - name: Warm the embedding model
+        run: |
+          mkdir -p .ci-cache/models
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            cargo run -q --bin recordagent -- warm-models
 
       - name: cargo fmt --check / clippy -D warnings / boundary script
         run: |
@@ -50,16 +80,19 @@ jobs:
             -v "${{ github.workspace }}:/app" \
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECORDAGENT_MODEL_CACHE=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just check-native
 
-      # The container writes target/ and .ci-cache/ as uid 1000 ("dev");
-      # actions/cache's post-job tar runs as the runner's own uid and
-      # can't read cargo's incremental-compilation lock files otherwise.
+      # The container writes .ci-cache/ as uid 1000 ("dev"); actions/cache's
+      # post-job tar runs as the runner's own uid and can't read those
+      # files otherwise.
       - name: Fix cache ownership for actions/cache
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache
 
   test:
     runs-on: ubuntu-latest
@@ -78,13 +111,17 @@ jobs:
           cache-from: type=gha,scope=dev-image
           cache-to: type=gha,mode=max,scope=dev-image
 
+      # Registry and git checkouts only — deliberately not `target/`.
+      # Restoring a build directory on top of a runner that also holds the
+      # dev image and buildx cache is what exhausted the disk; it also
+      # exceeded actions/cache's 10 GB per-entry limit, so it was costing
+      # us upload time without ever being restorable.
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             .ci-cache/cargo-registry
             .ci-cache/cargo-git
-            target
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
@@ -126,7 +163,84 @@ jobs:
 
       - name: Fix cache ownership for actions/cache
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache target
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache
+
+  # Retrieval quality, gated against a committed baseline.
+  #
+  # Its own job because it needs the real embedding model and takes tens of
+  # seconds — folding it into `test` would slow down every run for a signal
+  # that only matters when retrieval changes. It is the only check that can
+  # catch a ranker regression: nothing in `test` would notice a one-line
+  # change that quietly made freshness outrank relevance.
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.dev
+          tags: ${{ env.DEV_IMAGE }}
+          load: true
+          cache-from: type=gha,scope=dev-image
+          cache-to: type=gha,mode=max,scope=dev-image
+
+      # Registry and git checkouts only — deliberately not `target/`.
+      # Restoring a build directory on top of a runner that also holds the
+      # dev image and buildx cache is what exhausted the disk; it also
+      # exceeded actions/cache's 10 GB per-entry limit, so it was costing
+      # us upload time without ever being restorable.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/cargo-registry
+            .ci-cache/cargo-git
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache/models
+          key: models-${{ runner.os }}-bge-small-en-v1.5
+
+      # Explicit rather than letting the eval download it on first use:
+      # a HuggingFace hiccup should fail as "could not fetch the model",
+      # not as a mysterious retrieval regression.
+      - name: Warm the embedding model
+        run: |
+          mkdir -p .ci-cache/models
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            cargo run -q --bin recordagent -- warm-models
+
+      - name: Score retrieval against the baseline
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
+            -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
+            -v "${{ github.workspace }}/.ci-cache/models:/models" \
+            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -w /app \
+            "${{ env.DEV_IMAGE }}" \
+            just eval-native
+
+      - name: Fix cache ownership for actions/cache
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .ci-cache
 
   # Build the release image and smoke-test it — proves docker/Dockerfile
   # actually produces a working, non-root, healthchecked daemon, not just

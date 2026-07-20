@@ -1,9 +1,8 @@
 # REST API
 
-**Status: Phase 3.** Authentication, the memory endpoints and the profile
-are live; agents can also reach all of it over
-[MCP](mcp.md).
-The async understanding pipeline (`POST /v1/memories`) arrives in Phase 4.
+**Status: Phase 4.** Authentication, the memory endpoints, the profile and
+the async understanding pipeline are live; agents can also reach all of it
+over [MCP](mcp.md).
 See [implementation-plan.md](../implementation-plan.md) for what lands when.
 
 ## Authentication
@@ -98,6 +97,113 @@ Include it when reporting a problem: it ties the response to the server
 log line that has the real error.
 
 ## Memories
+
+There are two ways in, and the difference is who decides what to remember.
+
+| | You decide | The service decides |
+|---|---|---|
+| Endpoint | `POST /v1/memories:direct` | `POST /v1/memories` |
+| Input | one memory, already written | raw text of any length |
+| Work | one insert | extract → reconcile, via a language model |
+| Returns | `201` with the memory | `202` with a job id |
+
+Use `:direct` when you have already distilled something — an agent that
+just decided "this is worth remembering" knows what the memory should
+say. Use `/v1/memories` for raw material: a sentence the user typed, a
+session summary, a paragraph that might contain three durable facts or
+none.
+
+### `POST /v1/memories` — ingest raw content
+
+Submits content for understanding. Requires `write`.
+
+```bash
+curl -X POST localhost:7070/v1/memories \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
+    "content": "btw we are switching the backend to Hetzner, fly.io got too expensive. Also always write table-driven tests in Go"
+  }'
+```
+
+```json
+{"job_id": "019f7c5a-…", "status": "pending", "poll": "/v1/jobs/019f7c5a-…"}
+```
+
+`202`, not `201`: the work is a model call that takes seconds, and holding
+the request open for it would make your timeout our problem and lose the
+work on a disconnect.
+
+| Field | Required | Notes |
+|---|---|---|
+| `content` | yes | Raw text. No length limit beyond what your model can read |
+| `category` | no | A hint. Extraction may find several memories that don't share it |
+| `tags` | no | Applied to everything extracted from this content |
+| `client`, `session_id` | no | Recorded as the source of every memory produced |
+| `wait` | no | Run it now and answer with the result — see below |
+
+The example above becomes **two** memories, each separately recallable,
+filterable and supersedable. If one of them contradicts something already
+stored, the old memory is superseded rather than kept alongside — that is
+the part `:direct` cannot do for you.
+
+#### `wait: true`
+
+Runs the pipeline inline and answers `201` with what happened:
+
+```json
+{
+  "job_id": "019f7c5a-…",
+  "status": "succeeded",
+  "memory_ids": ["019f7c61-…", "019f7c62-…"],
+  "understanding": true
+}
+```
+
+For callers with nowhere to put a job id — the MCP tools use it, because
+an agent has to tell the user what happened in one turn. Everything else
+should take the `202`. `understanding` is `false` when no provider is
+configured, so you can tell "extracted and reconciled" from "stored as
+sent".
+
+### `GET /v1/jobs/{id}`
+
+How an ingestion is going. Requires `read`. Only your own jobs are
+visible; someone else's id reads as `404`.
+
+```json
+{
+  "job_id": "019f7c5a-…",
+  "status": "succeeded",
+  "attempts": 1,
+  "memory_ids": ["019f7c61-…"],
+  "created_at": "2026-07-20T09:14:02Z",
+  "updated_at": "2026-07-20T09:14:05Z"
+}
+```
+
+| `status` | Meaning |
+|---|---|
+| `pending` | Queued, or waiting out a retry backoff |
+| `running` | A worker has it |
+| `succeeded` | Done. `memory_ids` is what it produced |
+| `failed` | Out of attempts. `error` says why |
+
+`memory_ids` can be empty on success: "nothing here was worth
+remembering" is a legitimate outcome, and the most common one.
+
+An `error` field can be present while a job is still `pending` — that is
+the reason for the previous attempt, kept because "it worked eventually,
+but here is what went wrong" is the more useful record.
+
+### Without a provider
+
+`[understanding].provider = "none"` is the default. Both endpoints keep
+working and the response shapes are identical; `/v1/memories` simply
+stores the content as sent, inferring only the category from unambiguous
+phrasing ("I prefer", "we decided"). Nothing is split, and nothing is
+reconciled — so a contradiction sits alongside what it contradicts.
+
+Configuring a provider changes that with no client changes at all. See
+[configuration.md](configuration.md).
 
 ### `POST /v1/memories:direct`
 
@@ -219,10 +325,9 @@ A closed taxonomy, extensible via `[understanding.taxonomy]`:
 Unknown category names are rejected rather than silently created — a typo
 would otherwise produce a category nothing ever matches.
 
-## Coming in Phase 4
+## Not yet implemented
 
-`POST /v1/memories` (async understanding pipeline, `202 {job_id}`),
-`GET /v1/jobs/{id}`.
+`POST /v1/sessions/distill` (submit a whole transcript), and `GET /metrics`.
 
 See [project-plan.md §9](../project-plan.md#9-api-design-rest--mcp) for the
 full design.

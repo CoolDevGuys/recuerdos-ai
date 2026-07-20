@@ -12,6 +12,7 @@ the daemon with auto-rebuild on file change. See the root
 | `just dev` | Start the daemon with auto-rebuild |
 | `just check` | fmt --check + clippy -D warnings + boundary script + tests |
 | `just test` | Run the test suite |
+| `just eval` | Score retrieval quality against the committed baseline |
 | `just fmt` | Format the code |
 
 Every recipe has a `*-native` counterpart (`just check-native`, ...) for
@@ -48,3 +49,7 @@ branch and ends with a PR into `main`.
   the way a real client would.
 - No test may sleep a fixed duration to "wait for" something async; poll
   with a timeout instead (see `tests/common/mod.rs` for the pattern).
+- Changing anything retrieval touches — the embedder, the tokenizer, the
+  ranker, candidate depth — means running `just eval`. `cargo test` will
+  not notice a ranking regression; that is the whole reason the eval
+  exists. See [evaluation.md](evaluation.md).

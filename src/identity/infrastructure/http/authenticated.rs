@@ -168,15 +168,26 @@ mod tests {
         let index_dir = tempfile::tempdir().unwrap();
         let memories = Arc::new(
             crate::bootstrap::memories_wiring::Memories::for_test(
-                database,
+                Arc::clone(&database),
                 Arc::new(crate::memories::application::fake_embedder::FakeEmbedder::default()),
                 index_dir.keep(),
+            )
+            .unwrap(),
+        );
+        // Default config: no provider, so this builds the verbatim
+        // pipeline and reaches nothing outside the process.
+        let understanding = Arc::new(
+            crate::bootstrap::understanding_wiring::Understanding::build(
+                &crate::bootstrap::config::AppConfig::default(),
+                database,
+                &memories,
             )
             .unwrap(),
         );
         let state = AppState {
             identity: Arc::clone(&identity),
             memories,
+            understanding,
             auth_mode,
         };
 

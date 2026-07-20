@@ -113,7 +113,21 @@ pub struct UnderstandingConfig {
     pub provider: String,
     pub model: String,
     pub api_key_env: String,
+    /// Where to reach the provider. Empty means "the provider's usual
+    /// address", which is what almost everyone wants; it exists for
+    /// OpenAI-compatible gateways (OpenRouter, Groq, a local vLLM) and
+    /// for a non-default Ollama host — and it is what the contract tests
+    /// point at a mock server.
+    pub base_url: String,
     pub reconcile: bool,
+    /// How many ingest jobs may run concurrently.
+    ///
+    /// Two by default: enough that one slow model call does not stall the
+    /// queue behind it, low enough that a burst of submissions cannot
+    /// fan out into a rate limit or a surprise bill.
+    pub workers: usize,
+    /// Attempts before an ingest job dead-letters.
+    pub max_attempts: u32,
     pub taxonomy: TaxonomyConfig,
 }
 
@@ -125,7 +139,10 @@ impl Default for UnderstandingConfig {
             provider: "none".to_string(),
             model: "claude-haiku-4-5".to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: String::new(),
             reconcile: true,
+            workers: 2,
+            max_attempts: 3,
             taxonomy: TaxonomyConfig::default(),
         }
     }
@@ -257,6 +274,15 @@ impl AppConfig {
         }
         if self.understanding.provider != "none" && self.understanding.model.trim().is_empty() {
             issues.push("[understanding].model is empty".to_string());
+        }
+        if self.understanding.workers == 0 {
+            issues.push("[understanding].workers is 0 — no ingest job would ever run".to_string());
+        }
+        if self.understanding.max_attempts == 0 {
+            issues.push(
+                "[understanding].max_attempts is 0 — every job would dead-letter unattempted"
+                    .to_string(),
+            );
         }
 
         if self.consolidation.schedule.trim().is_empty() {

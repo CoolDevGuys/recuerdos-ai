@@ -2,6 +2,7 @@
 
 use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::memories_wiring::Memories;
+use crate::bootstrap::understanding_wiring::Understanding;
 use crate::bootstrap::wiring::Identity;
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ impl AuthMode {
 pub struct AppState {
     pub identity: Arc<Identity>,
     pub memories: Arc<Memories>,
+    pub understanding: Arc<Understanding>,
     pub auth_mode: AuthMode,
 }
 

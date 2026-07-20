@@ -3,6 +3,7 @@
 //! crate. See `domain` boundary rule 1 in `docs/architecture.md`.
 
 pub mod api_error;
+pub mod blocking;
 pub mod clock;
 pub mod error;
 pub mod ids;

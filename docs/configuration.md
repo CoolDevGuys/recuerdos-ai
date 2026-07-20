@@ -27,9 +27,10 @@ with its default and an explanatory comment. Highlights:
 
 - `[embeddings].provider` defaults to `local` — embeddings work fully
   offline, no external service required.
-- `[understanding].provider` defaults to `none` — extraction/labeling is
-  opt-in; with no provider configured, zero LLM egress (this feature
-  itself lands in Phase 4; today only the config key exists).
+- `[understanding].provider` defaults to `none` — extraction and
+  reconciliation are opt-in, and with no provider configured there is zero
+  LLM egress. Submitted content is stored verbatim instead; see
+  [api.md](api.md#without-a-provider) for exactly what changes.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation

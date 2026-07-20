@@ -32,10 +32,20 @@ impl MemoryForgetter {
         }
     }
 
-    pub fn execute(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<()> {
+    /// `reason` is recorded in the audit trail. Callers that genuinely
+    /// have nothing to say — a user clicking delete — pass an empty
+    /// string; the pipeline passes the model's rationale, which is what
+    /// makes an automated deletion reviewable later.
+    pub fn execute(
+        &self,
+        context: &UserContext,
+        id: MemoryId,
+        actor: &str,
+        reason: &str,
+    ) -> Result<()> {
         // The row first: it is the system of record, and if it fails
         // nothing should have been removed from the indexes.
-        self.memories.delete(context, id, actor)?;
+        self.memories.delete(context, id, actor, reason)?;
 
         // Index removals are best-effort. A leftover entry points at a
         // deleted row, which recall drops when it fetches candidates —
@@ -66,7 +76,7 @@ mod tests {
 
         fixture
             .forgetter()
-            .execute(&fixture.alex, memory.id(), "test")
+            .execute(&fixture.alex, memory.id(), "test", "")
             .unwrap();
 
         assert!(
@@ -87,7 +97,7 @@ mod tests {
 
         fixture
             .forgetter()
-            .execute(&fixture.alex, memory.id(), "mcp")
+            .execute(&fixture.alex, memory.id(), "mcp", "")
             .unwrap();
 
         let audit = fixture.memories.audit_trail(&fixture.alex, 10).unwrap();
@@ -106,7 +116,7 @@ mod tests {
 
         let result = fixture
             .forgetter()
-            .execute(&fixture.sam, memory.id(), "sam");
+            .execute(&fixture.sam, memory.id(), "sam", "");
 
         assert!(matches!(result, Err(RaError::NotFound(_))));
         assert!(
@@ -129,7 +139,7 @@ mod tests {
         assert!(matches!(
             fixture
                 .forgetter()
-                .execute(&fixture.alex, MemoryId::new(), "test"),
+                .execute(&fixture.alex, MemoryId::new(), "test", ""),
             Err(RaError::NotFound(_))
         ));
     }

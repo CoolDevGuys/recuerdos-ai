@@ -1,0 +1,13 @@
+{
+  "recall_at_k": 92.3076923076923,
+  "precision_at_1": 76.92307692307693,
+  "cases": 13,
+  "by_kind": {
+    "category-filter": 100.0,
+    "current-fact": 100.0,
+    "exact-token": 100.0,
+    "needle": 66.66666666666666,
+    "paraphrase": 100.0,
+    "tag-filter": 100.0
+  }
+}

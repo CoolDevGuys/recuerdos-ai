@@ -1,0 +1,218 @@
+# Retrieval-quality eval set.
+#
+# The whole service is a bet that recall returns the right memory. Every
+# other test in this repo asserts that a component behaves as written;
+# this one asserts that the thing users actually care about still works.
+# It runs against the real embedding model — a fake one would make the
+# scores meaningless.
+#
+# TOML rather than the YAML the plan named: the mainstream YAML crate is
+# deprecated, and this file needs comments and hand-editing more than it
+# needs any particular syntax.
+#
+# Run it with:
+#     recordagent eval
+#     recordagent eval --baseline eval/baseline.json --max-drop 5
+#
+# Adding a case is the point. When a recall goes wrong in real use, the
+# fix starts here: write the case, watch it fail, then change the ranker.
+
+# ─────────────────────────────────────────────────────────────────────
+# The corpus. Seeded once, then every query below runs against all of it.
+#
+# Size matters: with six memories nearly any ranker looks perfect. The
+# filler entries exist so a case has something to be wrong about.
+# ─────────────────────────────────────────────────────────────────────
+
+[[memory]]
+content = "User forbids barrel files and index.ts re-exports"
+category = "preference.coding"
+tags = ["typescript", "imports"]
+
+[[memory]]
+content = "User prefers pnpm over npm and yarn for package management"
+category = "preference.coding"
+tags = ["tooling", "node"]
+
+[[memory]]
+content = "User requires table-driven tests in Go, one table per behaviour"
+category = "preference.coding"
+tags = ["go", "testing"]
+
+[[memory]]
+content = "The backend deploys on Hetzner, migrated from Fly.io because of cost"
+category = "fact.project"
+tags = ["infrastructure"]
+
+[[memory]]
+content = "The API is written in Rust with axum and tokio"
+category = "fact.project"
+tags = ["rust"]
+
+[[memory]]
+content = "SQLite was chosen over Postgres so the installer stays a single binary"
+category = "decision"
+tags = ["storage"]
+
+[[memory]]
+content = "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem"
+category = "experience"
+tags = ["postgres", "migrations"]
+
+[[memory]]
+content = "Deployment runbook: tag the release, wait for CI, then run just deploy-prod"
+category = "skill"
+tags = ["deployment"]
+
+[[memory]]
+content = "Sam is the reviewer for anything touching authentication"
+category = "fact.person"
+tags = ["team"]
+
+[[memory]]
+content = "The design doc lives at https://example.com/docs/architecture"
+category = "reference"
+tags = ["docs"]
+
+[[memory]]
+content = "User is vegetarian and does not eat fish"
+category = "preference.personal"
+tags = ["food"]
+
+[[memory]]
+content = "Standups are at 09:30 UTC on Tuesdays and Thursdays"
+category = "fact.project"
+tags = ["process"]
+
+[[memory]]
+content = "The useQuery hook wrapper lives in src/lib/query.ts and sets a 30s stale time"
+category = "fact.project"
+tags = ["react", "typescript"]
+
+[[memory]]
+content = "Never force-push to main; the branch is protected and it breaks everyone's clone"
+category = "preference.coding"
+tags = ["git"]
+
+[[memory]]
+content = "User prefers Vitest over Jest for anything new"
+category = "preference.coding"
+tags = ["testing", "typescript"]
+
+# ─────────────────────────────────────────────────────────────────────
+# The cases.
+#
+# `expect` names memories by their exact content. `kind` groups results in
+# the report, so a regression shows up as "paraphrase got worse" rather
+# than as one number moving.
+# ─────────────────────────────────────────────────────────────────────
+
+[[case]]
+name = "paraphrase: package manager"
+kind = "paraphrase"
+# No shared content words with the memory beyond "package". This is the
+# case keyword search alone cannot answer.
+query = "which tool should I use to install dependencies"
+expect = ["User prefers pnpm over npm and yarn for package management"]
+
+[[case]]
+name = "paraphrase: import structure"
+kind = "paraphrase"
+query = "how should I organise module exports in this repo"
+expect = ["User forbids barrel files and index.ts re-exports"]
+
+[[case]]
+name = "paraphrase: why this database"
+kind = "paraphrase"
+query = "what was the reasoning behind the storage choice"
+expect = ["SQLite was chosen over Postgres so the installer stays a single binary"]
+
+[[case]]
+name = "exact token: useQuery"
+kind = "exact-token"
+# An identifier the embedding model has no reason to place usefully.
+# This is the case vector search alone cannot answer, and the reason
+# retrieval is hybrid rather than purely semantic.
+query = "useQuery"
+expect = ["The useQuery hook wrapper lives in src/lib/query.ts and sets a 30s stale time"]
+
+[[case]]
+name = "exact token: maintenance_work_mem"
+kind = "exact-token"
+query = "maintenance_work_mem"
+expect = [
+    "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem",
+]
+
+[[case]]
+name = "current fact: deployment target"
+kind = "current-fact"
+# The contradiction scenario's read side. Hetzner must outrank everything
+# else about deployment.
+query = "where does the backend deploy"
+expect = ["The backend deploys on Hetzner, migrated from Fly.io because of cost"]
+
+[[case]]
+name = "needle: who reviews auth"
+kind = "needle"
+query = "who should review my authentication change"
+expect = ["Sam is the reviewer for anything touching authentication"]
+
+[[case]]
+name = "needle: dietary requirement"
+kind = "needle"
+# KNOWN MISS as of the committed baseline. The query and the memory share
+# no vocabulary — "restaurant"/"dinner" against "vegetarian"/"fish" — and
+# bge-small-en-v1.5 does not place them close enough to reach the top 5.
+# Keyword search cannot help either, since there is no shared token.
+#
+# Deliberately left failing. An eval set that only contains cases which
+# already pass measures nothing, and this is a real query a user would
+# make: the agent booking dinner is exactly when a dietary preference
+# needs to surface. It is the concrete target for a better embedding
+# model or a query-expansion step.
+query = "book a restaurant for the team dinner"
+expect = ["User is vegetarian and does not eat fish"]
+
+[[case]]
+name = "needle: release process"
+kind = "needle"
+query = "how do I ship a release"
+expect = [
+    "Deployment runbook: tag the release, wait for CI, then run just deploy-prod",
+]
+
+[[case]]
+name = "category filter: coding preferences only"
+kind = "category-filter"
+query = "testing"
+categories = ["preference.coding"]
+expect = [
+    "User requires table-driven tests in Go, one table per behaviour",
+    "User prefers Vitest over Jest for anything new",
+]
+
+[[case]]
+name = "category filter: decisions only"
+kind = "category-filter"
+query = "database"
+categories = ["decision"]
+expect = ["SQLite was chosen over Postgres so the installer stays a single binary"]
+
+[[case]]
+name = "tag filter: typescript"
+kind = "tag-filter"
+query = "conventions"
+tags = ["typescript"]
+expect = ["User forbids barrel files and index.ts re-exports"]
+
+[[case]]
+name = "multi-hit: what does the user prefer for testing"
+kind = "paraphrase"
+# Two correct answers. Recall@k has to credit finding both, which is what
+# separates it from a "did the top result look right" eyeball check.
+query = "what testing tools does the user like"
+expect = [
+    "User requires table-driven tests in Go, one table per behaviour",
+    "User prefers Vitest over Jest for anything new",
+]

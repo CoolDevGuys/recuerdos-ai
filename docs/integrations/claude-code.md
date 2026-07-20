@@ -106,7 +106,7 @@ posts the summary to RecordAgent:
         "hooks": [
           {
             "type": "command",
-            "command": "jq -Rs '{content: ., category: \"experience\", client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/memories:direct >/dev/null || true"
+            "command": "jq -Rs '{content: ., client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/memories >/dev/null || true"
           }
         ]
       }
@@ -115,15 +115,16 @@ posts the summary to RecordAgent:
 }
 ```
 
-**A caveat worth understanding before you enable this.** Today
-`/v1/memories:direct` stores what it is given, verbatim — so this saves
-the whole summary as one memory, which is coarse. Phase 4 adds
-`POST /v1/memories`, which runs an extraction pipeline that pulls the two
-or three durable facts out of a session and discards the rest. When that
-lands, changing the URL is the entire upgrade.
+This posts to `/v1/memories`, which runs the extraction pipeline: the two
+or three durable facts get pulled out of the session and the rest is
+discarded. The request returns a job id immediately, so compaction is
+never held up waiting for a model.
 
-Until then, prefer letting the model call `memory_save` deliberately: one
-good memory beats a transcript.
+**It is only worth enabling with a provider configured.** With
+`[understanding].provider = "none"` there is nothing to do the extracting,
+and this stores the entire summary as one coarse memory that will crowd
+out better ones on every future recall. In that mode, prefer letting the
+model call `memory_save` deliberately: one good memory beats a transcript.
 
 ## What to expect
 

@@ -20,11 +20,13 @@ memories strictly. See [project-plan.md](project-plan.md) for the full
 design and [implementation-plan.md](implementation-plan.md) for the phased
 build plan.
 
-> **Status: Phase 3 — MCP.** Claude Code and opencode can read and write
-> your memories over MCP. Storage is hybrid semantic + keyword search,
-> fully offline, strictly per user. The LLM understanding pipeline
-> (extraction, labelling, contradiction handling) arrives in Phase 4;
-> today a memory is stored as given.
+> **Status: Phase 4 — Understanding.** Claude Code and opencode can read
+> and write your memories over MCP. Storage is hybrid semantic + keyword
+> search, strictly per user. Raw text can now be submitted to
+> `POST /v1/memories`, which extracts the durable facts from it and
+> supersedes anything they contradict — so a memory store stops being a
+> log. That pipeline is opt-in: `[understanding].provider` defaults to
+> `none`, and everything works offline without it.
 
 ## Prerequisites
 
@@ -179,7 +181,7 @@ see [justfile](justfile).
 | `just check` | fmt --check + clippy -D warnings + boundary script + tests, in Docker |
 | `just test` | Run the test suite in Docker |
 | `just fmt` | Format the code |
-| `just llm` | Start the optional local Ollama profile (used from Phase 4 onward) |
+| `just llm` | Start the optional local Ollama profile, for zero-egress understanding |
 | `just docker-build` | Build the release image (`docker/Dockerfile`) |
 
 A local-toolchain contributor can run the same checks without Docker via
@@ -245,6 +247,10 @@ status table above for what's real today):
 ```
 
 ## Contributing
+
+Retrieval quality has its own gate — `just eval` scores recall against a
+committed baseline, because no unit test would notice a change that made
+ranking worse. See [docs/evaluation.md](docs/evaluation.md).
 
 See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) (Docker-only dev flow,
 boundary rules).

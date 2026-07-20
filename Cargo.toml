@@ -13,7 +13,7 @@ name = "recordagent"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout", "request-id", "util"] }
@@ -39,17 +39,31 @@ sha2 = "0.11.0"
 rmcp = { version = "2.2.0", features = ["server", "client", "transport-io", "transport-streamable-http-server", "macros", "schemars", "transport-streamable-http-client-reqwest"] }
 async-trait = "0.1.91"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Used by the `eval` subcommand, which builds a throwaway instance so that
+# scoring retrieval can never touch a real store.
+tempfile = "3"
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["test"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 assert_cmd = "2"
 predicates = "3"
-tempfile = "3"
 rmcp = { version = "2.2.0", features = ["client", "transport-child-process"] }
+wiremock = "0.6"
 
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
+
+# Debug builds carry full DWARF by default, which for this dependency tree
+# (tantivy, ONNX, rustls, axum) meant a ~10 GB `target/`. That is enough to
+# exhaust a CI runner's disk, and when it does the failure is a linker
+# `SIGBUS` — which reads as a toolchain problem rather than a full disk.
+#
+# Line tables keep file and line numbers in panic backtraces, which is what
+# a test failure actually needs. Stepping through a debugger loses local
+# variables; if you need that, override this locally.
+[profile.dev]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3

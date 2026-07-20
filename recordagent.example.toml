@@ -24,15 +24,33 @@ provider = "local"
 model = "bge-small-en-v1.5"
 
 [understanding]
-# anthropic | openai-compat | ollama | none — "none" disables extraction:
-# the service still works as store + hybrid search, verbatim + heuristic
-# tags, with zero LLM egress.
+# anthropic | openai-compat | ollama | none.
+#
+# "none" is the default and means zero LLM egress: submitted content is
+# stored verbatim, with the category inferred from unambiguous phrasing
+# ("I prefer", "we decided"). Everything still works — the same endpoints,
+# the same jobs — but nothing is split into atomic memories and nothing is
+# reconciled, so a contradiction is stored alongside what it contradicts.
+#
+# Set a provider and both of those start happening. No client changes.
 provider = "none"
 model = "claude-haiku-4-5"
 # Name of the env var holding the provider API key (not the key itself).
+# Not used by the ollama provider, which is unauthenticated.
 api_key_env = "ANTHROPIC_API_KEY"
+# Override the provider's address. Empty means its usual one. Set this for
+# an OpenAI-compatible gateway (OpenRouter, Groq, a local vLLM) or an
+# Ollama that isn't on localhost:11434.
+base_url = ""
 # Run the ADD/UPDATE/DELETE/NOOP reconcile pass against similar memories.
+# With this off, extraction still labels and splits, but nothing is ever
+# superseded or deleted by a model.
 reconcile = true
+# How many ingest jobs may run at once. Low enough that a burst of
+# submissions cannot fan out into a rate limit or a surprise bill.
+workers = 2
+# Attempts before an ingest job is dead-lettered for a human to look at.
+max_attempts = 3
 
 [understanding.taxonomy]
 # Extend the default category list (see docs/architecture.md) without

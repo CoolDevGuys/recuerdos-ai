@@ -171,7 +171,9 @@ fn one_user_cannot_update_or_delete_anothers_memory() {
         Err(RaError::NotFound(_))
     ));
     assert!(matches!(
-        fixture.memories.delete(&fixture.sam, memory.id(), "sam"),
+        fixture
+            .memories
+            .delete(&fixture.sam, memory.id(), "sam", ""),
         Err(RaError::NotFound(_))
     ));
 
@@ -251,7 +253,7 @@ fn a_deleted_memory_disappears_from_reads_but_stays_in_the_audit_trail() {
 
     fixture
         .memories
-        .delete(&fixture.alex, memory.id(), "test")
+        .delete(&fixture.alex, memory.id(), "test", "")
         .unwrap();
 
     assert!(
@@ -282,7 +284,9 @@ fn a_deleted_memory_disappears_from_reads_but_stays_in_the_audit_trail() {
 fn deleting_a_missing_memory_is_not_found() {
     let fixture = fixture();
     assert!(matches!(
-        fixture.memories.delete(&fixture.alex, MemoryId::new(), "t"),
+        fixture
+            .memories
+            .delete(&fixture.alex, MemoryId::new(), "t", ""),
         Err(RaError::NotFound(_))
     ));
 }
@@ -343,7 +347,7 @@ fn every_mutation_is_audited() {
         .unwrap();
     fixture
         .memories
-        .delete(&fixture.alex, memory.id(), "mcp")
+        .delete(&fixture.alex, memory.id(), "mcp", "")
         .unwrap();
 
     let audit = fixture.memories.audit_trail(&fixture.alex, 10).unwrap();
