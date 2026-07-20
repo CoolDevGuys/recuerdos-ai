@@ -32,6 +32,12 @@ eval-record:
     docker compose run --rm dev cargo run -q --bin recordagent -- \
         eval --write-baseline eval/baseline.json
 
+# Lint, type-check and test the Python SDK, including its integration
+# suite against a real daemon running the release image.
+sdk-test:
+    docker compose --profile sdk run --rm sdk
+    docker compose --profile sdk down
+
 # Build the release image.
 docker-build:
     docker build -f docker/Dockerfile -t recordagent:local .
