@@ -238,6 +238,11 @@ the embedder, the tokenizer, the RRF constant and the recency multiplier,
 and a one-line change to any of them can make recall worse with every
 unit test still green. `just eval` is the only check that would notice.
 
+Prefer `make`? A `Makefile` wraps the same dev commands and adds the
+operational ones — starting the daemon, creating users, issuing keys,
+running consolidation. `make help` lists them; `make quickstart` brings
+the daemon up and prints a ready-to-use API key.
+
 Architecture is bounded contexts, each a vertical slice of `domain` /
 `application` / `infrastructure`, with the layer rules enforced by a CI
 script. Read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) and
