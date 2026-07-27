@@ -1,4 +1,4 @@
-//! Black-box test harness: spawns the real `recordagent` binary against a
+//! Black-box test harness: spawns the real `recuerdos-ai` binary against a
 //! tmp data dir and a free port, and waits for it to become healthy before
 //! handing control back to the test. Every scenario test in `tests/`
 //! drives the app exactly the way a real client would — over HTTP.
@@ -24,14 +24,14 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Spawns `recordagent serve` on a free port with a fresh tmp data
+    /// Spawns `recuerdos-ai serve` on a free port with a fresh tmp data
     /// dir, and blocks (async) until `/healthz` responds or panics after
     /// a 10s timeout.
     pub async fn spawn() -> Self {
         Self::spawn_with(&[]).await
     }
 
-    /// Spawns with extra `RECORDAGENT_*` settings.
+    /// Spawns with extra `RECUERDOS_AI_*` settings.
     ///
     /// Config reaches the daemon only through its environment, so this is
     /// how a test runs the same binary in a different mode — pointing
@@ -41,20 +41,22 @@ impl TestApp {
         let port = free_port();
         let data_dir = tempfile::tempdir().expect("create tmp data dir");
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_recordagent"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
         command
             .arg("serve")
-            .env("RECORDAGENT_SERVER__HOST", "127.0.0.1")
-            .env("RECORDAGENT_SERVER__PORT", port.to_string())
-            .env("RECORDAGENT_STORAGE__PATH", data_dir.path())
-            .env_remove("RECORDAGENT_LOG")
+            .env("RECUERDOS_AI_SERVER__HOST", "127.0.0.1")
+            .env("RECUERDOS_AI_SERVER__PORT", port.to_string())
+            .env("RECUERDOS_AI_STORAGE__PATH", data_dir.path())
+            .env_remove("RECUERDOS_AI_LOG")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         for (key, value) in env {
             command.env(key, value);
         }
 
-        let child = command.spawn().expect("failed to spawn recordagent binary");
+        let child = command
+            .spawn()
+            .expect("failed to spawn recuerdos-ai binary");
 
         let base_url = format!("http://127.0.0.1:{port}");
         wait_until_healthy(&base_url).await;
@@ -97,16 +99,16 @@ impl TestApp {
 
     /// Runs a CLI subcommand against this app's data dir, returning stdout.
     fn cli(&self, args: &[&str]) -> String {
-        let output = Command::new(env!("CARGO_BIN_EXE_recordagent"))
+        let output = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"))
             .args(args)
-            .env("RECORDAGENT_STORAGE__PATH", self.data_dir.path())
-            .env_remove("RECORDAGENT_LOG")
+            .env("RECUERDOS_AI_STORAGE__PATH", self.data_dir.path())
+            .env_remove("RECUERDOS_AI_LOG")
             .output()
-            .expect("failed to run recordagent CLI");
+            .expect("failed to run recuerdos-ai CLI");
 
         assert!(
             output.status.success(),
-            "`recordagent {}` failed: {}",
+            "`recuerdos-ai {}` failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -162,9 +164,9 @@ async fn wait_until_healthy(base_url: &str) {
         }
         if tokio::time::Instant::now() >= deadline {
             panic!(
-                "recordagent did not become healthy within {HEALTH_TIMEOUT:?}. \
+                "recuerdos-ai did not become healthy within {HEALTH_TIMEOUT:?}. \
                  If the embedding model is missing this is where it surfaces: \
-                 run `recordagent warm-models` (or `just warm`) first."
+                 run `recuerdos-ai warm-models` (or `just warm`) first."
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -1,4 +1,4 @@
-//! `recordagent user` and `recordagent key` subcommands.
+//! `recuerdos-ai user` and `recuerdos-ai key` subcommands.
 //!
 //! An inbound adapter like any other: it parses arguments, calls exactly
 //! one use case, and formats the result. No identity rules live here.
@@ -57,7 +57,7 @@ pub fn run_user_command(command: UserCommand, identity: &Identity) -> Result<()>
         UserCommand::List => {
             let users = identity.users.list()?;
             if users.is_empty() {
-                println!("no users yet — create one with `recordagent user add <handle>`");
+                println!("no users yet — create one with `recuerdos-ai user add <handle>`");
                 return Ok(());
             }
             for user in users {

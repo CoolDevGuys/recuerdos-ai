@@ -13,7 +13,7 @@ Every route under `/v1` requires an API key as a bearer token:
 curl -H "Authorization: Bearer ra_live_b99f884a…" localhost:7070/v1/ping
 ```
 
-Keys are issued from the CLI (`recordagent key issue`) — there is no
+Keys are issued from the CLI (`recuerdos-ai key issue`) — there is no
 endpoint that mints them, by design. See
 [configuration.md](configuration.md#authentication) for the
 `[auth].mode = "none"` single-user escape hatch.

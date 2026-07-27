@@ -5,7 +5,7 @@ thing worth testing is whether the SDK and the server actually agree —
 and a mock built from the same reading of the docs that produced the
 client would agree with itself no matter what the server does.
 
-Point them at a daemon with ``RECORDAGENT_TEST_URL``; without it they
+Point them at a daemon with ``RECUERDOS_AI_TEST_URL``; without it they
 skip, so a plain ``pytest`` on a laptop with no Docker still passes.
 ``just sdk-test`` brings one up.
 """
@@ -17,14 +17,14 @@ import uuid
 
 import pytest
 
-from recordagent import Client
+from recuerdos_ai import Client
 
 
 @pytest.fixture(scope="session")
 def base_url() -> str:
-    url = os.environ.get("RECORDAGENT_TEST_URL")
+    url = os.environ.get("RECUERDOS_AI_TEST_URL")
     if not url:
-        pytest.skip("set RECORDAGENT_TEST_URL to run integration tests")
+        pytest.skip("set RECUERDOS_AI_TEST_URL to run integration tests")
     return url
 
 

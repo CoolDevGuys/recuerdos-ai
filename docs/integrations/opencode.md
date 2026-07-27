@@ -1,6 +1,6 @@
 # opencode integration
 
-RecordAgent is a standard stdio MCP server, so opencode connects the same
+Recuerdos AI is a standard stdio MCP server, so opencode connects the same
 way it connects to any other.
 
 ## Prerequisites
@@ -8,9 +8,9 @@ way it connects to any other.
 A running daemon and an API key ([docs/mcp.md](../mcp.md#setup)):
 
 ```bash
-recordagent serve &
-recordagent user add alex
-recordagent key issue --user alex --scopes read,write
+recuerdos-ai serve &
+recuerdos-ai user add alex
+recuerdos-ai key issue --user alex --scopes read,write
 ```
 
 ## Configure
@@ -22,14 +22,14 @@ for a daemon in Docker.
 ### Option A — HTTP (recommended)
 
 Connect straight to the daemon's `/mcp` endpoint with the key as a bearer
-token. Nothing but the daemon has to be installed — no `recordagent`
+token. Nothing but the daemon has to be installed — no `recuerdos-ai`
 binary on your machine, no `docker exec`:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "recordagent": {
+    "recuerdos-ai": {
       "type": "remote",
       "url": "http://localhost:7070/mcp",
       "enabled": true,
@@ -47,35 +47,35 @@ real hostname, terminate there.
 ### Option B — stdio shim
 
 If you'd rather spawn a local process (or your daemon is only reachable
-by a command), point opencode at `recordagent mcp`:
+by a command), point opencode at `recuerdos-ai mcp`:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "recordagent": {
+    "recuerdos-ai": {
       "type": "local",
-      "command": ["recordagent", "mcp", "--client", "opencode"],
+      "command": ["recuerdos-ai", "mcp", "--client", "opencode"],
       "enabled": true,
-      "environment": { "RECORDAGENT_API_KEY": "ra_live_…" }
+      "environment": { "RECUERDOS_AI_API_KEY": "ra_live_…" }
     }
   }
 }
 ```
 
 `--client opencode` is recorded as the source, so the audit trail
-distinguishes these writes. Add `"RECORDAGENT_URL"` to `environment` if
+distinguishes these writes. Add `"RECUERDOS_AI_URL"` to `environment` if
 the daemon is not on `localhost:7070`.
 
-If the `recordagent` binary lives only in a Docker container, spawn the
+If the `recuerdos-ai` binary lives only in a Docker container, spawn the
 shim there instead:
 
 ```json
-"command": ["docker", "exec", "-e", "RECORDAGENT_API_KEY", "-i", "recordagent", "recordagent", "mcp", "--client", "opencode"]
+"command": ["docker", "exec", "-e", "RECUERDOS_AI_API_KEY", "-i", "recuerdos-ai", "recuerdos-ai", "mcp", "--client", "opencode"]
 ```
 
 (with the key in `environment`, and the daemon container named
-`recordagent`). Option A avoids all of this.
+`recuerdos-ai`). Option A avoids all of this.
 
 ## Verify
 

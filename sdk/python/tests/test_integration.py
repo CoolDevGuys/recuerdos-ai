@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from recordagent import Client, NotFoundError
+from recuerdos_ai import Client, NotFoundError
 
 pytestmark = pytest.mark.integration
 
@@ -129,7 +129,7 @@ def test_a_missing_memory_is_not_found_rather_than_a_crash(ra: Client) -> None:
 
 
 def test_a_malformed_id_is_rejected_as_a_client_mistake(ra: Client) -> None:
-    from recordagent import ValidationError
+    from recuerdos_ai import ValidationError
 
     with pytest.raises(ValidationError):
         ra.get("not-a-uuid")
@@ -164,7 +164,7 @@ def test_distillation_without_a_provider_refuses_and_says_why(ra: Client) -> Non
     # The one endpoint that does not degrade to verbatim: a transcript
     # stored whole is unrecallable and costs a context window on every
     # match. The SDK has to surface the reason, not just a 400.
-    from recordagent import ValidationError
+    from recuerdos_ai import ValidationError
 
     with pytest.raises(ValidationError) as caught:
         ra.distill_session("a long transcript of a session that went nowhere")

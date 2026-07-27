@@ -1,6 +1,6 @@
 """Memories as LangChain ``Document``s.
 
-    pip install "recordagent[langchain]"
+    pip install "recuerdos-ai[langchain]"
     python examples/langchain_retriever.py
 
 Needs a daemon but no language model — retrieval is the local embedding
@@ -17,8 +17,8 @@ import os
 import sys
 import uuid
 
-from recordagent import Client, RecordAgentError
-from recordagent.langchain import RecordAgentRetriever
+from recuerdos_ai import Client, RecuerdosError
+from recuerdos_ai.langchain import RecuerdosRetriever
 
 SEED = [
     ("User prefers pnpm and never uses npm or yarn", "preference.coding"),
@@ -41,8 +41,8 @@ def rank(value: int | None) -> str:
 
 def main() -> int:
     ra = Client(
-        base_url=os.environ.get("RECORDAGENT_URL", "http://localhost:7070"),
-        api_key=os.environ.get("RECORDAGENT_API_KEY"),
+        base_url=os.environ.get("RECUERDOS_AI_URL", "http://localhost:7070"),
+        api_key=os.environ.get("RECUERDOS_AI_API_KEY"),
     )
     if not ra.health():
         print(f"no daemon at {ra.base_url} — is it running?", file=sys.stderr)
@@ -55,7 +55,7 @@ def main() -> int:
         ra.save_direct(content, category=category, tags=[run])
     print(f"seeded {len(SEED)} memories (tag {run})")
 
-    retriever = RecordAgentRetriever(client=ra, limit=2, tags=[run])
+    retriever = RecuerdosRetriever(client=ra, limit=2, tags=[run])
 
     # None of these queries share vocabulary with the memory that should
     # answer them. That gap is the whole reason this is a memory service
@@ -77,7 +77,7 @@ def main() -> int:
 
     # Restricting to a category is how you keep a coding agent's prompt
     # free of a user's dietary requirements.
-    coding_only = RecordAgentRetriever(
+    coding_only = RecuerdosRetriever(
         client=ra, limit=3, tags=[run], categories=["preference.coding"]
     )
     print("\n> conventions (preference.coding only)")
@@ -91,6 +91,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except RecordAgentError as error:
+    except RecuerdosError as error:
         print(f"error: {error}", file=sys.stderr)
         sys.exit(1)

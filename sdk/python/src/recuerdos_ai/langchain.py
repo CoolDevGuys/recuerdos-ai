@@ -4,7 +4,7 @@ Optional. ``langchain-core`` is an extra, and importing this module
 without it raises a message that says what to install rather than an
 opaque ``ModuleNotFoundError`` from three frames down.
 
-    pip install "recordagent[langchain]"
+    pip install "recuerdos-ai[langchain]"
 
 # Retriever, or tool?
 
@@ -17,7 +17,7 @@ conventions in a coding agent.
 A **tool** lets the model decide when to look. Right when memory is one
 source among several, and most turns do not need it. For that, wrap
 :meth:`Client.search` in whatever tool decorator your framework uses;
-there is nothing RecordAgent-specific about it, so this module does not
+there is nothing Recuerdos AI-specific about it, so this module does not
 ship a second wrapper you would have to learn.
 """
 
@@ -36,21 +36,21 @@ try:
     from langchain_core.retrievers import BaseRetriever
 except ModuleNotFoundError as error:  # pragma: no cover
     raise ModuleNotFoundError(
-        "recordagent.langchain needs langchain-core. "
-        'Install it with: pip install "recordagent[langchain]"'
+        "recuerdos_ai.langchain needs langchain-core. "
+        'Install it with: pip install "recuerdos-ai[langchain]"'
     ) from error
 
-__all__ = ["RecordAgentRetriever"]
+__all__ = ["RecuerdosRetriever"]
 
 
-class RecordAgentRetriever(BaseRetriever):
+class RecuerdosRetriever(BaseRetriever):
     """Retrieves a user's memories as LangChain ``Document``s.
 
     ```python
-    from recordagent import Client
-    from recordagent.langchain import RecordAgentRetriever
+    from recuerdos_ai import Client
+    from recuerdos_ai.langchain import RecuerdosRetriever
 
-    retriever = RecordAgentRetriever(
+    retriever = RecuerdosRetriever(
         client=Client(api_key="ra_live_…"),
         limit=5,
         categories=["preference.coding", "decision"],
@@ -65,7 +65,7 @@ class RecordAgentRetriever(BaseRetriever):
     """
 
     client: Client
-    """The RecordAgent client. Its API key determines whose memories these are."""
+    """The Recuerdos AI client. Its API key determines whose memories these are."""
 
     limit: int = 5
     """How many memories to retrieve. Kept small by default: these go into
@@ -107,7 +107,7 @@ class RecordAgentRetriever(BaseRetriever):
                     "created_at": hit.created_at.isoformat(),
                     "vector_rank": hit.matched.vector_rank,
                     "bm25_rank": hit.matched.bm25_rank,
-                    "source": "recordagent",
+                    "source": "recuerdos-ai",
                 },
             )
             for hit in hits

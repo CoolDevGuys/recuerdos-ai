@@ -1,4 +1,4 @@
-# RecordAgent — Long-Term Memory Service for AI Agents
+# Recuerdos AI — Long-Term Memory Service for AI Agents
 
 **Project plan · v0.1 · 2026-07-18**
 
@@ -46,7 +46,7 @@ audience but has one root cause — no durable, queryable memory shared across t
 - **Cross-tool fragmentation**: memory saved by one tool is invisible to the others.
   Your Claude Code session learns you prefer `pnpm`; your Hermes agent doesn't know.
 
-**RecordAgent's thesis:** memory should be a *service* you own — a single fast daemon
+**Recuerdos AI's thesis:** memory should be a *service* you own — a single fast daemon
 that any agent can read from and write to, that *understands* what it stores
 (extracting facts, labeling, categorizing, deduplicating, resolving contradictions),
 and that isolates each user's memories strictly.
@@ -110,7 +110,7 @@ matters both for design inspiration and for positioning if this becomes OSS/SaaS
   API for non-MCP consumers. `engram_mcp` shows the Rust + SQLite + fastembed
   combination already works in practice.
 
-### 3.5 Positioning gap RecordAgent fills
+### 3.5 Positioning gap Recuerdos AI fills
 
 No existing OSS project combines **all** of: (1) Rust-fast single binary,
 (2) Mem0-style LLM understanding pipeline (extract → classify ADD/UPDATE/DELETE →
@@ -155,7 +155,7 @@ deliberate upgrade path to Strategy B.
 
 ### Strategy C — "Thin & Pluggable": orchestration layer over existing infra (Qdrant/Redis + provider APIs)
 
-- RecordAgent is only the pipeline + API layer; storage is external Qdrant (vectors)
+- Recuerdos AI is only the pipeline + API layer; storage is external Qdrant (vectors)
   and Redis (hot cache/metadata).
 - **Pros:** least storage code to write; Qdrant gives best-in-class ANN at huge
   scale immediately; Redis gives sub-ms hot reads.
@@ -175,7 +175,7 @@ reserves entity/relation tables and supersedence links so no migration pain late
 
 ```
                                 ┌────────────────────────────────────────────┐
-  Claude Code ── MCP(stdio) ──▶ │                RECORDAGENT DAEMON          │
+  Claude Code ── MCP(stdio) ──▶ │                RECUERDOS_AI DAEMON          │
   opencode ──── MCP(http) ────▶ │  ┌──────────┐  ┌──────────────────────┐    │
   Hermes ────── REST ─────────▶ │  │ API layer│  │  Memory Engine       │    │
   LangChain ─── REST/SDK ─────▶ │  │ axum+rmcp│─▶│  ingest → understand │    │
@@ -246,9 +246,9 @@ reserves entity/relation tables and supersedence links so no migration pain late
 | Local embeddings | **fastembed-rs** (ONNX: bge-small-en-v1.5 / all-MiniLM-L6-v2, 384-dim) | Zero-config default — service works with NO external provider |
 | LLM providers | Provider trait: `anthropic`, `openai-compat` (covers OpenAI/OpenRouter/Groq), `ollama` | User-selected; all four requested options covered |
 | Job queue | SQLite-backed queue table + tokio workers (POC) → trait allows Redis/NATS later | No extra infra |
-| Config | TOML (`recordagent.toml`) + env-var overrides (`RECORDAGENT_*`) + hot-reload for provider keys | Requested: config-file driven |
+| Config | TOML (`recuerdos-ai.toml`) + env-var overrides (`RECUERDOS_AI_*`) + hot-reload for provider keys | Requested: config-file driven |
 | Observability | `tracing` + optional Prometheus `/metrics` | SaaS-readiness |
-| CLI | `recordagent` binary: `serve`, `init`, `user add`, `key issue`, `export`, `import`, `consolidate` | Ops & onboarding |
+| CLI | `recuerdos-ai` binary: `serve`, `init`, `user add`, `key issue`, `export`, `import`, `consolidate` | Ops & onboarding |
 | Distribution | cargo, Homebrew tap, single-file installer, Docker image (optional, not required) | OSS adoption |
 
 **Performance targets (POC acceptance):** recall P95 < 50 ms end-to-end with local
@@ -321,7 +321,7 @@ Recommendation: **skip for POC**, keep behind traits.
 
 Flat markdown files (the CLAUDE.md model) don't scale past hundreds of memories,
 can't do semantic search, can't enforce isolation. But **markdown export/import**
-(`recordagent export --format md`) is kept: it's the trust feature — "your
+(`recuerdos-ai export --format md`) is kept: it's the trust feature — "your
 memories are yours, readable, greppable, portable." Also enables git-versioned
 memory backups.
 
@@ -398,7 +398,7 @@ never silently deleted).
 
 **Client integration recipes to ship in docs:** Claude Code (`.mcp.json` +
 SessionStart/PreCompact hooks that call `session_distill`), opencode (MCP config),
-Hermes Agent (REST tool or MCP), LangChain (`RecordAgentMemory` Python retriever,
+Hermes Agent (REST tool or MCP), LangChain (`Recuerdos AIMemory` Python retriever,
 thin HTTP wrapper — the one place Python appears).
 
 ---
@@ -406,7 +406,7 @@ thin HTTP wrapper — the one place Python appears).
 ## 10. Configuration
 
 ```toml
-# recordagent.toml
+# recuerdos-ai.toml
 [server]
 host = "127.0.0.1"
 port = 7070
@@ -414,7 +414,7 @@ mcp  = { stdio = true, http = true }
 
 [storage]
 backend = "embedded"            # embedded | postgres | qdrant (post-POC)
-path    = "~/.recordagent/data"
+path    = "~/.recuerdos-ai/data"
 
 [embeddings]
 provider = "local"              # local | openai-compat | ollama
@@ -449,7 +449,7 @@ mode = "api-key"                # api-key | none (explicit single-user opt-out)
 - Auth middleware → `UserContext`; storage API is uncallable without it (compile-time
   guarantee, plus tests that assert cross-user queries return zero rows).
 - API keys: argon2-hashed, prefixed, scoped (`read`, `write`, `admin`), revocable,
-  `last_used` tracked. CLI: `recordagent key issue --user alex --scopes read,write`.
+  `last_used` tracked. CLI: `recuerdos-ai key issue --user alex --scopes read,write`.
 - All PII stays local by default (local embeddings + optional local Ollama
   extraction = fully offline mode).
 - When a remote LLM is configured, the config makes the data flow explicit;
@@ -594,7 +594,7 @@ sync between personal devices.
   team/org shared memory, the web dashboard, SLAs, and cross-device sync — *not*
   the engine itself. So the engine can be fully open without cannibalizing SaaS.
 - **Name check before launch:** verify crate/repo/domain availability and trademark
-  conflicts for the final name ("RecordAgent" is a working title).
+  conflicts for the final name ("Recuerdos AI" is a working title).
 
 ---
 

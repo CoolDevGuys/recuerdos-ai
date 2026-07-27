@@ -56,27 +56,27 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang pkg-config libssl-dev
 
       - name: Build
-        run: cargo build --release --locked --bin recordagent
+        run: cargo build --release --locked --bin recuerdos-ai
 
       # Proves the artifact runs on the platform it was built for before
       # it is published. A binary that fails to start is the one failure
       # mode an install script cannot recover from, and `--version`
       # exercises the whole link — including the ONNX and SQLite objects.
       - name: Smoke test
-        run: ./target/release/recordagent --version
+        run: ./target/release/recuerdos-ai --version
 
       - name: Package
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          asset="recordagent-${{ matrix.target }}.tar.gz"
+          asset="recuerdos-ai-${{ matrix.target }}.tar.gz"
 
           # Only the binary. The model is not baked in here — it is ~130
           # MB and would dominate the download; a bare-metal install
-          # fetches it into ~/.recordagent/models on first use, and the
+          # fetches it into ~/.recuerdos-ai/models on first use, and the
           # Docker image is the option for air-gapped hosts.
-          tar -czf "$asset" -C target/release recordagent
+          tar -czf "$asset" -C target/release recuerdos-ai
 
           if command -v sha256sum >/dev/null; then
             sha256sum "$asset" > "$asset.sha256"
@@ -123,7 +123,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
           # `latest` only for a final release. A prerelease tag that
-          # quietly became `docker run …/recordagent` for everyone would
+          # quietly became `docker run …/recuerdos-ai` for everyone would
           # be a nasty surprise.
           tags: |
             type=semver,pattern={{version}}
@@ -143,6 +143,43 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=release-image
           cache-to: type=gha,mode=max,scope=release-image
+
+  # Publishes the Python SDK (sdk/python) to PyPI via Trusted Publishing:
+  # PyPI trusts this repo+workflow over OIDC, so there is no API token to
+  # store or rotate. Final releases only — pyproject.toml carries a real
+  # (non-prerelease) version, so a `-rc` tag must not push it as final.
+  #
+  # One-time setup on PyPI (see the repo's docs/deployment or CONTRIBUTING):
+  # add a "pending publisher" for project `recuerdos-ai` with owner
+  # `CoolDevGuys`, repository `recuerdos-ai`, workflow `release.yml`, and
+  # environment `pypi`. Also create a GitHub Environment named `pypi`.
+  pypi:
+    name: Publish the Python SDK to PyPI
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref, '-')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # OIDC → PyPI Trusted Publishing; no stored secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          # Idempotent: a tag that did not bump the SDK version is a no-op
+          # rather than a hard failure on "file already exists".
+          skip-existing: true
 
   release:
     name: Draft the release

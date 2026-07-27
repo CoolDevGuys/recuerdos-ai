@@ -17,9 +17,9 @@ SEED_COUNT="${1:-100000}"
 QUERY_COUNT="${2:-500}"
 CONCURRENCY="${CONCURRENCY:-32}"
 PORT="${PORT:-7099}"
-IMAGE="${IMAGE:-recordagent:bench}"
-CONTAINER="recordagent-bench"
-NETWORK="recordagent-bench-net"
+IMAGE="${IMAGE:-recuerdos-ai:bench}"
+CONTAINER="recuerdos-ai-bench"
+NETWORK="recuerdos-ai-bench-net"
 RESULTS_DIR="bench-results"
 
 mkdir -p "$RESULTS_DIR"
@@ -54,8 +54,8 @@ START_NS=$(date +%s%N)
 docker run -d --name "$CONTAINER" \
     --network "$NETWORK" \
     -p "$PORT:7070" \
-    -e RECORDAGENT_AUTH__MODE=none \
-    -e RECORDAGENT_SERVER__HOST=0.0.0.0 \
+    -e RECUERDOS_AI_AUTH__MODE=none \
+    -e RECUERDOS_AI_SERVER__HOST=0.0.0.0 \
     "$IMAGE" serve >/dev/null
 
 until curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; do

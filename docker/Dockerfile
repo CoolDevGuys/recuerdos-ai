@@ -24,8 +24,8 @@ RUN cargo build --release
 # Bake the embedding model into the image. Without this the first
 # `POST /v1/memories` after `docker run` would block on a ~130 MB
 # HuggingFace download — and fail outright on an air-gapped host.
-RUN RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
-    ./target/release/recordagent warm-models
+RUN RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+    ./target/release/recuerdos-ai warm-models
 
 FROM debian:trixie-slim AS runtime
 
@@ -39,13 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --system --create-home --home-dir /home/nonroot --shell /usr/sbin/nologin --uid 10001 nonroot \
     && mkdir -p /data && chown nonroot:nonroot /data
 
-COPY --from=builder /app/target/release/recordagent /usr/local/bin/recordagent
+COPY --from=builder /app/target/release/recuerdos-ai /usr/local/bin/recuerdos-ai
 COPY --from=builder --chown=nonroot:nonroot /models /models
 
 VOLUME /data
-ENV RECORDAGENT_STORAGE__PATH=/data \
-    RECORDAGENT_SERVER__HOST=0.0.0.0 \
-    RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models
+ENV RECUERDOS_AI_STORAGE__PATH=/data \
+    RECUERDOS_AI_SERVER__HOST=0.0.0.0 \
+    RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models
 
 USER nonroot
 EXPOSE 7070
@@ -53,5 +53,5 @@ EXPOSE 7070
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7070/healthz || exit 1
 
-ENTRYPOINT ["recordagent"]
+ENTRYPOINT ["recuerdos-ai"]
 CMD ["serve"]

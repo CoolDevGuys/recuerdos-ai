@@ -4,7 +4,7 @@
 each phase, and gets its full write-up in Phase 6. Anything not stated
 here is not yet guaranteed.
 
-The central promise of RecordAgent is in
+The central promise of Recuerdos AI is in
 [project-plan.md §11](../project-plan.md#11-multi-user-isolation--security):
 **each user sees only their own memories.** This page explains how that is
 enforced and how you can check it.
@@ -129,7 +129,7 @@ pipeline on your own hardware.
 
 API keys are never read from config files, only from the environment
 variable `[understanding].api_key_env` names. A key pasted into
-`recordagent.toml` gets committed eventually.
+`recuerdos-ai.toml` gets committed eventually.
 
 ## Threat model
 

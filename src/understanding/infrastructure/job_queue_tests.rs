@@ -297,7 +297,7 @@ fn jobs_survive_a_restart() {
     // The whole point of persisting rather than queueing in memory: a
     // 202 that evaporates on deploy is a lie to the caller.
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("recordagent.db");
+    let path = dir.path().join("recuerdos-ai.db");
 
     let id = {
         let database = Arc::new(SqliteDatabase::open(&path).unwrap());

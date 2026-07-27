@@ -1,4 +1,4 @@
-//! `recordagent eval` — the retrieval-quality harness.
+//! `recuerdos-ai eval` — the retrieval-quality harness.
 //!
 //! Every other test asserts that a component behaves as written. This one
 //! asserts the thing the service is actually for: that asking a question

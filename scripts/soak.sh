@@ -23,8 +23,8 @@ cd "$(dirname "$0")/.."
 
 HOURS="${1:-24}"
 PORT="${PORT:-7098}"
-IMAGE="${IMAGE:-recordagent:soak}"
-CONTAINER="recordagent-soak"
+IMAGE="${IMAGE:-recuerdos-ai:soak}"
+CONTAINER="recuerdos-ai-soak"
 RESULTS_DIR="soak-results"
 # Sampled every minute: frequent enough to see a sawtooth, sparse enough
 # that a day of samples is still a readable file.
@@ -50,9 +50,9 @@ docker build -q -f docker/Dockerfile -t "$IMAGE" . >/dev/null
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" \
     -p "$PORT:7070" \
-    -e RECORDAGENT_AUTH__MODE=none \
-    -e RECORDAGENT_SERVER__HOST=0.0.0.0 \
-    -e RECORDAGENT_CONSOLIDATION__SCHEDULE=hourly \
+    -e RECUERDOS_AI_AUTH__MODE=none \
+    -e RECUERDOS_AI_SERVER__HOST=0.0.0.0 \
+    -e RECUERDOS_AI_CONSOLIDATION__SCHEDULE=hourly \
     "$IMAGE" serve >/dev/null
 
 echo "==> waiting for the daemon"

@@ -99,7 +99,7 @@ impl SqliteMemoryRepository {
             "this store was built with embedding model {stored_model:?} ({stored_dimensions} \
              dimensions) but the service is configured for {:?} ({}). Vectors from different \
              models are not comparable. Either restore the previous [embeddings] settings, or \
-             run `recordagent reindex` (with the daemon stopped) to re-embed every memory \
+             run `recuerdos-ai reindex` (with the daemon stopped) to re-embed every memory \
              under the new model in place.",
             self.embedding_model, self.dimensions
         ))

@@ -1,7 +1,7 @@
 # Name availability check
 
 project-plan.md §16 asks for this before launch: "verify crate/repo/domain
-availability and trademark conflicts for the final name (*RecordAgent* is
+availability and trademark conflicts for the final name (*Recuerdos AI* is
 a working title)."
 
 Checked **2026-07-20**. Registries change; re-run before you actually
@@ -11,11 +11,11 @@ claim anything.
 
 | Registry | Name | State |
 |---|---|---|
-| crates.io | `recordagent` | available |
+| crates.io | `recuerdos-ai` | available |
 | crates.io | `record-agent` | available |
-| PyPI | `recordagent` | available |
-| TestPyPI | `recordagent` | available |
-| npm | `recordagent` | available |
+| PyPI | `recuerdos-ai` | available |
+| TestPyPI | `recuerdos-ai` | available |
+| npm | `recuerdos-ai` | available |
 
 The PyPI one is the only one that currently matters — `Cargo.toml` sets
 `publish = false`, so the crate name is reserved-by-nobody rather than
@@ -26,15 +26,15 @@ registry your users install from is expensive to undo.
 
 | | |
 |---|---|
-| `github.com/alexromer0/recordagent` | the canonical repo (currently private, so an unauthenticated check reads as 404) |
-| `ghcr.io/alexromer0/recordagent` | namespaced under the same account; available by construction |
+| `github.com/CoolDevGuys/recuerdos-ai` | the canonical repo (currently private, so an unauthenticated check reads as 404) |
+| `ghcr.io/CoolDevGuys/recuerdos-ai` | namespaced under the same account; available by construction |
 
 Six other GitHub repos carry the name, all dormant — the largest has 2
 stars, and none is a memory service:
 
 ```
-luanne/recordagent (2)   passxxx/recordAgent (0)   SaraSen/RecordAgent (0)
-mx504/recordAgent (1)    SaraSen/RecordAgentBackend (0)
+luanne/recuerdos-ai (2)   passxxx/recordAgent (0)   SaraSen/Recuerdos AI (0)
+mx504/recordAgent (1)    SaraSen/Recuerdos AIBackend (0)
 ```
 
 No collision worth renaming over, but the name is not distinctive on
@@ -44,11 +44,11 @@ GitHub, which is worth knowing if discoverability matters later.
 
 | Domain | State |
 |---|---|
-| recordagent.com | **registered** |
-| recordagent.dev | available |
-| recordagent.io | available |
-| recordagent.ai | available |
-| recordagent.sh | available |
+| recuerdos-ai.com | **registered** |
+| recuerdos-ai.dev | available |
+| recuerdos-ai.io | available |
+| recuerdos-ai.ai | available |
+| recuerdos-ai.sh | available |
 
 Checked over RDAP. `.com` being gone is the only real constraint; `.dev`
 is the conventional choice for a developer tool and is free.
@@ -61,13 +61,13 @@ about registrations in classes covering software or cloud services, or
 about how similar is too similar.
 
 Two dormant GitHub repos and a parked `.com` are weak signals of nothing
-in particular. If RecordAgent ships under this name commercially, the
+in particular. If Recuerdos AI ships under this name commercially, the
 remaining step is a real search (USPTO TESS, EUIPO eSearch) and, if
 anything turns up, an actual lawyer. Neither is something this document
 substitutes for.
 
 ## Conclusion
 
-Nothing here blocks shipping under **RecordAgent**. Every name the
+Nothing here blocks shipping under **Recuerdos AI**. Every name the
 project needs to claim is free; `.com` is taken, which argues for
-`recordagent.dev` if a domain is ever wanted.
+`recuerdos-ai.dev` if a domain is ever wanted.

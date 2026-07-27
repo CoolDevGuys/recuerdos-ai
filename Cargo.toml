@@ -1,15 +1,15 @@
 [package]
-name = "recordagent"
+name = "recuerdos-ai"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 description = "Self-hostable long-term memory service for AI agents, over REST and MCP."
-repository = "https://github.com/alexromer0/recordagent"
+repository = "https://github.com/CoolDevGuys/recuerdos-ai"
 publish = false
 
 [[bin]]
-name = "recordagent"
+name = "recuerdos-ai"
 path = "src/main.rs"
 
 [dependencies]

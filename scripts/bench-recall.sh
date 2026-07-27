@@ -8,7 +8,7 @@
 # `took_ms` (which excludes auth) is reported alongside, so the two halves
 # can be told apart.
 #
-# Assumes a daemon on localhost:7070 and the `recordagent` CLI reachable
+# Assumes a daemon on localhost:7070 and the `recuerdos-ai` CLI reachable
 # via `docker compose run --rm dev`.
 set -euo pipefail
 
@@ -24,9 +24,9 @@ for _ in $(seq 1 60); do
 done
 
 echo "==> creating user $USER_HANDLE"
-docker compose run --rm dev cargo run -q --bin recordagent -- \
+docker compose run --rm dev cargo run -q --bin recuerdos-ai -- \
     user add "$USER_HANDLE" >/dev/null 2>&1
-KEY=$(docker compose run --rm dev cargo run -q --bin recordagent -- \
+KEY=$(docker compose run --rm dev cargo run -q --bin recuerdos-ai -- \
     key issue --user "$USER_HANDLE" --scopes read,write 2>/dev/null \
     | grep -o 'ra_live_[a-f0-9]*')
 

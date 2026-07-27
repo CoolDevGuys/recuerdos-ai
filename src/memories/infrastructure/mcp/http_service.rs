@@ -3,7 +3,7 @@
 //! Unlike the stdio shim (a separate process per client), this is part of
 //! the daemon itself — an MCP client connects straight to
 //! `http://<daemon>/mcp` with its API key as a bearer token, no local
-//! `recordagent` binary required. That is the difference that lets a
+//! `recuerdos-ai` binary required. That is the difference that lets a
 //! containerised daemon be used from an editor without a `docker exec`
 //! wrapper.
 //!

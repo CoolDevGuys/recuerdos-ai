@@ -4,7 +4,7 @@
 //!
 //! `[consolidation].schedule` takes `daily`, `hourly` or `weekly` rather
 //! than a cron string. A cron expression would let an operator pick 3am
-//! local time, which sounds better than it is: RecordAgent runs on a
+//! local time, which sounds better than it is: Recuerdos AI runs on a
 //! laptop as often as on a server, and a laptop is usually asleep at 3am.
 //! An interval from process start fires on a machine that is actually
 //! running, which is the property that matters for a job whose whole
@@ -70,7 +70,7 @@ pub fn start(
     if !enabled {
         tracing::info!(
             "[consolidation].enabled = false: memories will not be de-duplicated \
-             automatically. `recordagent consolidate --now` still works."
+             automatically. `recuerdos-ai consolidate --now` still works."
         );
         return Ok(None);
     }

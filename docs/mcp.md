@@ -2,7 +2,7 @@
 
 Four tools and one resource, over **two transports** — stdio and HTTP.
 
-RecordAgent speaks the [Model Context Protocol](https://modelcontextprotocol.io),
+Recuerdos AI speaks the [Model Context Protocol](https://modelcontextprotocol.io),
 so any MCP client — Claude Code, opencode, Hermes Agent, MCP Inspector —
 reads and writes the same memory store.
 
@@ -11,9 +11,9 @@ reads and writes the same memory store.
 Either way you need the daemon running and an API key:
 
 ```bash
-recordagent serve &                 # leave it running
-recordagent user add alex
-recordagent key issue --user alex --scopes read,write
+recuerdos-ai serve &                 # leave it running
+recuerdos-ai user add alex
+recuerdos-ai key issue --user alex --scopes read,write
 ```
 
 ### Streamable HTTP (`/mcp`) — no local binary
@@ -24,7 +24,7 @@ network with the key as a bearer token. This is the easiest path for a
 there is no `docker exec` wrapper.
 
 ```
-opencode ──HTTP /mcp──▶ recordagent serve ──▶ SQLite
+opencode ──HTTP /mcp──▶ recuerdos-ai serve ──▶ SQLite
 ```
 
 Point the client at `http://<daemon>:7070/mcp` with
@@ -35,24 +35,24 @@ The endpoint honours the MCP spec's DNS-rebinding guard, accepting only
 loopback `Host` values (`localhost`, `127.0.0.1`, `::1`) — which covers a
 local editor. Behind a reverse proxy on a real hostname, terminate there.
 
-### stdio (`recordagent mcp`) — a per-session shim
+### stdio (`recuerdos-ai mcp`) — a per-session shim
 
 MCP clients can instead spawn a server process and talk to it over
 stdin/stdout. That process is a **shim**: it forwards to the running
 daemon over the same HTTP API.
 
 ```
-Claude Code ──stdio──▶ recordagent mcp ──HTTP──▶ recordagent serve ──▶ SQLite
+Claude Code ──stdio──▶ recuerdos-ai mcp ──HTTP──▶ recuerdos-ai serve ──▶ SQLite
                        (one per session)         (one, shared)
 ```
 
 | Variable | Required | Default |
 |---|---|---|
-| `RECORDAGENT_API_KEY` | yes | — |
-| `RECORDAGENT_URL` | no | `http://127.0.0.1:7070` |
+| `RECUERDOS_AI_API_KEY` | yes | — |
+| `RECUERDOS_AI_URL` | no | `http://127.0.0.1:7070` |
 
 Use this when the client only supports local (stdio) MCP servers, or when
-the `recordagent` binary is already on the client's machine.
+the `recuerdos-ai` binary is already on the client's machine.
 
 See [integrations/claude-code.md](integrations/claude-code.md) and
 [integrations/opencode.md](integrations/opencode.md) for exact config for
@@ -247,7 +247,7 @@ The same digest is available over REST at `GET /v1/profile`.
 ## Verifying with MCP Inspector
 
 ```bash
-RECORDAGENT_API_KEY=ra_live_… npx @modelcontextprotocol/inspector recordagent mcp
+RECUERDOS_AI_API_KEY=ra_live_… npx @modelcontextprotocol/inspector recuerdos-ai mcp
 ```
 
 Inspector lists the tools, shows their schemas, and lets you call them by
@@ -262,17 +262,17 @@ printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | RECORDAGENT_API_KEY=ra_live_… recordagent mcp
+  | RECUERDOS_AI_API_KEY=ra_live_… recuerdos-ai mcp
 ```
 
 ## Troubleshooting
 
-**"RECORDAGENT_API_KEY is not set"** — the client isn't passing the
+**"RECUERDOS_AI_API_KEY is not set"** — the client isn't passing the
 environment. Most clients need it under an `env` key in their config
 rather than inheriting your shell.
 
-**"could not reach the RecordAgent daemon"** — `recordagent serve` isn't
-running, or is on a different port than `RECORDAGENT_URL`.
+**"could not reach the Recuerdos AI daemon"** — `recuerdos-ai serve` isn't
+running, or is on a different port than `RECUERDOS_AI_URL`.
 
 **The client lists no tools** — check the client's MCP server logs. The
 shim writes diagnostics to stderr; stdout is the protocol channel and

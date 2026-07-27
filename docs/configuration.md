@@ -8,21 +8,21 @@ features; both degrade to something useful without a provider.
 
 ## Precedence
 
-Defaults → `recordagent.toml` → `RECORDAGENT_*` env vars (env wins).
-Nested keys use a double underscore: `RECORDAGENT_SERVER__PORT=8080` sets
+Defaults → `recuerdos-ai.toml` → `RECUERDOS_AI_*` env vars (env wins).
+Nested keys use a double underscore: `RECUERDOS_AI_SERVER__PORT=8080` sets
 `[server].port`.
 
 The file is read only when you point at it — with `--config PATH`, or by
-setting `RECORDAGENT_CONFIG=PATH` in the environment. The env var is the
+setting `RECUERDOS_AI_CONFIG=PATH` in the environment. The env var is the
 easy way to make **every** command (and the daemon) read the same file
 without repeating `--config`; an explicit `--config` still wins over it.
-There is no auto-discovery of a `recordagent.toml` in the working
+There is no auto-discovery of a `recuerdos-ai.toml` in the working
 directory, so a daemon or a `reindex` started with neither uses defaults +
 env and ignores a file sitting next to it.
 
 ```bash
-recordagent init                 # writes ./recordagent.toml + creates the data dir
-recordagent serve --config recordagent.toml
+recuerdos-ai init                 # writes ./recuerdos-ai.toml + creates the data dir
+recuerdos-ai serve --config recuerdos-ai.toml
 ```
 
 `init` refuses to overwrite an existing file, and re-loads what it wrote
@@ -31,13 +31,13 @@ before declaring success — if `init` reports success, the file is valid.
 ## Checking what is in effect
 
 Because env vars override the file, the config a running daemon actually
-uses is not always what the file says. `recordagent config` (or
+uses is not always what the file says. `recuerdos-ai config` (or
 `make config`) prints the **resolved** result — which embeddings and
 understanding provider are selected, their models and endpoints, the MCP
 transports, storage path, and auth mode:
 
 ```bash
-recordagent config
+recuerdos-ai config
 ```
 
 It prints no secrets. For a provider API key it shows only the env var
@@ -47,7 +47,7 @@ otherwise surface as a provider failing on its first request.
 
 ## Reference
 
-See [recordagent.example.toml](../recordagent.example.toml) for every key
+See [recuerdos-ai.example.toml](../recuerdos-ai.example.toml) for every key
 with its default and an explanatory comment. Highlights:
 
 - `[embeddings].provider` defaults to `local` — embeddings work fully
@@ -84,10 +84,10 @@ mode = "api-key"   # api-key | none
 Every `/v1` route requires a bearer key. Manage keys with the CLI:
 
 ```bash
-recordagent user add alex --email alex@example.com
-recordagent key issue --user alex --scopes read,write --name laptop
-recordagent key list --user alex
-recordagent key revoke b99f884a          # by prefix
+recuerdos-ai user add alex --email alex@example.com
+recuerdos-ai key issue --user alex --scopes read,write --name laptop
+recuerdos-ai key list --user alex
+recuerdos-ai key revoke b99f884a          # by prefix
 ```
 
 The key is displayed once at issue time. Only an argon2id hash is stored,
@@ -114,9 +114,9 @@ orphaned.
 
 ```toml
 [embeddings]
-provider  = "local"                    # local | openai-compat | ollama
+provider  = "local"                    # local | gemini | openai-compat | ollama
 model     = "bge-small-en-v1.5"        # or all-minilm-l6-v2
-cache_dir = "~/.recordagent/models"    # local only
+cache_dir = "~/.recuerdos-ai/models"    # local only
 ```
 
 ### `provider = "local"` (default)
@@ -126,7 +126,7 @@ that is why the daemon works with no API key and no network.
 
 `cache_dir` is where the ~130 MB model lives. The Docker image bakes it
 in at `/models`, so containers never download at runtime. On bare metal
-the model is fetched on first use; `recordagent warm-models` does it
+the model is fetched on first use; `recuerdos-ai warm-models` does it
 ahead of time, which is what you want before taking a host offline. Both
 built-in models are 384-dimensional.
 
@@ -216,7 +216,7 @@ pin, **the daemon refuses to start** and tells you exactly what to do:
 ```
 this store was built with embedding model "bge-small-en-v1.5" (384 dimensions)
 but the service is configured for "gemini-embedding-001" (3072). … run
-`recordagent reindex` (with the daemon stopped) to re-embed every memory
+`recuerdos-ai reindex` (with the daemon stopped) to re-embed every memory
 under the new model in place.
 ```
 
@@ -229,7 +229,7 @@ To switch **and keep your memories**, re-embed them in place:
 ```bash
 # 1. stop the daemon
 # 2. edit [embeddings] to the new provider/model
-recordagent reindex
+recuerdos-ai reindex
 # 3. start the daemon
 ```
 
@@ -264,10 +264,10 @@ at 50 regardless.
 
 ```toml
 [storage]
-path = "~/.recordagent/data"
+path = "~/.recuerdos-ai/data"
 ```
 
-The database lives at `<path>/recordagent.db`, and the per-user keyword
+The database lives at `<path>/recuerdos-ai.db`, and the per-user keyword
 indexes at `<path>/text-index/<user-id>/`. Both are created, along with
 any missing parent directories, on first use. Schema migrations run
 automatically at startup and are idempotent. Backup is `cp` of the data
@@ -303,8 +303,8 @@ Only the third needs a provider.
 ### Running it by hand
 
 ```bash
-recordagent consolidate --dry-run   # report what would merge; changes nothing
-recordagent consolidate             # apply
+recuerdos-ai consolidate --dry-run   # report what would merge; changes nothing
+recuerdos-ai consolidate             # apply
 ```
 
 `--dry-run` calls no model, so it costs nothing to run. It prints each
@@ -314,7 +314,7 @@ to judge whether the grouping is right.
 ### `schedule`
 
 An interval from process start, not a wall-clock time. A cron expression
-would let you pick 3am, which sounds better than it is: RecordAgent runs
+would let you pick 3am, which sounds better than it is: Recuerdos AI runs
 on laptops, and a laptop is asleep at 3am. The first run is one interval
 *after* startup, so a daemon that restarts often does not consolidate —
 and pay for it — every time.

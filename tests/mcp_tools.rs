@@ -1,6 +1,6 @@
 //! Black-box tests for the MCP surface.
 //!
-//! These spawn the real `recordagent mcp` process against a real daemon
+//! These spawn the real `recuerdos-ai mcp` process against a real daemon
 //! and drive it with a real rmcp client over stdio — the exact path
 //! Claude Code takes. Nothing here stubs the protocol, so a mistake in
 //! the tool schemas, the transport, or the shim's HTTP forwarding shows
@@ -29,12 +29,12 @@ impl McpClient {
         let app = TestApp::spawn().await;
         let key = app.create_user_with_key("alex", "read,write");
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_recordagent"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
         command
             .arg("mcp")
-            .env("RECORDAGENT_API_KEY", &key)
-            .env("RECORDAGENT_URL", &app.base_url)
-            .env_remove("RECORDAGENT_LOG");
+            .env("RECUERDOS_AI_API_KEY", &key)
+            .env("RECUERDOS_AI_URL", &app.base_url)
+            .env_remove("RECUERDOS_AI_LOG");
 
         let service =
             ().serve(TokioChildProcess::new(command).expect("spawn the mcp shim"))
@@ -294,7 +294,7 @@ async fn the_server_tells_the_client_how_to_use_it() {
         instructions.contains("memory://profile"),
         "the server should point clients at the profile: {instructions}"
     );
-    assert_eq!(info.server_info.name, "recordagent");
+    assert_eq!(info.server_info.name, "recuerdos-ai");
 }
 
 #[tokio::test]
@@ -332,15 +332,15 @@ async fn a_bad_api_key_stops_the_shim_from_starting() {
     // clearly than one that appears healthy and refuses all work.
     let app = TestApp::spawn().await;
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_recordagent"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
     command
         .arg("mcp")
         .env(
-            "RECORDAGENT_API_KEY",
+            "RECUERDOS_AI_API_KEY",
             "ra_live_deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         )
-        .env("RECORDAGENT_URL", &app.base_url)
-        .env_remove("RECORDAGENT_LOG");
+        .env("RECUERDOS_AI_URL", &app.base_url)
+        .env_remove("RECUERDOS_AI_LOG");
 
     let result = ().serve(TokioChildProcess::new(command).expect("spawn")).await;
 

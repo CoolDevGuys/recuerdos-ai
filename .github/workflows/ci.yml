@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEV_IMAGE: recordagent-dev:ci
+  DEV_IMAGE: recuerdos-ai-dev:ci
 
 jobs:
   # fmt --check + clippy -D warnings + the boundary script, run inside the
@@ -69,10 +69,10 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
-            cargo run -q --bin recordagent -- warm-models
+            cargo run -q --bin recuerdos-ai -- warm-models
 
       - name: cargo fmt --check / clippy -D warnings / boundary script
         run: |
@@ -81,8 +81,8 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
-            -e RECORDAGENT_MODEL_CACHE=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_MODEL_CACHE=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just check-native
@@ -143,10 +143,10 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
-            cargo run -q --bin recordagent -- warm-models
+            cargo run -q --bin recuerdos-ai -- warm-models
 
       - name: cargo test
         run: |
@@ -155,8 +155,8 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
-            -e RECORDAGENT_MODEL_CACHE=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_MODEL_CACHE=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just test-native
@@ -221,10 +221,10 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
-            cargo run -q --bin recordagent -- warm-models
+            cargo run -q --bin recuerdos-ai -- warm-models
 
       - name: Score retrieval against the baseline
         run: |
@@ -233,7 +233,7 @@ jobs:
             -v "${{ github.workspace }}/.ci-cache/cargo-registry:/usr/local/cargo/registry" \
             -v "${{ github.workspace }}/.ci-cache/cargo-git:/usr/local/cargo/git" \
             -v "${{ github.workspace }}/.ci-cache/models:/models" \
-            -e RECORDAGENT_EMBEDDINGS__CACHE_DIR=/models \
+            -e RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
             -w /app \
             "${{ env.DEV_IMAGE }}" \
             just eval-native
@@ -280,7 +280,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
-          tags: recordagent:ci
+          tags: recuerdos-ai:ci
           load: true
           cache-from: type=gha,scope=release-image
           cache-to: type=gha,mode=max,scope=release-image
@@ -288,7 +288,7 @@ jobs:
       - name: Smoke test
         run: |
           set -euo pipefail
-          docker run -d --name smoke -p 7070:7070 recordagent:ci serve
+          docker run -d --name smoke -p 7070:7070 recuerdos-ai:ci serve
 
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:7070/healthz >/dev/null; then

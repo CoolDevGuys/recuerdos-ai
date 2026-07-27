@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "recordagent",
+    name = "recuerdos-ai",
     version,
     about = "Long-term memory service for AI agents"
 )]
@@ -27,15 +27,15 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Write a default recordagent.toml and create its data directory.
+    /// Write a default recuerdos-ai.toml and create its data directory.
     Init {
-        #[arg(long, default_value = "recordagent.toml")]
+        #[arg(long, default_value = "recuerdos-ai.toml")]
         config: PathBuf,
     },
     /// Print the resolved configuration — providers, models, transports.
     ///
     /// Shows the effective values after defaults, the file and
-    /// `RECORDAGENT_*` env vars are merged, so it answers "which provider
+    /// `RECUERDOS_AI_*` env vars are merged, so it answers "which provider
     /// am I actually using". Prints no secrets: for an API key it shows
     /// only the env var's name and whether it is set, never the value.
     Config {
@@ -44,8 +44,8 @@ enum Command {
     },
     /// Serve MCP over stdio, for an MCP client to spawn.
     ///
-    /// Forwards to a running daemon; set RECORDAGENT_API_KEY (and
-    /// RECORDAGENT_URL if it isn't on localhost:7070).
+    /// Forwards to a running daemon; set RECUERDOS_AI_API_KEY (and
+    /// RECUERDOS_AI_URL if it isn't on localhost:7070).
     Mcp {
         /// Recorded as the source of memories this client saves.
         #[arg(long, default_value = "mcp")]
@@ -405,7 +405,7 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
     let embeddings = &config.embeddings;
     let understanding = &config.understanding;
 
-    println!("recordagent configuration (defaults + file + RECORDAGENT_* env)\n");
+    println!("recuerdos-ai configuration (defaults + file + RECUERDOS_AI_* env)\n");
 
     println!("embeddings");
     println!("  provider   {}", embeddings.provider);
@@ -442,7 +442,7 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         transports.push("http (/mcp)");
     }
     if config.server.mcp.stdio {
-        transports.push("stdio (recordagent mcp)");
+        transports.push("stdio (recuerdos-ai mcp)");
     }
     println!(
         "  mcp        {}",
@@ -488,7 +488,7 @@ fn key_status(env_name: &str) -> String {
 }
 
 fn run_init(config_path: &PathBuf) -> Result<(), String> {
-    const EXAMPLE_CONFIG: &str = include_str!("../recordagent.example.toml");
+    const EXAMPLE_CONFIG: &str = include_str!("../recuerdos-ai.example.toml");
 
     if config_path.exists() {
         return Err(format!(

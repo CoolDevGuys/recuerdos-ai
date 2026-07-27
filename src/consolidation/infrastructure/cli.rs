@@ -1,4 +1,4 @@
-//! `recordagent consolidate` — run the nightly job now, by hand.
+//! `recuerdos-ai consolidate` — run the nightly job now, by hand.
 //!
 //! Exists for two reasons beyond impatience. An operator who has just
 //! turned consolidation on wants to see what it would do before trusting

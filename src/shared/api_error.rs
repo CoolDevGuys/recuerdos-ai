@@ -121,7 +121,7 @@ mod tests {
     #[tokio::test]
     async fn internal_errors_never_leak_their_detail() {
         let (status, body) = parts(RaError::Internal(
-            "database error: no such table /home/alex/.recordagent/data.db".into(),
+            "database error: no such table /home/alex/.recuerdos-ai/data.db".into(),
         ))
         .await;
 

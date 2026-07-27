@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn open_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested/deeper/recordagent.db");
+        let path = dir.path().join("nested/deeper/recuerdos-ai.db");
 
         SqliteDatabase::open(&path).unwrap();
 
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn migrations_are_idempotent_across_reopens() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("recordagent.db");
+        let path = dir.path().join("recuerdos-ai.db");
 
         SqliteDatabase::open(&path).unwrap();
         // Re-opening runs the migration runner again against a schema

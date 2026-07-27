@@ -313,8 +313,8 @@ impl ServerHandler for MemoryMcpServer {
             .enable_tools()
             .enable_resources()
             .build();
-        info.server_info = Implementation::new("recordagent", env!("CARGO_PKG_VERSION"))
-            .with_title("RecordAgent memory");
+        info.server_info = Implementation::new("recuerdos-ai", env!("CARGO_PKG_VERSION"))
+            .with_title("Recuerdos AI memory");
         // Server instructions are the client's framing for the whole
         // server, separate from any one tool's description: this is where
         // "read the profile first" belongs.
@@ -387,9 +387,10 @@ fn to_mcp_error(error: RaError) -> ErrorData {
     match error {
         RaError::Validation(message) => ErrorData::invalid_params(message, None),
         RaError::NotFound(message) => ErrorData::invalid_params(message, None),
-        RaError::Unauthorized(_) | RaError::Forbidden(_) => {
-            ErrorData::invalid_request("this RecordAgent API key is not permitted to do that", None)
-        }
+        RaError::Unauthorized(_) | RaError::Forbidden(_) => ErrorData::invalid_request(
+            "this Recuerdos AI API key is not permitted to do that",
+            None,
+        ),
         RaError::Conflict(message) => ErrorData::invalid_request(message, None),
         RaError::Internal(detail) => {
             tracing::error!(error = %detail, "mcp tool failed");

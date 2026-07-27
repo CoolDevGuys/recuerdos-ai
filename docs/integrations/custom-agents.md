@@ -10,10 +10,10 @@ which is most of the work. This page is for everything else.
 ## Setup
 
 ```bash
-recordagent serve &
-recordagent user add alex
-recordagent key issue --user alex --scopes read,write
-export RECORDAGENT_API_KEY=ra_live_…
+recuerdos-ai serve &
+recuerdos-ai user add alex
+recuerdos-ai key issue --user alex --scopes read,write
+export RECUERDOS_AI_API_KEY=ra_live_…
 export RA=http://localhost:7070
 ```
 
@@ -27,7 +27,7 @@ at the start, look things up during a turn, and hand back what happened.
 ### 1. Session start — read the profile
 
 ```bash
-curl -sS "$RA/v1/profile" -H "Authorization: Bearer $RECORDAGENT_API_KEY"
+curl -sS "$RA/v1/profile" -H "Authorization: Bearer $RECUERDOS_AI_API_KEY"
 ```
 
 Returns markdown, roughly 1500 tokens. Put it in your system prompt.
@@ -40,7 +40,7 @@ follow.
 
 ```bash
 curl -sS -X POST "$RA/v1/memories/search" \
-  -H "Authorization: Bearer $RECORDAGENT_API_KEY" \
+  -H "Authorization: Bearer $RECUERDOS_AI_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"query": "how does this user ship infrastructure?", "limit": 3}'
 ```
@@ -66,7 +66,7 @@ surprising ranking instead of merely distrusting it.
 
 ```bash
 curl -sS -X POST "$RA/v1/memories" \
-  -H "Authorization: Bearer $RECORDAGENT_API_KEY" \
+  -H "Authorization: Bearer $RECUERDOS_AI_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"content": "we moved observability to Grafana Cloud",
        "client": "my-agent"}'
@@ -123,7 +123,7 @@ tuned for exactly this.
 
 ```bash
 curl -sS -X POST "$RA/v1/sessions/distill" \
-  -H "Authorization: Bearer $RECORDAGENT_API_KEY" \
+  -H "Authorization: Bearer $RECUERDOS_AI_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"content": "…summary of the session…", "session_id": "s-42",
        "client": "my-agent"}'

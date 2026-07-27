@@ -190,7 +190,7 @@ mod tests {
             understanding: UnderstandingConfig {
                 provider: provider.to_string(),
                 model: "some-model".to_string(),
-                api_key_env: "RECORDAGENT_TEST_CHAT_KEY".to_string(),
+                api_key_env: "RECUERDOS_AI_TEST_CHAT_KEY".to_string(),
                 ..UnderstandingConfig::default()
             },
             ..AppConfig::default()
@@ -221,13 +221,13 @@ mod tests {
         // this cannot race the missing-key test that removes that one.
         //
         // SAFETY: a variable this test uniquely owns, set and cleared here.
-        unsafe { std::env::set_var("RECORDAGENT_TEST_GEMINI_KEY", "gk-test") };
+        unsafe { std::env::set_var("RECUERDOS_AI_TEST_GEMINI_KEY", "gk-test") };
 
         let config = AppConfig {
             understanding: UnderstandingConfig {
                 provider: "gemini".to_string(),
                 model: "gemini-2.0-flash".to_string(),
-                api_key_env: "RECORDAGENT_TEST_GEMINI_KEY".to_string(),
+                api_key_env: "RECUERDOS_AI_TEST_GEMINI_KEY".to_string(),
                 ..UnderstandingConfig::default()
             },
             ..AppConfig::default()
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(model.model_id(), "gemini-2.0-flash");
 
         // SAFETY: same single-threaded ownership as the set above.
-        unsafe { std::env::remove_var("RECORDAGENT_TEST_GEMINI_KEY") };
+        unsafe { std::env::remove_var("RECUERDOS_AI_TEST_GEMINI_KEY") };
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         // queue of dead-lettered jobs discovered hours later.
         //
         // SAFETY: single-threaded test that removes a variable it owns.
-        unsafe { std::env::remove_var("RECORDAGENT_TEST_CHAT_KEY") };
+        unsafe { std::env::remove_var("RECUERDOS_AI_TEST_CHAT_KEY") };
 
         let error = match build_chat_model(&config("anthropic")) {
             Err(error) => error,
@@ -256,7 +256,7 @@ mod tests {
         };
         assert!(matches!(error, RaError::Validation(_)), "got {error:?}");
         assert!(
-            error.to_string().contains("RECORDAGENT_TEST_CHAT_KEY"),
+            error.to_string().contains("RECUERDOS_AI_TEST_CHAT_KEY"),
             "the message must name the variable to set: {error}"
         );
     }

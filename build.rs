@@ -8,7 +8,7 @@ fn main() {
         .map(|sha| sha.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    println!("cargo:rustc-env=RECORDAGENT_GIT_SHA={git_sha}");
+    println!("cargo:rustc-env=RECUERDOS_AI_GIT_SHA={git_sha}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
 }

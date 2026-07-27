@@ -22,12 +22,12 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 /// Initializes the global tracing subscriber. Call once, before doing
-/// anything else. `RECORDAGENT_LOG=json` switches to structured JSON logs
+/// anything else. `RECUERDOS_AI_LOG=json` switches to structured JSON logs
 /// (for log aggregators); otherwise logs are human-readable. Standard
 /// `RUST_LOG`-style filters apply via the env-filter (default: `info`).
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("RECORDAGENT_LOG").as_deref() == Ok("json");
+    let json = std::env::var("RECUERDOS_AI_LOG").as_deref() == Ok("json");
 
     let registry = tracing_subscriber::registry().with(filter);
     if json {
@@ -105,7 +105,7 @@ async fn ping(Authenticated(context): Authenticated) -> Json<Value> {
 async fn version() -> Json<Value> {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "git_sha": env!("RECORDAGENT_GIT_SHA"),
+        "git_sha": env!("RECUERDOS_AI_GIT_SHA"),
     }))
 }
 

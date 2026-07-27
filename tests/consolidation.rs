@@ -42,10 +42,10 @@ impl Instance {
         }
 
         let app = TestApp::spawn_with(&[
-            ("RECORDAGENT_UNDERSTANDING__PROVIDER", "openai-compat"),
-            ("RECORDAGENT_UNDERSTANDING__MODEL", "mock"),
-            ("RECORDAGENT_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
-            ("RECORDAGENT_UNDERSTANDING__BASE_URL", &model.uri()),
+            ("RECUERDOS_AI_UNDERSTANDING__PROVIDER", "openai-compat"),
+            ("RECUERDOS_AI_UNDERSTANDING__MODEL", "mock"),
+            ("RECUERDOS_AI_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
+            ("RECUERDOS_AI_UNDERSTANDING__BASE_URL", &model.uri()),
             ("MOCK_MODEL_KEY", "not-a-real-key"),
         ])
         .await;
@@ -160,28 +160,28 @@ impl Instance {
     }
 }
 
-/// Runs `recordagent consolidate` against a spawned app's data dir.
+/// Runs `recuerdos-ai consolidate` against a spawned app's data dir.
 ///
 /// The nightly job has no HTTP surface — it is a timer and a CLI command
 /// — so this is the only way to drive it end to end. It runs as a
 /// separate process against the same SQLite file, which is exactly how an
 /// operator would run it.
 fn consolidate(instance: &Instance, model_url: &str, args: &[&str]) -> std::process::Output {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_recordagent"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
     command
         .arg("consolidate")
         .args(args)
-        .env("RECORDAGENT_STORAGE__PATH", instance.app.data_dir())
-        .env("RECORDAGENT_UNDERSTANDING__PROVIDER", "openai-compat")
-        .env("RECORDAGENT_UNDERSTANDING__MODEL", "mock")
-        .env("RECORDAGENT_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY")
-        .env("RECORDAGENT_UNDERSTANDING__BASE_URL", model_url)
+        .env("RECUERDOS_AI_STORAGE__PATH", instance.app.data_dir())
+        .env("RECUERDOS_AI_UNDERSTANDING__PROVIDER", "openai-compat")
+        .env("RECUERDOS_AI_UNDERSTANDING__MODEL", "mock")
+        .env("RECUERDOS_AI_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY")
+        .env("RECUERDOS_AI_UNDERSTANDING__BASE_URL", model_url)
         .env("MOCK_MODEL_KEY", "not-a-real-key")
-        .env_remove("RECORDAGENT_LOG");
+        .env_remove("RECUERDOS_AI_LOG");
 
     command
         .output()
-        .expect("failed to run recordagent consolidate")
+        .expect("failed to run recuerdos-ai consolidate")
 }
 
 #[tokio::test]
@@ -291,12 +291,12 @@ async fn without_a_provider_consolidation_still_expires_and_decays_but_never_mer
             .await;
     }
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_recordagent"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"))
         .arg("consolidate")
-        .env("RECORDAGENT_STORAGE__PATH", instance.app.data_dir())
-        .env_remove("RECORDAGENT_LOG")
+        .env("RECUERDOS_AI_STORAGE__PATH", instance.app.data_dir())
+        .env_remove("RECUERDOS_AI_LOG")
         .output()
-        .expect("failed to run recordagent consolidate");
+        .expect("failed to run recuerdos-ai consolidate");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

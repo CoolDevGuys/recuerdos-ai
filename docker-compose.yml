@@ -1,6 +1,6 @@
 services:
   dev:
-    container_name: recordagent
+    container_name: recuerdos-ai
     build:
       context: .
       dockerfile: docker/Dockerfile.dev
@@ -19,7 +19,7 @@ services:
     env_file:
       - .env
     environment:
-      RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
+      RECUERDOS_AI_LOG: ${RECUERDOS_AI_LOG:-info}
       # Container-wide so the daemon (`docker compose up dev`) and the CLI
       # (`docker compose run --rm dev ...`) — separate containers — share
       # one database on the `data` volume. Without it each container would
@@ -29,25 +29,25 @@ services:
       # Safe for tests: the integration suites set this variable
       # explicitly per spawned app, and the config unit tests run inside
       # figment's Jail, which sandboxes the environment.
-      RECORDAGENT_STORAGE__PATH: /data
+      RECUERDOS_AI_STORAGE__PATH: /data
       # A named volume, so the ~130 MB model is downloaded once and
       # shared by every dev container rather than landing in the
       # bind-mounted repo (fastembed's default is the working directory).
-      RECORDAGENT_EMBEDDINGS__CACHE_DIR: /models
+      RECUERDOS_AI_EMBEDDINGS__CACHE_DIR: /models
       # Same path the ignored real-model tests look for.
-      RECORDAGENT_MODEL_CACHE: /models
-    # RECORDAGENT_SERVER__HOST is scoped to this command (not a
+      RECUERDOS_AI_MODEL_CACHE: /models
+    # RECUERDOS_AI_SERVER__HOST is scoped to this command (not a
     # container-wide `environment:` entry) so it doesn't leak into
     # `docker compose run --rm dev cargo test`. Containers must listen on
     # all interfaces to be reachable through Docker's published port;
-    # recordagent.toml still defaults to 127.0.0.1 for bare-metal runs.
+    # recuerdos-ai.toml still defaults to 127.0.0.1 for bare-metal runs.
     #
-    # `--config recordagent.toml`: the repo is bind-mounted at /app (the
-    # working dir), so this reads the same ./recordagent.toml you edit on
+    # `--config recuerdos-ai.toml`: the repo is bind-mounted at /app (the
+    # working dir), so this reads the same ./recuerdos-ai.toml you edit on
     # the host. A missing file is not an error — you fall back to defaults
-    # + the RECORDAGENT_* env above. `make config` reads the same file, so
+    # + the RECUERDOS_AI_* env above. `make config` reads the same file, so
     # what it prints is what this daemon runs.
-    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve --config recordagent.toml'"]
+    command: ["sh", "-c", "RECUERDOS_AI_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve --config recuerdos-ai.toml'"]
 
   # The daemon the Python SDK's integration tests talk to. Runs the
   # release image — the same artifact users get — rather than a dev
@@ -63,8 +63,8 @@ services:
       dockerfile: docker/Dockerfile
     profiles: ["sdk"]
     environment:
-      RECORDAGENT_AUTH__MODE: none
-      RECORDAGENT_SERVER__HOST: 0.0.0.0
+      RECUERDOS_AI_AUTH__MODE: none
+      RECUERDOS_AI_SERVER__HOST: 0.0.0.0
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7070/healthz"]
       interval: 2s
@@ -83,10 +83,10 @@ services:
       - pip-cache:/root/.cache/pip
     working_dir: /app/sdk/python
     environment:
-      RECORDAGENT_TEST_URL: http://sdk-daemon:7070
+      RECUERDOS_AI_TEST_URL: http://sdk-daemon:7070
       # The examples default to localhost, which inside this container is
       # not where the daemon is.
-      RECORDAGENT_URL: http://sdk-daemon:7070
+      RECUERDOS_AI_URL: http://sdk-daemon:7070
     command: >
       sh -c "pip install -q -e '.[dev,langchain]' &&
              ruff format --check src tests examples &&

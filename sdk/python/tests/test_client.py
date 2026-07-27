@@ -15,13 +15,13 @@ from typing import Any
 import httpx
 import pytest
 
-from recordagent import (
+from recuerdos_ai import (
     AuthenticationError,
     Client,
     JobFailedError,
     NotFoundError,
     PermissionError_,
-    RecordAgentError,
+    RecuerdosError,
     ServerError,
     TimeoutError_,
     ValidationError,
@@ -83,7 +83,7 @@ def test_each_error_code_maps_to_its_own_exception(
         ra.get("some-id")
 
 
-def test_an_error_without_an_envelope_is_still_a_recordagent_error() -> None:
+def test_an_error_without_an_envelope_is_still_a_recuerdos_error() -> None:
     # A proxy returning an HTML 502 has no envelope. That has to surface
     # as a library error, not a KeyError from inside the SDK.
     def handler(request: httpx.Request) -> httpx.Response:
@@ -120,7 +120,7 @@ def test_an_unreachable_daemon_says_so_in_plain_words() -> None:
 
     ra = client_for(handler)
 
-    with pytest.raises(RecordAgentError) as caught:
+    with pytest.raises(RecuerdosError) as caught:
         ra.search("anything")
 
     assert "Is it running?" in str(caught.value)

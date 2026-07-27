@@ -1,15 +1,15 @@
-# RecordAgent configuration.
+# Recuerdos AI configuration.
 #
 # Every key below shows its built-in default. Copy this file to
-# `recordagent.toml` (or run `recordagent init`) and uncomment/change only
+# `recuerdos-ai.toml` (or run `recuerdos-ai init`) and uncomment/change only
 # what you need — anything you omit falls back to the default shown here.
-# Every key can also be set via an env var: RECORDAGENT_<SECTION>__<KEY>,
-# e.g. RECORDAGENT_SERVER__PORT=8080. Env vars win over this file.
+# Every key can also be set via an env var: RECUERDOS_AI_<SECTION>__<KEY>,
+# e.g. RECUERDOS_AI_SERVER__PORT=8080. Env vars win over this file.
 
 [server]
 host = "127.0.0.1"
 port = 7070
-# MCP transports. `stdio` is the `recordagent mcp` shim (a per-client
+# MCP transports. `stdio` is the `recuerdos-ai mcp` shim (a per-client
 # process). `http` mounts the streamable-HTTP MCP endpoint at `/mcp` on
 # this daemon, so a client can connect over HTTP with a bearer token and
 # no local binary — see docs/mcp.md. `stdio` here is informational; the
@@ -19,7 +19,7 @@ mcp = { stdio = true, http = true }
 [storage]
 # embedded | postgres | qdrant (postgres/qdrant land post-POC, Phase 3+ roadmap)
 backend = "embedded"
-path = "~/.recordagent/data"
+path = "~/.recuerdos-ai/data"
 
 [embeddings]
 # local | gemini | openai-compat | ollama.
@@ -44,7 +44,7 @@ provider = "local"
 # daemon refuses to open a store whose pinned model no longer matches.
 model = "bge-small-en-v1.5"
 # Where the local ONNX model files live. Ignored by the remote providers.
-cache_dir = "~/.recordagent/models"
+cache_dir = "~/.recuerdos-ai/models"
 # --- remote providers only (gemini, openai-compat, ollama) ---
 # Override the provider's address. Empty means its usual one. Set this
 # for an OpenAI-compatible gateway (OpenRouter, Together, a local vLLM,
@@ -124,7 +124,7 @@ extra_categories = []
 # and duplicates simply accumulate.
 enabled = true
 # hourly | daily | weekly. Measured from process start rather than being
-# a wall-clock time: RecordAgent runs on laptops, and a laptop is asleep
+# a wall-clock time: Recuerdos AI runs on laptops, and a laptop is asleep
 # at 3am. The first run is one interval after startup, so a daemon that
 # restarts often does not consolidate (and pay for it) every time.
 schedule = "daily"

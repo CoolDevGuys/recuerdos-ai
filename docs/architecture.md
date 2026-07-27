@@ -100,7 +100,7 @@ identity/
     sqlite_user_repository.rs      implements UserRepository
     sqlite_api_key_repository.rs   implements ApiKeyRepository
     argon2_api_key_hasher.rs       implements ApiKeyHasher
-    cli.rs                         `recordagent user` / `key` subcommands
+    cli.rs                         `recuerdos-ai user` / `key` subcommands
     http/authenticated.rs          Authenticated / ReadAccess / WriteAccess
 ```
 

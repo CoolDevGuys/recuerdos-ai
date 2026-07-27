@@ -5,11 +5,12 @@ One entry per phase, backfilled as phases land.
 
 ## v0.1.0 — Phase 6: SDK, docs & release
 
-The first release candidate. No new memory behaviour — this phase is
-about making everything from Phases 0–5 installable, documented, and
-usable from something other than curl.
+The first release candidate. Mostly about making everything from Phases
+0–5 installable, documented, and usable from something other than curl —
+plus the provider choice and operational features a self-hosted
+deployment needs.
 
-- **Python SDK** (`pip install recordagent`): a thin typed client over
+- **Python SDK** (`pip install recuerdos-ai`): a thin typed client over
   the REST API — one method per endpoint, pydantic models, and no
   caching or retry opinions of its own. The two things it does add are
   the two a raw `httpx` call makes awkward: errors keyed off the API's
@@ -31,6 +32,32 @@ usable from something other than curl.
 - **Apache-2.0**, and a recorded name-availability check.
 - **README** rewritten as a launch page.
 
+And the deployment-facing features that landed alongside the release work:
+
+- **External embedding providers.** Beyond the built-in local ONNX model,
+  embeddings can come from a **native Gemini client** (task-type-aware —
+  `RETRIEVAL_DOCUMENT` on store, `RETRIEVAL_QUERY` on search, for better
+  recall), any **OpenAI-compatible** endpoint, or **Ollama**. Chosen with
+  `[embeddings].provider`; the model's dimensionality is discovered by a
+  real request at startup, so there is no width to configure.
+- **`recuerdos-ai reindex`.** Change the embedding model or provider and
+  re-embed every memory in place — in one transaction — instead of
+  needing a fresh data directory. The store pins its model, and the daemon
+  now **refuses to start on a mismatch** with a message naming the fix,
+  rather than failing later on the first recall.
+- **Streamable-HTTP MCP transport** at `/mcp` (previously deferred, see
+  Phase 3). A client connects over HTTP with a bearer token — no local
+  binary, no `docker exec` shim — sharing the same four tools and the same
+  per-user auth as the stdio path. This is the natural way to reach a
+  daemon running on another host.
+- **Gemini as a reasoning provider** for `[understanding]` — a preset over
+  the OpenAI-compatible client, since Gemini's chat API needs no native
+  client the way its embeddings do.
+- **`recuerdos-ai config`** prints the effective, secret-free configuration
+  (which providers, models and transports are actually in force), and
+  `RECUERDOS_AI_CONFIG` points the whole CLI at one file without repeating
+  `--config`.
+
 ## v0.5.0-alpha — Phase 5: Consolidation
 
 Memory that stays clean over time. Until now the store only grew; this
@@ -43,7 +70,7 @@ phase is everything that makes it shrink again.
   causes survive and the task chatter does not. Most sessions distil to
   nothing, which is the correct answer.
 - **A nightly consolidation job**, also runnable as
-  `recordagent consolidate [--dry-run]`. Near-duplicates within a user's
+  `recuerdos-ai consolidate [--dry-run]`. Near-duplicates within a user's
   category are grouped by similarity, and the model writes the one memory
   that says what all of them said. Five phrasings of one preference
   become one active memory and five superseded ones, each with a `merge`
@@ -106,7 +133,7 @@ stops being a log.
   reconciled against what is already stored — and the tool says so
   honestly, including when nothing was stored because the store already
   knew it.
-- **`recordagent eval`** scores retrieval quality against a committed
+- **`recuerdos-ai eval`** scores retrieval quality against a committed
   baseline, and CI fails a PR that drops recall@5 by more than five
   points. Nothing else in the suite would notice a ranking regression.
   See [evaluation.md](evaluation.md).
@@ -122,7 +149,7 @@ Claude Code, opencode and any other MCP client can now read and write the
 same memory store.
 
 - **Three tools** — `memory_save`, `memory_recall`, `memory_forget` — and
-  the **`memory://profile` resource**, served by `recordagent mcp`.
+  the **`memory://profile` resource**, served by `recuerdos-ai mcp`.
 - **The stdio server is a shim**, forwarding to the daemon over the same
   authenticated REST API any client uses. Four editor windows would
   otherwise mean four resident embedding models and four writers on one
@@ -140,11 +167,12 @@ same memory store.
   (including SessionStart and PreCompact hooks) and
   [opencode](integrations/opencode.md).
 
-Deferred: the streamable-HTTP MCP transport. rmcp's session factory
-cannot see request headers, so per-user auth would need a per-call path
-that complicates keeping tool definitions identical across transports —
-and every target client speaks stdio. The `MemoryToolbox` trait keeps
-adding it to one new implementation.
+Deferred at the time: the streamable-HTTP MCP transport. rmcp's session
+factory cannot see request headers, so per-user auth would need a per-call
+path that complicates keeping tool definitions identical across transports
+— and every target client then spoke stdio. **Shipped later in v0.1.0**
+(see above): the HTTP handler forwards the request's bearer to the same
+per-user REST auth, so both transports share one set of tool definitions.
 
 308 tests.
 
@@ -159,7 +187,7 @@ strictly per user.
   is what answers a question sharing no words with the memory.
 - **Local embeddings**, in-process ONNX (bge-small-en-v1.5, 384d), baked
   into the Docker image so a container never downloads at runtime and an
-  air-gapped host works. `recordagent warm-models` pre-populates a cache.
+  air-gapped host works. `recuerdos-ai warm-models` pre-populates a cache.
 - **Taxonomy**: eight built-in categories, extensible via config. Unknown
   names are rejected rather than silently created.
 - **REST**: `POST /v1/memories:direct`, `POST /v1/memories/search`,
@@ -213,7 +241,7 @@ could not load.
 Multi-user authentication. Every `/v1` route now resolves to exactly one
 user, and the isolation guarantee is enforced by the type system.
 
-- **Users and API keys.** `recordagent user add|list`,
+- **Users and API keys.** `recuerdos-ai user add|list`,
   `key issue|list|revoke`. Keys are `ra_live_<prefix><secret>`; only an
   argon2id hash is stored, and the key is displayed once at issue time.
 - **Scopes**: `read`, `write`, `admin`. `write` does not imply `read`, so
@@ -253,8 +281,8 @@ user, and the isolation guarantee is enforced by the type system.
 - Docker-only dev flow: `Dockerfile.dev` (non-root, host-UID-matched),
   `docker-compose.yml`, and a multi-stage release `Dockerfile` (~112 MB,
   non-root, healthchecked).
-- `AppConfig`: TOML + `RECORDAGENT_*` env overrides via figment,
-  aggregated validation errors, `recordagent init`.
+- `AppConfig`: TOML + `RECUERDOS_AI_*` env overrides via figment,
+  aggregated validation errors, `recuerdos-ai init`.
 - axum HTTP skeleton: `/healthz`, `/version`, graceful shutdown on
-  SIGINT/SIGTERM, tracing (plain or JSON via `RECORDAGENT_LOG=json`).
+  SIGINT/SIGTERM, tracing (plain or JSON via `RECUERDOS_AI_LOG=json`).
 - GitHub Actions CI: check / test / docker-build-and-smoke-test.

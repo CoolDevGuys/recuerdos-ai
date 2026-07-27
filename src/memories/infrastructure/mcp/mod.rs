@@ -3,7 +3,7 @@
 //! See `memory_toolbox.rs` for why the tool definitions are written once
 //! against a trait and only execution differs.
 //!
-//! Two transports: **stdio** (`recordagent mcp`, a per-client shim) and
+//! Two transports: **stdio** (`recuerdos-ai mcp`, a per-client shim) and
 //! **streamable HTTP** (`/mcp` on the daemon, see `http_service.rs`).
 //! Both drive the same `MemoryMcpServer` over the `HttpMemoryToolbox`, so
 //! the tool definitions live once and only how a request is authenticated

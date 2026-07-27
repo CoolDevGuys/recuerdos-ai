@@ -1,25 +1,25 @@
 #!/bin/sh
-# RecordAgent installer.
+# Recuerdos AI installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/alexromer0/recordagent/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh | sh
 #
 # Downloads the release binary for this platform, verifies its checksum,
 # and puts it somewhere on PATH. Nothing else — no daemon started, no
-# config written, no service registered. `recordagent init` does that,
+# config written, no service registered. `recuerdos-ai init` does that,
 # and it should be a decision you make rather than one an installer makes
 # for you.
 #
 # Environment:
-#   RECORDAGENT_VERSION   tag to install (default: latest release)
-#   RECORDAGENT_BIN_DIR   where to put it (default: ~/.local/bin, or
+#   RECUERDOS_AI_VERSION   tag to install (default: latest release)
+#   RECUERDOS_AI_BIN_DIR   where to put it (default: ~/.local/bin, or
 #                         /usr/local/bin when running as root)
 #
 # POSIX sh, not bash: this is piped into whatever /bin/sh is on a machine
 # nobody has looked at yet.
 set -eu
 
-REPO="alexromer0/recordagent"
-VERSION="${RECORDAGENT_VERSION:-latest}"
+REPO="CoolDevGuys/recuerdos-ai"
+VERSION="${RECUERDOS_AI_VERSION:-latest}"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -69,7 +69,7 @@ if [ "$os" = "Darwin" ] && [ "$arch_target" = "x86_64" ]; then
 fi
 
 target="${arch_target}-${os_target}"
-asset="recordagent-${target}.tar.gz"
+asset="recuerdos-ai-${target}.tar.gz"
 
 # --- version ---------------------------------------------------------
 
@@ -82,15 +82,15 @@ if [ "$VERSION" = "latest" ]; then
         | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
         | head -1)
     [ -n "$VERSION" ] || die "could not determine the latest version.
-Set RECORDAGENT_VERSION=v0.1.0 to install a specific one."
+Set RECUERDOS_AI_VERSION=v0.1.0 to install a specific one."
 fi
 
 base="https://github.com/$REPO/releases/download/$VERSION"
 
 # --- destination -----------------------------------------------------
 
-if [ -n "${RECORDAGENT_BIN_DIR:-}" ]; then
-    bin_dir="$RECORDAGENT_BIN_DIR"
+if [ -n "${RECUERDOS_AI_BIN_DIR:-}" ]; then
+    bin_dir="$RECUERDOS_AI_BIN_DIR"
 elif [ "$(id -u)" = "0" ]; then
     bin_dir="/usr/local/bin"
 else
@@ -99,7 +99,7 @@ fi
 
 mkdir -p "$bin_dir" || die "cannot create $bin_dir"
 [ -w "$bin_dir" ] || die "$bin_dir is not writable.
-Set RECORDAGENT_BIN_DIR to somewhere you can write, or re-run with sudo."
+Set RECUERDOS_AI_BIN_DIR to somewhere you can write, or re-run with sudo."
 
 # --- download --------------------------------------------------------
 
@@ -108,7 +108,7 @@ tmp=$(mktemp -d)
 # is the kind of thing that makes the *next* run mysterious.
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-say "==> downloading recordagent $VERSION ($target)"
+say "==> downloading recuerdos-ai $VERSION ($target)"
 fetch "$base/$asset" "$tmp/$asset" \
     || die "could not download $base/$asset
 Check that $VERSION exists and publishes a $target build."
@@ -144,14 +144,14 @@ fi
 # --- install ---------------------------------------------------------
 
 tar -xzf "$tmp/$asset" -C "$tmp" || die "could not extract $asset"
-[ -f "$tmp/recordagent" ] || die "the archive did not contain a recordagent binary"
+[ -f "$tmp/recuerdos-ai" ] || die "the archive did not contain a recuerdos-ai binary"
 
-chmod +x "$tmp/recordagent"
+chmod +x "$tmp/recuerdos-ai"
 # `mv` then `chmod` rather than `install`, which busybox lacks.
-mv "$tmp/recordagent" "$bin_dir/recordagent" \
-    || die "could not write $bin_dir/recordagent"
+mv "$tmp/recuerdos-ai" "$bin_dir/recuerdos-ai" \
+    || die "could not write $bin_dir/recuerdos-ai"
 
-say "==> installed $bin_dir/recordagent"
+say "==> installed $bin_dir/recuerdos-ai"
 
 # --- next ------------------------------------------------------------
 
@@ -166,9 +166,9 @@ esac
 
 say ""
 say "Next:"
-say "    recordagent init                 # write a config and data dir"
-say "    recordagent serve &              # start the daemon"
-say "    recordagent user add \$USER"
-say "    recordagent key issue --user \$USER --scopes read,write"
+say "    recuerdos-ai init                 # write a config and data dir"
+say "    recuerdos-ai serve &              # start the daemon"
+say "    recuerdos-ai user add \$USER"
+say "    recuerdos-ai key issue --user \$USER --scopes read,write"
 say ""
 say "Docs: https://github.com/$REPO#readme"

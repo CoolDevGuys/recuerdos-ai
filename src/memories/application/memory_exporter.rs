@@ -43,7 +43,7 @@ impl MemoryExporter {
 }
 
 fn render_markdown(context: &UserContext, memories: &[Memory]) -> String {
-    let mut output = format!("# RecordAgent memories: {}\n\n", context.handle());
+    let mut output = format!("# Recuerdos AI memories: {}\n\n", context.handle());
     output.push_str(&format!("{} memories\n", memories.len()));
 
     // Grouped by category so the file reads like a profile rather than a

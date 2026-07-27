@@ -1,4 +1,4 @@
-# RecordAgent — Technical Implementation Plan
+# Recuerdos AI — Technical Implementation Plan
 
 **v0.1 · 2026-07-18 · companion to [project-plan.md](project-plan.md)**
 
@@ -126,14 +126,14 @@ trivially unit-testable.
 ## 3. Repository layout
 
 ```
-recordagent/
+recuerdos-ai/
 ├── Cargo.toml
 ├── justfile                    # dev commands (all run in Docker)
 ├── docker/
 │   ├── Dockerfile              # multi-stage release image (distroless-ish)
 │   └── Dockerfile.dev          # dev image: rust + cargo-watch + tooling
 ├── docker-compose.yml          # dev service + optional ollama profile
-├── recordagent.example.toml
+├── recuerdos-ai.example.toml
 ├── migrations/                 # sqlx/refinery SQL migrations, numbered
 ├── src/
 │   ├── main.rs                 # CLI entry: serve | init | user | key | export | mcp
@@ -181,7 +181,7 @@ README explains all of it. It's a real (if empty) service.
 - **Goal:** cargo project whose folder tree is the §3 layout, compiling with empty
   module stubs, so every later task has an unambiguous home.
 - **Steps:**
-  1. `cargo init --name recordagent`; set edition, `rust-version`, lints
+  1. `cargo init --name recuerdos-ai`; set edition, `rust-version`, lints
      (`[lints]` deny warnings-as-errors in CI profile).
   2. Create the context/layer folder tree with `mod.rs` stubs and one-line module
      docs stating each context's responsibility.
@@ -229,22 +229,22 @@ README explains all of it. It's a real (if empty) service.
 
 ### Task 0.3 — Config context: TOML + env overrides + validation (M)
 
-- **Goal:** typed `AppConfig` loaded from `recordagent.toml`, overridable via
-  `RECORDAGENT_*` env vars, with precise validation errors. (Lives in
+- **Goal:** typed `AppConfig` loaded from `recuerdos-ai.toml`, overridable via
+  `RECUERDOS_AI_*` env vars, with precise validation errors. (Lives in
   `bootstrap/config.rs` — it's composition-root concern, not a business context.)
 - **Steps:**
   1. Define config structs mirroring project-plan §10 (`[server]`, `[storage]`,
      `[embeddings]`, `[understanding]`, `[consolidation]`, `[retrieval]`, `[auth]`)
      with serde defaults for every field.
-  2. Load with `figment`: defaults → file → env (`RECORDAGENT_SERVER__PORT=8080`
+  2. Load with `figment`: defaults → file → env (`RECUERDOS_AI_SERVER__PORT=8080`
      style nesting).
   3. Post-parse validation pass returning **all** errors at once
      (`config error: [embeddings].model is empty; [server].port is 0`).
-  4. `recordagent init` CLI subcommand writes `recordagent.example.toml` and a
+  4. `recuerdos-ai init` CLI subcommand writes `recuerdos-ai.example.toml` and a
      default data dir.
-  5. Ship `recordagent.example.toml` fully commented.
+  5. Ship `recuerdos-ai.example.toml` fully commented.
 - **Example:**
-  - Input: `RECORDAGENT_SERVER__PORT=9999 recordagent serve --config recordagent.toml`
+  - Input: `RECUERDOS_AI_SERVER__PORT=9999 recuerdos-ai serve --config recuerdos-ai.toml`
   - Output: log line `listening on 127.0.0.1:9999 (port overridden by env)`.
 - **DoD:**
   - [ ] Unit tests: defaults-only load, file load, env override wins, invalid
@@ -259,7 +259,7 @@ README explains all of it. It's a real (if empty) service.
      (Docker-friendly), `tower` layers: request-id, trace, timeout.
   2. `GET /healthz` → `{"status":"ok"}`; `GET /version` → crate version + git sha
      (via `vergen`).
-  3. `tracing-subscriber` with env-filter; JSON logs when `RECORDAGENT_LOG=json`.
+  3. `tracing-subscriber` with env-filter; JSON logs when `RECUERDOS_AI_LOG=json`.
 - **DoD:**
   - [ ] Integration test (tests/common harness v0): spawn app on random port,
         assert both endpoints.
@@ -277,7 +277,7 @@ README explains all of it. It's a real (if empty) service.
 ### Task 0.6 — README v0 + docs skeleton (S)
 
 - **Goal:** the repo explains itself at Phase 0 scope.
-- **Steps:** README: what RecordAgent is (2 paragraphs from project-plan §1),
+- **Steps:** README: what Recuerdos AI is (2 paragraphs from project-plan §1),
   status table (phases + checkmarks), quickstart (Docker), config reference link,
   architecture diagram (project-plan §5), contribution basics. Create empty-but-
   titled `docs/` files from §3 so links never 404.
@@ -336,11 +336,11 @@ Usable as-is as an auth'd skeleton; the isolation test suite exists from day one
 - **Steps:**
   1. One doer per file in `identity/application/` (`user_creator.rs`, …), each
      exposing a single public `execute`.
-  2. CLI subcommands (clap): `recordagent user add --email …`,
-     `recordagent key issue --user … --scopes read,write`, `key revoke`, `key list`.
+  2. CLI subcommands (clap): `recuerdos-ai user add --email …`,
+     `recuerdos-ai key issue --user … --scopes read,write`, `key revoke`, `key list`.
      Secret printed **once** at issue time.
 - **Example:**
-  - Input: `recordagent key issue --user alex --scopes read,write`
+  - Input: `recuerdos-ai key issue --user alex --scopes read,write`
   - Output:
     ```
     API key created for alex (scopes: read, write)
@@ -435,7 +435,7 @@ Rust speed — before any LLM understanding.
   1. `providers/infrastructure/embeddings/fastembed_embedder.rs` using `fastembed-rs`
      (`bge-small-en-v1.5`, 384-dim); model files baked into the Docker image at
      build time (no first-run download inside containers) with a documented
-     fallback path for bare-metal (`~/.recordagent/models`, downloaded on first use).
+     fallback path for bare-metal (`~/.recuerdos-ai/models`, downloaded on first use).
   2. Batch API (`embed(texts: &[String])`), in-process LRU cache keyed by content
      hash for query embeddings.
   3. Collection metadata pins `embedding_model` + `dimensions`; startup check
@@ -456,7 +456,7 @@ Rust speed — before any LLM understanding.
 - **Goal:** BM25 leg of hybrid search.
 - **Steps:** `TextIndex` adapter: one tantivy index dir per user under the data
   dir; fields `content`, `tags`, `category`; commit batching (flush ≤ 500 ms);
-  delete-then-add on update; rebuild command (`recordagent reindex --text`).
+  delete-then-add on update; rebuild command (`recuerdos-ai reindex --text`).
 - **DoD:**
   - [ ] Exact-token retrieval test: memory containing `useQuery` found by BM25
         when vector search alone misses it (the motivating use case from
@@ -537,7 +537,7 @@ Rust speed — before any LLM understanding.
 ## Phase 3 — MCP server
 
 **Branch:** `phase/3-mcp` · **Size:** ~4–5 days
-**Shippable outcome:** Claude Code (and opencode) connect to RecordAgent over MCP
+**Shippable outcome:** Claude Code (and opencode) connect to Recuerdos AI over MCP
 (stdio and streamable HTTP), with `memory_save`, `memory_recall`, `memory_forget`
 tools and the `memory://profile` resource. The dogfooding threshold: you use it
 daily from here on.
@@ -549,8 +549,8 @@ daily from here on.
 - **Steps:**
   1. Add `rmcp`; `memories/infrastructure/mcp/` defines the tool handlers mapping
      to `DirectMemorySaver`, `MemoryRecaller`, `MemoryForgetter`.
-  2. Transports: (a) `recordagent mcp` subcommand → stdio (spawned per-client;
-     authenticates via `RECORDAGENT_API_KEY` env var, talking to the daemon over
+  2. Transports: (a) `recuerdos-ai mcp` subcommand → stdio (spawned per-client;
+     authenticates via `RECUERDOS_AI_API_KEY` env var, talking to the daemon over
      localhost HTTP — stdio process is a *client shim*, keeping one source of
      truth); (b) streamable HTTP mounted at `/mcp` on the main daemon, bearer-key
      authenticated, same middleware as REST.
@@ -724,7 +724,7 @@ degraded verbatim mode when no provider is configured.
   (`eval/cases.yaml`: needle-in-haystack, paraphrase, contradiction-current-fact,
   exact-token, category-filter cases) scored on recall@k, runnable offline with
   the fake embedder replaced by the real local model.
-- **Steps:** `recordagent eval` hidden subcommand → seeds a tmp instance, runs
+- **Steps:** `recuerdos-ai eval` hidden subcommand → seeds a tmp instance, runs
   cases, prints table; nightly CI job posts the score; PR job fails if recall@5
   drops > 5 points vs the committed baseline (`eval/baseline.json`).
 - **DoD:** [ ] Baseline committed; a deliberate scoring regression fails the job.
@@ -762,7 +762,7 @@ expiry, and the LLM-written `memory://profile` digest.
 - **Goal:** nightly (config `[consolidation]`) clustering of near-duplicates
   (pairwise similarity ≥ threshold within same user+category) → LLM merge →
   merged memory supersedes members; audit `MERGE` entries; dry-run mode.
-- **Steps:** scheduler (tokio interval + `recordagent consolidate --now [--dry-run]`
+- **Steps:** scheduler (tokio interval + `recuerdos-ai consolidate --now [--dry-run]`
   CLI); `ClusterBuilder` as a pure domain type (union-find over similarity
   pairs — heavily unit-tested); merge prompt; transactional apply via a
   `MemoryMerger` use case.
@@ -799,15 +799,15 @@ expiry, and the LLM-written `memory://profile` digest.
 docs, integration recipes for all four client types, load-test numbers, binaries +
 Docker image + install script.
 
-### Task 6.1 — Python SDK (`sdk/python/recordagent`) (M)
+### Task 6.1 — Python SDK (`sdk/python/recuerdos-ai`) (M)
 
 - **Goal:** thin typed client (httpx + pydantic): `save`, `save_direct`,
   `search`, `get/update/forget`, `distill_session`, `wait_for_job`; plus
-  `RecordAgentRetriever` (LangChain BaseRetriever) and a LangGraph memory
+  `Recuerdos AIRetriever` (LangChain BaseRetriever) and a LangGraph memory
   example.
 - **Example:**
   ```python
-  from recordagent import Client
+  from recuerdos-ai import Client
   ra = Client(base_url="http://localhost:7070", api_key="ra_live_…")
   ra.save("User is vegetarian now")                      # async understanding
   hits = ra.search("dietary restrictions", limit=3)
@@ -852,7 +852,7 @@ Docker image + install script.
   (multi-arch), `install.sh`, Apache-2.0 LICENSE, crate name / repo name / domain
   availability check executed (project-plan §16 name-check).
 - **DoD:** [ ] `curl -fsSL …/install.sh | sh` works on a clean Linux VM and mac;
-  `docker run ghcr.io/…/recordagent` serves; tag + GitHub release notes published.
+  `docker run ghcr.io/…/recuerdos-ai` serves; tag + GitHub release notes published.
 
 ---
 
@@ -866,7 +866,7 @@ Docker image + install script.
 | Cross-tenant suite | `tests/identity_isolation.rs` (+ proptest) | every check | no query path leaks rows across users — grows every phase |
 | Provider contract | wiremock-based, shared suite × 3 adapters | every check | identical behavior across Anthropic/OpenAI-compat/Ollama |
 | Real-model integration | `#[ignore]`-tagged | nightly CI | local ONNX embeddings, Ollama profile |
-| Retrieval eval | `recordagent eval` + baseline | nightly + PR gate | recall@k doesn't regress |
+| Retrieval eval | `recuerdos-ai eval` + baseline | nightly + PR gate | recall@k doesn't regress |
 | Load/soak | scripts + k6/oha | Phase 6 + pre-release | P95 targets, leak-free |
 
 Harness principles: every test gets an isolated tmp data dir; `FakeEmbedder`

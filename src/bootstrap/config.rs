@@ -1,6 +1,6 @@
-//! `AppConfig`: typed config loaded from `recordagent.toml`, overridable via
-//! `RECORDAGENT_*` env vars (nested keys via `__`, e.g.
-//! `RECORDAGENT_SERVER__PORT=8080`). Precedence: defaults → file → env.
+//! `AppConfig`: typed config loaded from `recuerdos-ai.toml`, overridable via
+//! `RECUERDOS_AI_*` env vars (nested keys via `__`, e.g.
+//! `RECUERDOS_AI_SERVER__PORT=8080`). Precedence: defaults → file → env.
 //!
 //! Lives in `bootstrap` (not a business context) because loading and
 //! validating config is a composition-root concern per
@@ -76,7 +76,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: "embedded".to_string(),
-            path: "~/.recordagent/data".to_string(),
+            path: "~/.recuerdos-ai/data".to_string(),
         }
     }
 }
@@ -113,7 +113,7 @@ impl Default for EmbeddingsConfig {
             // fully offline" claim is false.
             provider: "local".to_string(),
             model: "bge-small-en-v1.5".to_string(),
-            cache_dir: "~/.recordagent/models".to_string(),
+            cache_dir: "~/.recuerdos-ai/models".to_string(),
             api_key_env: String::new(),
             base_url: String::new(),
         }
@@ -224,30 +224,30 @@ impl Default for AuthConfig {
 
 impl AppConfig {
     /// Load config from (in ascending precedence) built-in defaults, an
-    /// optional TOML file, then `RECORDAGENT_*` env vars. Returns every
+    /// optional TOML file, then `RECUERDOS_AI_*` env vars. Returns every
     /// validation problem found, not just the first.
     pub fn load(config_path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut figment = Figment::from(Serialized::defaults(AppConfig::default()));
 
         // An explicit `--config` wins; otherwise fall back to the
-        // `RECORDAGENT_CONFIG` env var. That fallback is what lets one
+        // `RECUERDOS_AI_CONFIG` env var. That fallback is what lets one
         // setting point the *whole* CLI at a file — `serve`, `reindex`,
         // `consolidate`, `config` — without repeating `--config` on each
         // command (the Docker workflow sets it once for every invocation).
         // A missing file is not an error: `Toml::file` merges nothing and
         // you fall back to defaults + env, same as with no config at all.
         //
-        // `RECORDAGENT_CONFIG` is read here, not through the `Env` provider
+        // `RECUERDOS_AI_CONFIG` is read here, not through the `Env` provider
         // below, so it never looks like a config key — figment ignores it
-        // there just as it ignores any other unknown `RECORDAGENT_*` var.
-        let env_config = std::env::var("RECORDAGENT_CONFIG")
+        // there just as it ignores any other unknown `RECUERDOS_AI_*` var.
+        let env_config = std::env::var("RECUERDOS_AI_CONFIG")
             .ok()
             .filter(|value| !value.trim().is_empty());
         if let Some(path) = config_path.or(env_config.as_deref().map(Path::new)) {
             figment = figment.merge(Toml::file(path));
         }
 
-        figment = figment.merge(Env::prefixed("RECORDAGENT_").split("__"));
+        figment = figment.merge(Env::prefixed("RECUERDOS_AI_").split("__"));
 
         let config: AppConfig = figment
             .extract()
@@ -385,7 +385,7 @@ mod tests {
     // figment's own test harness, which sandboxes env var mutation and cwd
     // so parallel `cargo test` threads don't race each other. It restores
     // both on drop regardless of ambient ones set by whoever runs the
-    // suite (docker-compose deliberately keeps RECORDAGENT_* out of the
+    // suite (docker-compose deliberately keeps RECUERDOS_AI_* out of the
     // `dev` service's container-wide environment for this reason).
 
     #[test]
@@ -402,9 +402,9 @@ mod tests {
     #[test]
     fn file_overrides_defaults() {
         Jail::expect_with(|jail| {
-            jail.create_file("recordagent.toml", "[server]\nport = 9999\n")?;
+            jail.create_file("recuerdos-ai.toml", "[server]\nport = 9999\n")?;
 
-            let config = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap();
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
             assert_eq!(config.server.port, 9999);
             // Untouched fields keep their defaults.
             assert_eq!(config.server.host, "127.0.0.1");
@@ -413,11 +413,11 @@ mod tests {
     }
 
     #[test]
-    fn recordagent_config_env_names_the_file_when_no_flag_is_passed() {
+    fn recuerdos_ai_config_env_names_the_file_when_no_flag_is_passed() {
         Jail::expect_with(|jail| {
             jail.create_file("elsewhere.toml", "[server]\nport = 4242\n")?;
             // No `--config` argument; the env var alone points at the file.
-            jail.set_env("RECORDAGENT_CONFIG", "elsewhere.toml");
+            jail.set_env("RECUERDOS_AI_CONFIG", "elsewhere.toml");
 
             let config = AppConfig::load(None).unwrap();
             assert_eq!(config.server.port, 4242);
@@ -430,7 +430,7 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.create_file("flag.toml", "[server]\nport = 1111\n")?;
             jail.create_file("env.toml", "[server]\nport = 2222\n")?;
-            jail.set_env("RECORDAGENT_CONFIG", "env.toml");
+            jail.set_env("RECUERDOS_AI_CONFIG", "env.toml");
 
             let config = AppConfig::load(Some(Path::new("flag.toml"))).unwrap();
             assert_eq!(config.server.port, 1111, "the explicit flag must win");
@@ -441,10 +441,10 @@ mod tests {
     #[test]
     fn env_overrides_file() {
         Jail::expect_with(|jail| {
-            jail.create_file("recordagent.toml", "[server]\nport = 9999\n")?;
-            jail.set_env("RECORDAGENT_SERVER__PORT", "1234");
+            jail.create_file("recuerdos-ai.toml", "[server]\nport = 9999\n")?;
+            jail.set_env("RECUERDOS_AI_SERVER__PORT", "1234");
 
-            let config = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap();
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
             assert_eq!(config.server.port, 1234);
             Ok(())
         });
@@ -454,11 +454,11 @@ mod tests {
     fn invalid_values_are_all_reported_together() {
         Jail::expect_with(|jail| {
             jail.create_file(
-                "recordagent.toml",
+                "recuerdos-ai.toml",
                 "[server]\nport = 0\n[embeddings]\nmodel = \"\"\n",
             )?;
 
-            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             assert!(err.0.iter().any(|m| m.contains("[server].port is 0")));
             assert!(
                 err.0
@@ -480,17 +480,17 @@ mod tests {
         // cache_dir is a local-only concern; a remote provider leaving it
         // blank must not be a config error.
         Jail::expect_with(|jail| {
-            // The dev container exports RECORDAGENT_EMBEDDINGS__CACHE_DIR,
+            // The dev container exports RECUERDOS_AI_EMBEDDINGS__CACHE_DIR,
             // and env wins over the file — null it so the empty cache_dir
             // under test actually reaches validation.
-            jail.set_env("RECORDAGENT_EMBEDDINGS__CACHE_DIR", "");
+            jail.set_env("RECUERDOS_AI_EMBEDDINGS__CACHE_DIR", "");
             jail.create_file(
-                "recordagent.toml",
+                "recuerdos-ai.toml",
                 "[embeddings]\nprovider = \"openai-compat\"\n\
                  model = \"text-embedding-3-small\"\n",
             )?;
 
-            let config = AppConfig::load(Some(Path::new("recordagent.toml")))
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
                 .expect("a remote provider with no cache_dir should load");
             assert_eq!(config.embeddings.provider, "openai-compat");
             assert!(config.embeddings.cache_dir.is_empty());
@@ -501,10 +501,10 @@ mod tests {
     #[test]
     fn the_local_provider_still_requires_a_cache_dir() {
         Jail::expect_with(|jail| {
-            jail.set_env("RECORDAGENT_EMBEDDINGS__CACHE_DIR", "");
-            jail.create_file("recordagent.toml", "[embeddings]\nprovider = \"local\"\n")?;
+            jail.set_env("RECUERDOS_AI_EMBEDDINGS__CACHE_DIR", "");
+            jail.create_file("recuerdos-ai.toml", "[embeddings]\nprovider = \"local\"\n")?;
 
-            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             assert!(
                 err.0.iter().any(|m| m.contains("[embeddings].cache_dir")),
                 "{:?}",
@@ -517,9 +517,9 @@ mod tests {
     #[test]
     fn an_unknown_embeddings_provider_is_rejected() {
         Jail::expect_with(|jail| {
-            jail.create_file("recordagent.toml", "[embeddings]\nprovider = \"cohere\"\n")?;
+            jail.create_file("recuerdos-ai.toml", "[embeddings]\nprovider = \"cohere\"\n")?;
 
-            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             assert!(err.0.iter().any(|m| m.contains("[embeddings].provider")));
             Ok(())
         });
@@ -528,9 +528,9 @@ mod tests {
     #[test]
     fn unknown_storage_backend_is_rejected() {
         Jail::expect_with(|jail| {
-            jail.create_file("recordagent.toml", "[storage]\nbackend = \"dynamodb\"\n")?;
+            jail.create_file("recuerdos-ai.toml", "[storage]\nbackend = \"dynamodb\"\n")?;
 
-            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             assert!(err.0.iter().any(|m| m.contains("[storage].backend")));
             Ok(())
         });
@@ -542,14 +542,14 @@ mod tests {
             jail.set_env("HOME", "/home/tester");
             let config = AppConfig {
                 storage: StorageConfig {
-                    path: "~/.recordagent/data".to_string(),
+                    path: "~/.recuerdos-ai/data".to_string(),
                     ..StorageConfig::default()
                 },
                 ..AppConfig::default()
             };
             assert_eq!(
                 config.data_dir(),
-                PathBuf::from("/home/tester/.recordagent/data")
+                PathBuf::from("/home/tester/.recuerdos-ai/data")
             );
             Ok(())
         });

@@ -1,4 +1,4 @@
-"""The RecordAgent client.
+"""The Recuerdos AI client.
 
 Thin on purpose: one method per endpoint, typed models in and out, and no
 caching, batching or retry cleverness of its own. The service already
@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from .errors import JobFailedError, RecordAgentError, TimeoutError_, from_response
+from .errors import JobFailedError, RecuerdosError, TimeoutError_, from_response
 from .models import Distillation, Job, Memory, SearchHit
 
 __all__ = ["Client"]
@@ -41,10 +41,10 @@ _POLL_INTERVAL = 0.25
 
 
 class Client:
-    """A RecordAgent client, scoped to one API key.
+    """A Recuerdos AI client, scoped to one API key.
 
     ```python
-    from recordagent import Client
+    from recuerdos_ai import Client
 
     ra = Client(base_url="http://localhost:7070", api_key="ra_live_…")
     ra.save("We moved the backend to Hetzner; fly.io got too expensive")
@@ -67,7 +67,7 @@ class Client:
         """
         Args:
             base_url: Where the daemon is.
-            api_key: A key from ``recordagent key issue``. Optional only
+            api_key: A key from ``recuerdos-ai key issue``. Optional only
                 because a daemon running with ``[auth].mode = "none"``
                 accepts unauthenticated requests.
             timeout: Per-request timeout in seconds.
@@ -112,7 +112,7 @@ class Client:
     ) -> Job:
         """Submits raw content for understanding.
 
-        This is the endpoint that makes RecordAgent more than a store:
+        This is the endpoint that makes Recuerdos AI more than a store:
         the content is split into atomic memories, labelled, and checked
         against what is already known, so a contradiction supersedes what
         it replaces instead of piling up beside it.
@@ -467,8 +467,8 @@ class Client:
         except httpx.HTTPError as error:
             # The overwhelmingly likely cause, so say it rather than
             # making someone decode a connection error.
-            raise RecordAgentError(
-                f"could not reach the RecordAgent daemon at {self.base_url}: {error}. "
+            raise RecuerdosError(
+                f"could not reach the Recuerdos AI daemon at {self.base_url}: {error}. "
                 "Is it running?"
             ) from error
 

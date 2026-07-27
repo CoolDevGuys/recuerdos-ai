@@ -1,4 +1,4 @@
-//! `recordagent mcp` — the stdio transport.
+//! `recuerdos-ai mcp` — the stdio transport.
 //!
 //! MCP clients spawn a server process per session and talk to it over
 //! stdin/stdout. That process is a *shim*: it forwards to the daemon over
@@ -25,15 +25,15 @@ use crate::shared::error::{RaError, Result};
 use rmcp::ServiceExt;
 use std::sync::Arc;
 
-pub const API_KEY_ENV: &str = "RECORDAGENT_API_KEY";
-pub const BASE_URL_ENV: &str = "RECORDAGENT_URL";
+pub const API_KEY_ENV: &str = "RECUERDOS_AI_API_KEY";
+pub const BASE_URL_ENV: &str = "RECUERDOS_AI_URL";
 pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:7070";
 
 /// Serves MCP over stdio until the client disconnects.
 pub async fn serve_stdio(client_name: &str) -> Result<()> {
     let api_key = std::env::var(API_KEY_ENV).map_err(|_| {
         RaError::Validation(format!(
-            "{API_KEY_ENV} is not set. Issue a key with `recordagent key issue \
+            "{API_KEY_ENV} is not set. Issue a key with `recuerdos-ai key issue \
              --user <handle>` and put it in your MCP client's config for this server."
         ))
     })?;
@@ -46,11 +46,11 @@ pub async fn serve_stdio(client_name: &str) -> Result<()> {
     // one that starts and then errors on every request.
     toolbox.profile().await.map_err(|error| {
         RaError::Validation(format!(
-            "could not reach the RecordAgent daemon at {base_url}: {error}"
+            "could not reach the Recuerdos AI daemon at {base_url}: {error}"
         ))
     })?;
 
-    eprintln!("recordagent mcp: connected to {base_url}");
+    eprintln!("recuerdos-ai mcp: connected to {base_url}");
 
     let server = MemoryMcpServer::new(toolbox, client_name);
     let running = server

@@ -4,11 +4,11 @@ A thin typed client over the [REST API](api.md). Source lives in
 [`sdk/python`](../sdk/python).
 
 ```bash
-pip install recordagent
+pip install recuerdos-ai
 ```
 
 ```python
-from recordagent import Client
+from recuerdos-ai import Client
 
 ra = Client(base_url="http://localhost:7070", api_key="ra_live_…")
 ra.save("We moved the backend to Hetzner; fly.io got too expensive")
@@ -39,7 +39,7 @@ Client(base_url="http://127.0.0.1:7070", api_key=None, *, timeout=30.0, client=N
 | | |
 |---|---|
 | `base_url` | Where the daemon is. |
-| `api_key` | From `recordagent key issue`. Optional only because `[auth].mode = "none"` accepts unauthenticated requests. |
+| `api_key` | From `recuerdos-ai key issue`. Optional only because `[auth].mode = "none"` accepts unauthenticated requests. |
 | `timeout` | Per-request, in seconds. |
 | `client` | Bring your own `httpx.Client` — for a proxy, custom transport or shared pool. Its lifetime stays yours; the SDK will not close it. |
 
@@ -195,7 +195,7 @@ yourself.
 
 ## Errors
 
-Every failure is a `RecordAgentError` subclass, mapped from the API's
+Every failure is a `Recuerdos AIError` subclass, mapped from the API's
 error `code` rather than its message:
 
 | Exception | `code` | HTTP |
@@ -223,21 +223,21 @@ try:
     ra.get(memory_id)
 except NotFoundError:
     ...
-except RecordAgentError as error:
+except Recuerdos AIError as error:
     print(error.code, error.status, error.request_id)
 ```
 
 ## LangChain
 
 ```bash
-pip install "recordagent[langchain]"
+pip install "recuerdos-ai[langchain]"
 ```
 
 ```python
-from recordagent import Client
-from recordagent.langchain import RecordAgentRetriever
+from recuerdos-ai import Client
+from recuerdos-ai.langchain import Recuerdos AIRetriever
 
-retriever = RecordAgentRetriever(
+retriever = Recuerdos AIRetriever(
     client=Client(api_key="ra_live_…"),
     limit=5,
     categories=["preference.coding", "decision"],
@@ -253,7 +253,7 @@ chain to cite a memory or explain a retrieval.
 when the memories are context the model should always have. A tool lets
 the model decide when to look, which is right when memory is one source
 among several. For the latter, wrap `client.search` in your framework's
-tool decorator — there is nothing RecordAgent-specific about it, so the
+tool decorator — there is nothing Recuerdos AI-specific about it, so the
 SDK does not ship a second wrapper to learn.
 
 See [`sdk/python/examples/langgraph_memory.py`](../sdk/python/examples/langgraph_memory.py)
@@ -294,5 +294,5 @@ unit suite against a mock transport, then runs the integration suite
 against a daemon built from `docker/Dockerfile` — the same image users
 get, so the tests also prove that image serves.
 
-Integration tests skip without `RECORDAGENT_TEST_URL`, so a bare
+Integration tests skip without `RECUERDOS_AI_TEST_URL`, so a bare
 `pytest` still passes on a machine with no Docker.

@@ -11,8 +11,8 @@
 # needs any particular syntax.
 #
 # Run it with:
-#     recordagent eval
-#     recordagent eval --baseline eval/baseline.json --max-drop 5
+#     recuerdos-ai eval
+#     recuerdos-ai eval --baseline eval/baseline.json --max-drop 5
 #
 # Adding a case is the point. When a recall goes wrong in real use, the
 # fix starts here: write the case, watch it fail, then change the ranker.

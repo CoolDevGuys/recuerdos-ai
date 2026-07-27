@@ -13,7 +13,7 @@ green. That already happened once: in Phase 2 a recency floor of `0.5`
 quietly made freshness outrank relevance, and the only reason it was
 caught was a test written specifically to assert the intent.
 
-`recordagent eval` is the generalisation of that test.
+`recuerdos-ai eval` is the generalisation of that test.
 
 ## Running it
 

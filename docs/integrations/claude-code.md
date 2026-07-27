@@ -8,24 +8,24 @@ projects.
 A running daemon and an API key ([docs/mcp.md](../mcp.md#setup)):
 
 ```bash
-recordagent serve &                      # leave running
-recordagent user add alex
-recordagent key issue --user alex --scopes read,write
+recuerdos-ai serve &                      # leave running
+recuerdos-ai user add alex
+recuerdos-ai key issue --user alex --scopes read,write
 ```
 
 ## Configure the MCP server
 
-Add RecordAgent to `~/.claude.json` (all projects) or a project's
+Add Recuerdos AI to `~/.claude.json` (all projects) or a project's
 `.mcp.json` (that project, shareable with your team):
 
 ```json
 {
   "mcpServers": {
-    "recordagent": {
-      "command": "recordagent",
+    "recuerdos-ai": {
+      "command": "recuerdos-ai",
       "args": ["mcp", "--client", "claude-code"],
       "env": {
-        "RECORDAGENT_API_KEY": "ra_live_…"
+        "RECUERDOS_AI_API_KEY": "ra_live_…"
       }
     }
   }
@@ -37,7 +37,31 @@ client saves, so `GET /v1/audit` can tell an editor's writes from a
 script's.
 
 If you run the daemon somewhere other than `localhost:7070`, add
-`"RECORDAGENT_URL": "http://…"` to `env`.
+`"RECUERDOS_AI_URL": "http://…"` to `env`.
+
+### If the daemon runs on another host (HTTP)
+
+The block above spawns a local `recuerdos-ai` process, so it needs the
+binary on the same machine as Claude Code. If your daemon lives on a
+server, connect straight to its `/mcp` endpoint instead — no local binary,
+no shim:
+
+```json
+{
+  "mcpServers": {
+    "recuerdos-ai": {
+      "type": "http",
+      "url": "https://memory.example.com/mcp",
+      "headers": { "Authorization": "Bearer ra_live_…" }
+    }
+  }
+}
+```
+
+The daemon must have the HTTP transport enabled (it is on by default;
+`[server].mcp.http`) and be reachable at that URL. Put it behind TLS if it
+leaves your machine — the bearer token is the only thing guarding it. See
+[mcp.md](../mcp.md#setup) for the transport details.
 
 Restart Claude Code, then check it connected:
 
@@ -45,7 +69,8 @@ Restart Claude Code, then check it connected:
 /mcp
 ```
 
-You should see `recordagent` with three tools. If not, see
+You should see `recuerdos-ai` with four tools (`memory_save`,
+`memory_recall`, `memory_forget`, `session_distill`). If not, see
 [troubleshooting](../mcp.md#troubleshooting).
 
 ## Verify it works
@@ -77,7 +102,7 @@ In `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "curl -sf -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" http://127.0.0.1:7070/v1/profile || true"
+            "command": "curl -sf -H \"Authorization: Bearer $RECUERDOS_AI_API_KEY\" http://127.0.0.1:7070/v1/profile || true"
           }
         ]
       }
@@ -96,7 +121,7 @@ because a hook is a shell command rather than an MCP client.
 
 Compaction is the moment a session's detail is about to be lost, which
 makes it the natural moment to keep the durable part. A `PreCompact` hook
-posts the summary to RecordAgent:
+posts the summary to Recuerdos AI:
 
 ```json
 {
@@ -106,7 +131,7 @@ posts the summary to RecordAgent:
         "hooks": [
           {
             "type": "command",
-            "command": "jq -Rs '{content: ., client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECORDAGENT_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/sessions/distill >/dev/null || true"
+            "command": "jq -Rs '{content: ., client: \"claude-code\"}' | curl -sf -X POST -H \"Authorization: Bearer $RECUERDOS_AI_API_KEY\" -H 'Content-Type: application/json' -d @- http://127.0.0.1:7070/v1/sessions/distill >/dev/null || true"
           }
         ]
       }
@@ -153,6 +178,6 @@ and are meant to be tuned.
 
 ## Removing it
 
-Delete the `recordagent` entry from your MCP config. Your memories stay
+Delete the `recuerdos-ai` entry from your MCP config. Your memories stay
 in the daemon's database; export them first with
 `curl .../v1/memories/export` if you want them elsewhere.

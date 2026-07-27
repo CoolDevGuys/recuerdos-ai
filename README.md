@@ -1,6 +1,6 @@
-# RecordAgent
+# Recuerdos AI
 
-[![CI](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml/badge.svg)](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml)
+[![CI](https://github.com/CoolDevGuys/recuerdos-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/CoolDevGuys/recuerdos-ai/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Long-term memory for your AI agents — one service, all of them, on your
@@ -12,7 +12,7 @@ you went vegetarian. And memory saved by one tool is invisible to the
 others: your coding assistant learning you prefer `pnpm` does nothing for
 anything else you run.
 
-RecordAgent is one daemon that any agent reads from and writes to, over
+Recuerdos AI is one daemon that any agent reads from and writes to, over
 REST or MCP. It doesn't just store what you tell it — it works out what is
 worth keeping, labels it, and when you contradict yourself it *replaces*
 the old answer instead of returning both.
@@ -20,7 +20,7 @@ the old answer instead of returning both.
 ```
                     ┌──────────────┐
 Claude Code ─MCP──▶ │              │  extract → reconcile → store
-opencode ────MCP──▶ │  RecordAgent │  recall: vector + BM25, fused
+opencode ────MCP──▶ │  Recuerdos AI │  recall: vector + BM25, fused
 Hermes ─────REST──▶ │    daemon    │  nightly: merge, decay, expire
 LangChain ──SDK───▶ │              │
                     └──────────────┘
@@ -31,15 +31,20 @@ LangChain ──SDK───▶ │              │
 ## 90-second quickstart
 
 ```bash
-docker run -d --name recordagent -p 7070:7070 \
-  -v recordagent-data:/data \
-  -e RECORDAGENT_AUTH__MODE=none \
-  ghcr.io/alexromer0/recordagent
+docker run -d --name recuerdos-ai -p 7070:7070 \
+  -v recuerdos-ai-data:/data \
+  -e RECUERDOS_AI_AUTH__MODE=none \
+  ghcr.io/CoolDevGuys/recuerdos-ai
 ```
 
 `AUTH__MODE=none` makes every request the built-in `default` user — fine
 on a laptop, and one less step for a first look. [Turn it on](docs/configuration.md#authentication)
 before anything else can reach the port.
+
+> **Deploying on a real server?** Don't use `AUTH__MODE=none` there.
+> [docs/deployment.md](docs/deployment.md) is a four-step guide — run it,
+> put HTTPS in front, issue a key, connect your tools — written for a
+> personal memory server on a VPS.
 
 Store something:
 
@@ -75,10 +80,10 @@ ONNX model baked into the image.
 // .mcp.json
 {
   "mcpServers": {
-    "recordagent": {
-      "command": "recordagent",
+    "recuerdos-ai": {
+      "command": "recuerdos-ai",
       "args": ["mcp", "--client", "claude-code"],
-      "env": { "RECORDAGENT_API_KEY": "ra_live_…" }
+      "env": { "RECUERDOS_AI_API_KEY": "ra_live_…" }
     }
   }
 }
@@ -103,18 +108,18 @@ Recipes: [Claude Code](docs/integrations/claude-code.md) ·
 ### Or install the binary
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alexromer0/recordagent/main/install.sh | sh
-recordagent init && recordagent serve
+curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh | sh
+recuerdos-ai init && recuerdos-ai serve
 ```
 
 ### Or from Python
 
 ```bash
-pip install recordagent
+pip install recuerdos-ai
 ```
 
 ```python
-from recordagent import Client
+from recuerdos-ai import Client
 
 ra = Client(api_key="ra_live_…")
 ra.save("We moved the backend to Hetzner; fly.io got too expensive")
@@ -188,30 +193,30 @@ Details, plus the threat model: [docs/security.md](docs/security.md).
 
 Settings come from three layers, each overriding the one before:
 
-**defaults → `recordagent.toml` → `RECORDAGENT_*` environment variables**
+**defaults → `recuerdos-ai.toml` → `RECUERDOS_AI_*` environment variables**
 
 So an env var always wins over the file, and the file always wins over the
-built-in defaults. [`recordagent.example.toml`](recordagent.example.toml)
+built-in defaults. [`recuerdos-ai.example.toml`](recuerdos-ai.example.toml)
 lists every key with its default and a comment; copy it (or run
-`recordagent init`) and change only what you need.
+`recuerdos-ai init`) and change only what you need.
 
 **The file is read only when you point at it** — with `--config PATH`, or
-by setting `RECORDAGENT_CONFIG=PATH`. There is no automatic discovery:
-`recordagent serve` on its own uses defaults + env and *ignores* a
-`recordagent.toml` sitting next to it. This trips people up, so it is
+by setting `RECUERDOS_AI_CONFIG=PATH`. There is no automatic discovery:
+`recuerdos-ai serve` on its own uses defaults + env and *ignores* a
+`recuerdos-ai.toml` sitting next to it. This trips people up, so it is
 worth saying plainly:
 
 ```bash
-recordagent serve  --config recordagent.toml     # bare metal
-recordagent config --config recordagent.toml     # print what that resolves to
+recuerdos-ai serve  --config recuerdos-ai.toml     # bare metal
+recuerdos-ai config --config recuerdos-ai.toml     # print what that resolves to
 
 # …or point the whole CLI at one file, no --config to repeat:
-export RECORDAGENT_CONFIG=recordagent.toml
-recordagent serve
-recordagent reindex
+export RECUERDOS_AI_CONFIG=recuerdos-ai.toml
+recuerdos-ai serve
+recuerdos-ai reindex
 ```
 
-`recordagent config` (or `make config`) prints the **effective**
+`recuerdos-ai config` (or `make config`) prints the **effective**
 configuration — which embeddings and understanding provider is selected,
 the models, endpoints, MCP transports and storage path — after all three
 layers are merged. It is the fastest way to confirm your file is actually
@@ -219,7 +224,7 @@ being used. It prints no secrets.
 
 ### With Docker / the Makefile
 
-The dev daemon (`make up`) and `make config` both read `./recordagent.toml`
+The dev daemon (`make up`) and `make config` both read `./recuerdos-ai.toml`
 from the repo (it is bind-mounted into the container), so what `make
 config` prints is what the running daemon uses. Edit the file, then:
 
@@ -228,7 +233,7 @@ make config      # confirm the providers you set are the ones in effect
 make restart     # apply them to the running daemon
 ```
 
-The container also sets a few `RECORDAGENT_*` env vars of its own
+The container also sets a few `RECUERDOS_AI_*` env vars of its own
 (`STORAGE__PATH=/data`, `EMBEDDINGS__CACHE_DIR=/models`). Because env wins,
 those paths override whatever the file says — which is intended, so data
 lands on the Docker volume regardless of the file.
@@ -260,7 +265,7 @@ GEMINI_API_KEY=AIza…
 
 Pasting the key straight into `api_key_env` does **not** work — the daemon
 reads it as the name of a variable to look up, finds nothing, and behaves
-as if no key were set. `recordagent config` shows `GEMINI_API_KEY (NOT SET)`
+as if no key were set. `recuerdos-ai config` shows `GEMINI_API_KEY (NOT SET)`
 when the named variable is missing, which is the quickest way to catch this.
 
 Full reference: [docs/configuration.md](docs/configuration.md).
@@ -269,6 +274,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 | | |
 |---|---|
+| [deployment.md](docs/deployment.md) | Run it on a server, with HTTPS and auth |
 | [api.md](docs/api.md) | Every REST endpoint and field |
 | [mcp.md](docs/mcp.md) | MCP tools and the `memory://profile` resource |
 | [configuration.md](docs/configuration.md) | Every config key |
@@ -307,7 +313,7 @@ See [project-plan.md](project-plan.md) for where it is going.
 **Docker is the only prerequisite.** No local Rust toolchain needed.
 
 ```bash
-git clone <repo-url> recordagent && cd recordagent
+git clone <repo-url> recuerdos-ai && cd recuerdos-ai
 just dev          # daemon with auto-rebuild on localhost:7070
 just check        # fmt + clippy -D warnings + boundary script + tests
 just sdk-test     # the Python SDK against a real daemon

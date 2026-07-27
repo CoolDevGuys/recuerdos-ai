@@ -1,6 +1,6 @@
 //! `MemoryToolbox` that forwards to a running daemon over HTTP.
 //!
-//! This is what makes `recordagent mcp` a shim rather than a second copy
+//! This is what makes `recuerdos-ai mcp` a shim rather than a second copy
 //! of the service. See `memory_toolbox.rs` for why that matters: an
 //! in-process engine per editor session would load its own 130 MB model
 //! and contend for the same SQLite file.
@@ -49,7 +49,7 @@ impl HttpMemoryToolbox {
             // The overwhelmingly likely cause, so say it rather than
             // making someone decode a connection error.
             RaError::Internal(format!(
-                "could not reach the RecordAgent daemon at {}: {e}. Is it running?",
+                "could not reach the Recuerdos AI daemon at {}: {e}. Is it running?",
                 self.base_url
             ))
         })?;
@@ -214,7 +214,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
             .await
             .map_err(|e| {
                 RaError::Internal(format!(
-                    "could not reach the RecordAgent daemon at {}: {e}. Is it running?",
+                    "could not reach the Recuerdos AI daemon at {}: {e}. Is it running?",
                     self.base_url
                 ))
             })?;

@@ -4,7 +4,7 @@
 //!
 //! - **Streamable HTTP** (`/mcp` on the daemon) calls the use cases
 //!   in-process.
-//! - **stdio** (`recordagent mcp`) is a shim: a per-client process that
+//! - **stdio** (`recuerdos-ai mcp`) is a shim: a per-client process that
 //!   forwards to the daemon over localhost HTTP.
 //!
 //! The tool *definitions* — names, descriptions, argument schemas, output

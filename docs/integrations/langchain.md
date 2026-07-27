@@ -3,7 +3,7 @@
 Via the [Python SDK](../sdk-python.md).
 
 ```bash
-pip install "recordagent[langchain]"
+pip install "recuerdos-ai[langchain]"
 ```
 
 ## The distinction that matters
@@ -13,10 +13,10 @@ conversation. It deliberately does not remember across threads, because a
 checkpoint is a transcript, and replaying every past transcript into a new
 conversation is neither affordable nor useful.
 
-RecordAgent is the other half: what should survive once the thread is
+Recuerdos AI is the other half: what should survive once the thread is
 gone. The two compose; neither replaces the other.
 
-| | Checkpointer | RecordAgent |
+| | Checkpointer | Recuerdos AI |
 |---|---|---|
 | Scope | one thread | the user, indefinitely |
 | Holds | every message | durable facts, preferences, decisions |
@@ -34,7 +34,7 @@ and the user's conventions.
 A **tool** lets the model decide when to look. Right when memory is one
 source among several and most turns do not need it.
 
-There is no RecordAgent-specific tool wrapper, deliberately: wrapping
+There is no Recuerdos AI-specific tool wrapper, deliberately: wrapping
 `client.search` in `@tool` is three lines, and you should own the
 description — it is what decides whether the model calls it at the right
 moment. See [custom-agents.md](custom-agents.md) for wording worth
@@ -43,10 +43,10 @@ copying.
 ## Retriever
 
 ```python
-from recordagent import Client
-from recordagent.langchain import RecordAgentRetriever
+from recuerdos-ai import Client
+from recuerdos-ai.langchain import Recuerdos AIRetriever
 
-retriever = RecordAgentRetriever(
+retriever = Recuerdos AIRetriever(
     client=Client(base_url="http://localhost:7070", api_key="ra_live_…"),
     limit=5,
     categories=["preference.coding", "decision"],
@@ -63,7 +63,7 @@ Each `Document` carries the memory as `page_content`, plus metadata:
 | `category`, `tags`, `confidence` | For filtering downstream |
 | `score` | Fused rank score |
 | `vector_rank`, `bm25_rank` | Which leg matched; `None` means that leg did not return it |
-| `source` | Always `"recordagent"`, for mixed-retriever chains |
+| `source` | Always `"recuerdos-ai"`, for mixed-retriever chains |
 
 `limit` defaults to 5 and should stay small. These go into every prompt,
 and ten mediocre memories crowd out three good ones.
@@ -156,7 +156,7 @@ rather than storing the transcript whole.
 def recall(state: State) -> dict:
     try:
         return {"memory_context": ra.profile()}
-    except RecordAgentError as error:
+    except Recuerdos AIError as error:
         logger.warning("memory unavailable: %s", error)
         return {"memory_context": ""}
 ```

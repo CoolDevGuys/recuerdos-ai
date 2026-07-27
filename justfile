@@ -29,7 +29,7 @@ eval:
 
 # Re-record the baseline after a deliberate retrieval change.
 eval-record:
-    docker compose run --rm dev cargo run -q --bin recordagent -- \
+    docker compose run --rm dev cargo run -q --bin recuerdos-ai -- \
         eval --write-baseline eval/baseline.json
 
 # Lint, type-check and test the Python SDK, including its integration
@@ -40,10 +40,10 @@ sdk-test:
 
 # Build the release image.
 docker-build:
-    docker build -f docker/Dockerfile -t recordagent:local .
+    docker build -f docker/Dockerfile -t recuerdos-ai:local .
 
 eval-native:
-    cargo run -q --bin recordagent -- \
+    cargo run -q --bin recuerdos-ai -- \
         eval --baseline eval/baseline.json --max-drop 5
 
 check-native:
@@ -61,4 +61,4 @@ fmt-native:
 # Download the embedding model into the shared volume. The test suites
 # need it; the dev image does not bake it in (the release image does).
 warm:
-    docker compose run --rm dev cargo run -q --bin recordagent -- warm-models
+    docker compose run --rm dev cargo run -q --bin recuerdos-ai -- warm-models

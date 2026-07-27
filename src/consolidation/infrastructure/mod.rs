@@ -1,4 +1,4 @@
-//! Adapters: the nightly scheduler, `recordagent consolidate` CLI command.
+//! Adapters: the nightly scheduler, `recuerdos-ai consolidate` CLI command.
 
 pub mod cli;
 pub mod consolidation_scheduler;

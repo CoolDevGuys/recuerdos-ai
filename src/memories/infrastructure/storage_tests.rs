@@ -453,7 +453,7 @@ fn a_changed_embedding_model_is_refused_rather_than_silently_mixed() {
         "{message}"
     );
     assert!(
-        message.contains("recordagent reindex"),
+        message.contains("recuerdos-ai reindex"),
         "should name the command that fixes it: {message}"
     );
 }
@@ -487,7 +487,7 @@ fn verify_pin_catches_a_dimension_change_at_startup_not_on_the_first_recall() {
         "{message}"
     );
     assert!(
-        message.contains("recordagent reindex"),
+        message.contains("recuerdos-ai reindex"),
         "should name the fix: {message}"
     );
 }

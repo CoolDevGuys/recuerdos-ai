@@ -9,7 +9,7 @@ useless.
 
 Two ways to connect, and MCP is the better one.
 
-> **Note on this page.** RecordAgent's side of both routes is verified —
+> **Note on this page.** Recuerdos AI's side of both routes is verified —
 > the MCP server, the endpoints and the payloads below are exercised by
 > the test suite. The Hermes-side configuration syntax is not: check it
 > against [their docs](https://hermes-agent.nousresearch.com/docs/), which
@@ -17,18 +17,18 @@ Two ways to connect, and MCP is the better one.
 
 ## Option 1 — MCP (recommended)
 
-RecordAgent is a standard stdio MCP server. If Hermes can spawn one, this
+Recuerdos AI is a standard stdio MCP server. If Hermes can spawn one, this
 is the whole integration:
 
 ```json
 {
   "mcpServers": {
-    "recordagent": {
-      "command": "recordagent",
+    "recuerdos-ai": {
+      "command": "recuerdos-ai",
       "args": ["mcp", "--client", "hermes"],
       "env": {
-        "RECORDAGENT_API_KEY": "ra_live_…",
-        "RECORDAGENT_URL": "http://127.0.0.1:7070"
+        "RECUERDOS_AI_API_KEY": "ra_live_…",
+        "RECUERDOS_AI_URL": "http://127.0.0.1:7070"
       }
     }
   }
@@ -44,9 +44,16 @@ it, and those descriptions are the thing that decides whether the model
 calls the tool at the right moment. They took real tuning — see
 [mcp.md](../mcp.md).
 
-The daemon must already be running (`recordagent serve`); the stdio
+The daemon must already be running (`recuerdos-ai serve`); the stdio
 process is a thin shim that forwards to it. One daemon, many agents, is
 the shape that makes cross-tool memory work at all.
+
+If Hermes runs on a different machine from the daemon — likely, if the
+daemon is on a server and Hermes is on your phone — the stdio shim does
+not fit (it needs the binary locally). Point Hermes at the daemon's HTTP
+MCP endpoint instead, if it supports remote MCP servers: `https://<your
+daemon>/mcp` with an `Authorization: Bearer ra_live_…` header. Behind TLS,
+the bearer token is what guards it. See [mcp.md](../mcp.md#setup).
 
 ## Option 2 — REST tools
 
@@ -79,7 +86,7 @@ Backed by:
 
 ```bash
 curl -sS -X POST "$RA/v1/memories/search" \
-  -H "Authorization: Bearer $RECORDAGENT_API_KEY" \
+  -H "Authorization: Bearer $RECUERDOS_AI_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"query": "dietary restrictions", "limit": 5}'
 ```
@@ -104,7 +111,7 @@ Backed by:
 
 ```bash
 curl -sS -X POST "$RA/v1/memories" \
-  -H "Authorization: Bearer $RECORDAGENT_API_KEY" \
+  -H "Authorization: Bearer $RECUERDOS_AI_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"content": "I am vegetarian now", "client": "hermes"}'
 ```
@@ -122,7 +129,7 @@ supersession, which is the entire point — see below.
 Fetch the profile once and prepend it to the system prompt:
 
 ```bash
-curl -sS "$RA/v1/profile" -H "Authorization: Bearer $RECORDAGENT_API_KEY"
+curl -sS "$RA/v1/profile" -H "Authorization: Bearer $RECUERDOS_AI_API_KEY"
 ```
 
 ## Why supersession matters more here than anywhere else

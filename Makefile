@@ -1,4 +1,4 @@
-# RecordAgent — operational convenience wrapper.
+# Recuerdos AI — operational convenience wrapper.
 #
 # Everything runs in Docker; the only prerequisite is Docker itself. This
 # Makefile covers the operator side — starting the daemon, creating users,
@@ -15,16 +15,16 @@ COMPOSE := docker compose
 # A one-off CLI invocation against the shared data volume. `run --rm dev`
 # starts a throwaway container that mounts the same `data` volume the
 # `up` daemon uses, so a key issued here is visible to the running server
-# (docker-compose.yml sets RECORDAGENT_STORAGE__PATH=/data on both).
+# (docker-compose.yml sets RECUERDOS_AI_STORAGE__PATH=/data on both).
 #
-# `-e RECORDAGENT_CONFIG=$(CONFIG)` makes every CLI command read the same
-# recordagent.toml the daemon reads, so `make reindex`, `make consolidate`
+# `-e RECUERDOS_AI_CONFIG=$(CONFIG)` makes every CLI command read the same
+# recuerdos-ai.toml the daemon reads, so `make reindex`, `make consolidate`
 # etc. honour your configured provider instead of falling back to defaults.
 # Scoped to `run` (not the compose `environment:` block) so it never
 # reaches `docker compose run ... cargo test`, which must stay env-only.
 # Deferred (`=` not `:=`) so $(CONFIG), defined further down, is in scope
 # when a recipe expands this.
-CLI = $(COMPOSE) run --rm -e RECORDAGENT_CONFIG=$(CONFIG) dev cargo run -q --bin recordagent --
+CLI = $(COMPOSE) run --rm -e RECUERDOS_AI_CONFIG=$(CONFIG) dev cargo run -q --bin recuerdos-ai --
 
 # Defaults, overridable on the command line: `make key-issue HANDLE=sam`.
 # HANDLE rather than USER on purpose — `$(USER)` in a Makefile expands to
@@ -37,8 +37,8 @@ PREFIX ?=
 # The config file the CLI reads, relative to the repo (bind-mounted at
 # /app in the container). The compose daemon reads the same path, so
 # `make config` reflects what the running daemon uses. A missing file is
-# not an error — you fall back to defaults + RECORDAGENT_* env.
-CONFIG ?= recordagent.toml
+# not an error — you fall back to defaults + RECUERDOS_AI_* env.
+CONFIG ?= recuerdos-ai.toml
 
 .DEFAULT_GOAL := help
 
@@ -97,7 +97,7 @@ quickstart: up ## Start the daemon, create a user, and issue a key in one go
 	$(CLI) key issue --user $(HANDLE) --scopes $(SCOPES) --name $(NAME)
 
 .PHONY: init
-init: ## Write a default recordagent.toml and data dir
+init: ## Write a default recuerdos-ai.toml and data dir
 	$(CLI) init
 
 .PHONY: config
@@ -177,8 +177,8 @@ sdk-test: ## Lint, type-check and test the Python SDK against a real daemon
 	$(COMPOSE) --profile sdk down
 
 .PHONY: build
-build: ## Build the release Docker image (recordagent:local)
-	docker build -f docker/Dockerfile -t recordagent:local .
+build: ## Build the release Docker image (recuerdos-ai:local)
+	docker build -f docker/Dockerfile -t recuerdos-ai:local .
 
 .PHONY: shell
 shell: ## Open a shell in the dev container
@@ -188,7 +188,7 @@ shell: ## Open a shell in the dev container
 
 .PHONY: help
 help: ## Show this help
-	@echo "RecordAgent — make targets"
+	@echo "Recuerdos AI — make targets"
 	@echo
 	@awk 'BEGIN {FS = ":.*##"} \
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5); next } \

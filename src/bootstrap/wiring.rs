@@ -24,7 +24,7 @@ use crate::shared::sqlite::SqliteDatabase;
 use std::sync::Arc;
 
 /// The database file inside the configured data directory.
-pub const DATABASE_FILE: &str = "recordagent.db";
+pub const DATABASE_FILE: &str = "recuerdos-ai.db";
 
 pub struct Identity {
     pub user_creator: Arc<UserCreator>,

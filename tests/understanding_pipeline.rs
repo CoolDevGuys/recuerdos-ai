@@ -1,6 +1,6 @@
 //! End-to-end tests for the understanding pipeline.
 //!
-//! These run the real `recordagent serve` binary against a mock provider
+//! These run the real `recuerdos-ai serve` binary against a mock provider
 //! served over real HTTP: the daemon's own OpenAI-compatible client, its
 //! real job queue, its real workers, its real SQLite. Nothing is stubbed
 //! except the model's answers.
@@ -55,10 +55,10 @@ impl Pipeline {
         }
 
         let app = TestApp::spawn_with(&[
-            ("RECORDAGENT_UNDERSTANDING__PROVIDER", "openai-compat"),
-            ("RECORDAGENT_UNDERSTANDING__MODEL", "mock"),
-            ("RECORDAGENT_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
-            ("RECORDAGENT_UNDERSTANDING__BASE_URL", &model.uri()),
+            ("RECUERDOS_AI_UNDERSTANDING__PROVIDER", "openai-compat"),
+            ("RECUERDOS_AI_UNDERSTANDING__MODEL", "mock"),
+            ("RECUERDOS_AI_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
+            ("RECUERDOS_AI_UNDERSTANDING__BASE_URL", &model.uri()),
             ("MOCK_MODEL_KEY", "not-a-real-key"),
         ])
         .await;
@@ -284,13 +284,13 @@ async fn a_provider_outage_retries_rather_than_losing_the_memory() {
         .await;
 
     let app = TestApp::spawn_with(&[
-        ("RECORDAGENT_UNDERSTANDING__PROVIDER", "openai-compat"),
-        ("RECORDAGENT_UNDERSTANDING__MODEL", "mock"),
-        ("RECORDAGENT_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
-        ("RECORDAGENT_UNDERSTANDING__BASE_URL", &model.uri()),
+        ("RECUERDOS_AI_UNDERSTANDING__PROVIDER", "openai-compat"),
+        ("RECUERDOS_AI_UNDERSTANDING__MODEL", "mock"),
+        ("RECUERDOS_AI_UNDERSTANDING__API_KEY_ENV", "MOCK_MODEL_KEY"),
+        ("RECUERDOS_AI_UNDERSTANDING__BASE_URL", &model.uri()),
         ("MOCK_MODEL_KEY", "not-a-real-key"),
         // One attempt, so the test does not wait out a backoff.
-        ("RECORDAGENT_UNDERSTANDING__MAX_ATTEMPTS", "1"),
+        ("RECUERDOS_AI_UNDERSTANDING__MAX_ATTEMPTS", "1"),
     ])
     .await;
     let key = app.create_user_with_key("alex", "read,write");

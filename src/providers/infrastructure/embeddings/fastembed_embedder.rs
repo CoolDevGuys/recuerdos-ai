@@ -220,7 +220,7 @@ mod tests {
     }
 
     fn model_cache_dir() -> PathBuf {
-        std::env::var("RECORDAGENT_MODEL_CACHE")
+        std::env::var("RECUERDOS_AI_MODEL_CACHE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/models"))
     }

@@ -23,12 +23,12 @@ impl Cli {
     }
 
     fn run(&self, args: &[&str]) -> Command {
-        let mut command = Command::cargo_bin("recordagent").expect("binary builds");
+        let mut command = Command::cargo_bin("recuerdos-ai").expect("binary builds");
         command
             .args(args)
-            .env("RECORDAGENT_STORAGE__PATH", self.data_dir.path())
+            .env("RECUERDOS_AI_STORAGE__PATH", self.data_dir.path())
             // Keep the ambient environment from leaking into the run.
-            .env_remove("RECORDAGENT_LOG");
+            .env_remove("RECUERDOS_AI_LOG");
         command
     }
 
@@ -50,7 +50,7 @@ impl Cli {
     }
 
     fn database_path(&self) -> std::path::PathBuf {
-        self.data_dir.path().join("recordagent.db")
+        self.data_dir.path().join("recuerdos-ai.db")
     }
 }
 
@@ -258,25 +258,25 @@ fn state_survives_across_separate_invocations() {
 fn respects_an_explicit_config_file() {
     let config_dir = tempfile::tempdir().unwrap();
     let data_dir = config_dir.path().join("data");
-    let config_path = config_dir.path().join("recordagent.toml");
+    let config_path = config_dir.path().join("recuerdos-ai.toml");
     std::fs::write(
         &config_path,
         format!("[storage]\npath = \"{}\"\n", data_dir.display()),
     )
     .unwrap();
 
-    Command::cargo_bin("recordagent")
+    Command::cargo_bin("recuerdos-ai")
         .unwrap()
         .args(["user", "add", "alex", "--config"])
         .arg(&config_path)
         // An env override would win over the file, so it must be absent
         // for this test to prove the file was read.
-        .env_remove("RECORDAGENT_STORAGE__PATH")
+        .env_remove("RECUERDOS_AI_STORAGE__PATH")
         .assert()
         .success();
 
     assert!(
-        Path::new(&data_dir).join("recordagent.db").exists(),
+        Path::new(&data_dir).join("recuerdos-ai.db").exists(),
         "the config file's storage path was not honoured"
     );
 }

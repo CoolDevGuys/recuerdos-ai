@@ -1,6 +1,6 @@
 /target
 /.ci-cache
-recordagent.toml
+recuerdos-ai.toml
 /data
 *.db
 *.db-wal
@@ -10,3 +10,13 @@ recordagent.toml
 # docs/performance.md with their methodology; the raw runs are local.
 bench-results/
 soak-results/
+
+# Python SDK build/cache artifacts
+__pycache__/
+*.py[cod]
+sdk/python/dist/
+sdk/python/build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

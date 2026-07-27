@@ -69,7 +69,7 @@ fn summarise(body: &str) -> String {
 /// Reads an API key from the configured environment variable.
 ///
 /// Keys are never stored in config files — an operator who pastes one
-/// into `recordagent.toml` will commit it eventually. Config names the
+/// into `recuerdos-ai.toml` will commit it eventually. Config names the
 /// variable; the process environment holds the secret. `section` is the
 /// config table to name in the error (`understanding`, `embeddings`), so
 /// the message points at the setting the operator actually wrote.

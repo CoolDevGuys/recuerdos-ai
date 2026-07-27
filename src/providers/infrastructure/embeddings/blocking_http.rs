@@ -14,7 +14,7 @@
 //! The synchronous [`Embedder`](crate::memories::domain::embedder::Embedder)
 //! trait is called from exactly such places: the startup dimension-probe
 //! runs on the main thread inside `#[tokio::main]`, the nightly
-//! consolidation job runs on a Tokio task, and even `recordagent reindex`
+//! consolidation job runs on a Tokio task, and even `recuerdos-ai reindex`
 //! is a sync command executing under the async runtime. A bare blocking
 //! client in a remote embedder is therefore a latent panic — not a
 //! theoretical one; it aborts the daemon at startup the moment a Gemini or

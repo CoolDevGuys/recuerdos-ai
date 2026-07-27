@@ -4,14 +4,14 @@
 
 Needs a daemon. The fastest way to get one:
 
-    docker run -p 7070:7070 -e RECORDAGENT_AUTH__MODE=none \\
-      ghcr.io/alexromer0/recordagent
+    docker run -p 7070:7070 -e RECUERDOS_AI_AUTH__MODE=none \\
+      ghcr.io/CoolDevGuys/recuerdos-ai
 
 With authentication on (the default), issue a key and export it:
 
-    recordagent user add alex
-    recordagent key issue --user alex --scopes read,write
-    export RECORDAGENT_API_KEY=ra_live_...
+    recuerdos-ai user add alex
+    recuerdos-ai key issue --user alex --scopes read,write
+    export RECUERDOS_AI_API_KEY=ra_live_...
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ from __future__ import annotations
 import os
 import sys
 
-from recordagent import Client, RecordAgentError
+from recuerdos_ai import Client, RecuerdosError
 
 
 def main() -> int:
     ra = Client(
-        base_url=os.environ.get("RECORDAGENT_URL", "http://localhost:7070"),
-        api_key=os.environ.get("RECORDAGENT_API_KEY"),
+        base_url=os.environ.get("RECUERDOS_AI_URL", "http://localhost:7070"),
+        api_key=os.environ.get("RECUERDOS_AI_API_KEY"),
     )
 
     if not ra.health():
@@ -83,6 +83,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except RecordAgentError as error:
+    except RecuerdosError as error:
         print(f"error: {error}", file=sys.stderr)
         sys.exit(1)

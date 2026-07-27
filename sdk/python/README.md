@@ -1,23 +1,23 @@
-# recordagent
+# recuerdos-ai
 
-Python client for [RecordAgent](https://github.com/alexromer0/recordagent) —
+Python client for [Recuerdos AI](https://github.com/CoolDevGuys/recuerdos-ai) —
 a self-hostable long-term memory service for AI agents, over REST and MCP.
 
 ```bash
-pip install recordagent
+pip install recuerdos-ai
 ```
 
 You need a running daemon. The fastest way:
 
 ```bash
-docker run -p 7070:7070 -v recordagent-data:/data \
-  -e RECORDAGENT_AUTH__MODE=none ghcr.io/alexromer0/recordagent
+docker run -p 7070:7070 -v recuerdos-ai-data:/data \
+  -e RECUERDOS_AI_AUTH__MODE=none ghcr.io/CoolDevGuys/recuerdos-ai
 ```
 
 ## The loop
 
 ```python
-from recordagent import Client
+from recuerdos_ai import Client
 
 ra = Client(base_url="http://localhost:7070", api_key="ra_live_…")
 
@@ -84,14 +84,14 @@ to follow.
 ## LangChain
 
 ```bash
-pip install "recordagent[langchain]"
+pip install "recuerdos-ai[langchain]"
 ```
 
 ```python
-from recordagent import Client
-from recordagent.langchain import RecordAgentRetriever
+from recuerdos_ai import Client
+from recuerdos_ai.langchain import RecuerdosRetriever
 
-retriever = RecordAgentRetriever(
+retriever = RecuerdosRetriever(
     client=Client(api_key="ra_live_…"),
     limit=5,
     categories=["preference.coding", "decision"],
@@ -104,11 +104,11 @@ at the start of a thread and writes back at the end.
 
 ## Errors
 
-Every failure is a `RecordAgentError` subclass, keyed off the API's
+Every failure is a `RecuerdosError` subclass, keyed off the API's
 stable error code rather than its message:
 
 ```python
-from recordagent import NotFoundError, PermissionError_, RecordAgentError
+from recuerdos_ai import NotFoundError, PermissionError_, RecuerdosError
 
 try:
     ra.get(memory_id)
@@ -116,7 +116,7 @@ except NotFoundError:
     ...                     # gone, or someone else's — indistinguishable by design
 except PermissionError_:
     ...                     # valid key, missing scope
-except RecordAgentError as error:
+except RecuerdosError as error:
     print(error.request_id)  # ties this to the server log line with the real cause
 ```
 
@@ -131,6 +131,6 @@ except RecordAgentError as error:
 - **Unknown response fields are ignored**, so an older SDK keeps working
   against a newer daemon.
 
-Full reference: [docs/sdk-python.md](https://github.com/alexromer0/recordagent/blob/main/docs/sdk-python.md).
+Full reference: [docs/sdk-python.md](https://github.com/CoolDevGuys/recuerdos-ai/blob/main/docs/sdk-python.md).
 
 Apache-2.0.

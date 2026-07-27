@@ -1,6 +1,6 @@
 """A LangGraph agent that remembers between threads.
 
-    pip install "recordagent[langchain]" langgraph langchain-anthropic
+    pip install "recuerdos-ai[langchain]" langgraph langchain-anthropic
     export ANTHROPIC_API_KEY=sk-ant-...
     python examples/langgraph_memory.py
 
@@ -11,7 +11,7 @@ conversation. It deliberately does not remember across threads, because a
 checkpoint is a transcript and replaying every past transcript into a new
 conversation is neither affordable nor useful.
 
-RecordAgent is the other half: what should survive when the thread is
+Recuerdos AI is the other half: what should survive when the thread is
 gone. So the graph has two extra nodes around the model:
 
     recall  →  agent  →  remember
@@ -32,7 +32,7 @@ import os
 import sys
 from typing import Annotated, TypedDict
 
-from recordagent import Client, RecordAgentError
+from recuerdos_ai import Client, RecuerdosError
 
 try:
     from langchain_anthropic import ChatAnthropic
@@ -41,7 +41,7 @@ try:
     from langgraph.graph.message import add_messages
 except ModuleNotFoundError as error:  # pragma: no cover
     raise SystemExit(
-        'This example needs: pip install "recordagent[langchain]" langgraph '
+        'This example needs: pip install "recuerdos-ai[langchain]" langgraph '
         "langchain-anthropic"
     ) from error
 
@@ -102,7 +102,7 @@ def build_graph(ra: Client, model: ChatAnthropic) -> StateGraph:
             # an extraction the user is not waiting for would add seconds
             # to every turn for no benefit.
             ra.save(exchange, client="langgraph-example")
-        except RecordAgentError as error:
+        except RecuerdosError as error:
             # Never fatal. Failing to remember something is worse than
             # failing to answer, but not by enough to drop the answer.
             print(f"[memory] could not save: {error}", file=sys.stderr)
@@ -124,8 +124,8 @@ def build_graph(ra: Client, model: ChatAnthropic) -> StateGraph:
 
 def main() -> int:
     ra = Client(
-        base_url=os.environ.get("RECORDAGENT_URL", "http://localhost:7070"),
-        api_key=os.environ.get("RECORDAGENT_API_KEY"),
+        base_url=os.environ.get("RECUERDOS_AI_URL", "http://localhost:7070"),
+        api_key=os.environ.get("RECUERDOS_AI_API_KEY"),
     )
     if not ra.health():
         print(f"no daemon at {ra.base_url} — is it running?", file=sys.stderr)
@@ -135,7 +135,7 @@ def main() -> int:
 
     # Two separate invocations, deliberately: no shared thread, no
     # checkpointer. Anything the second turn knows about the first came
-    # back out of RecordAgent.
+    # back out of Recuerdos AI.
     for turn in [
         "I only ever use pnpm — never npm or yarn. Remember that.",
         "What should I run to install this project's dependencies?",
