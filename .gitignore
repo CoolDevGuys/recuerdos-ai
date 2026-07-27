@@ -6,3 +6,7 @@ recordagent.toml
 *.db-wal
 *.db-shm
 .env
+# Benchmark and soak output. Numbers worth keeping are transcribed into
+# docs/performance.md with their methodology; the raw runs are local.
+bench-results/
+soak-results/

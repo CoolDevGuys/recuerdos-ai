@@ -29,25 +29,35 @@ pub struct SqliteVectorIndex {
     dimensions: usize,
 }
 
+/// The vec0 table name and its schema, in one place: both the normal
+/// open path and the reindexer create it, and a drift between the two
+/// would silently corrupt vectors.
+pub(crate) const VEC_TABLE: &str = "vec_memories";
+
+/// Creates the `vec0` table at `dimensions` if it is absent. The width is
+/// fixed at creation, which is why changing the embedding model needs a
+/// drop-and-recreate (see [`SqliteReindexer`](super::sqlite_reindexer)).
+pub(crate) fn create_vec_table(connection: &Connection, dimensions: usize) -> Result<()> {
+    connection
+        .execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS {VEC_TABLE} USING vec0(
+                memory_id TEXT PRIMARY KEY,
+                user_id TEXT PARTITION KEY,
+                embedding float[{dimensions}]
+            );"
+        ))
+        .map_err(|e| {
+            RaError::Internal(format!(
+                "failed to create the vector index (is the sqlite-vec extension \
+                 available?): {e}"
+            ))
+        })
+}
+
 impl SqliteVectorIndex {
     /// Opens the index, creating the `vec0` table if absent.
     pub fn open(database: Arc<SqliteDatabase>, dimensions: usize) -> Result<Self> {
-        database.with_connection(|connection| {
-            connection
-                .execute_batch(&format!(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
-                        memory_id TEXT PRIMARY KEY,
-                        user_id TEXT PARTITION KEY,
-                        embedding float[{dimensions}]
-                    );"
-                ))
-                .map_err(|e| {
-                    RaError::Internal(format!(
-                        "failed to create the vector index (is the sqlite-vec extension \
-                         available?): {e}"
-                    ))
-                })
-        })?;
+        database.with_connection(|connection| create_vec_table(connection, dimensions))?;
 
         Ok(Self {
             database,
@@ -150,8 +160,10 @@ impl VectorIndex for SqliteVectorIndex {
     }
 }
 
-/// sqlite-vec takes a vector as a little-endian f32 blob.
-fn to_bytes(embedding: &[f32]) -> Vec<u8> {
+/// sqlite-vec takes a vector as a little-endian f32 blob. `pub(crate)`
+/// so the reindexer writes vectors in exactly this encoding rather than
+/// its own copy that could drift.
+pub(crate) fn to_bytes(embedding: &[f32]) -> Vec<u8> {
     embedding
         .iter()
         .flat_map(|value| value.to_le_bytes())

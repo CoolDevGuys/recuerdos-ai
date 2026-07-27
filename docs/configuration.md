@@ -12,6 +12,14 @@ Defaults → `recordagent.toml` → `RECORDAGENT_*` env vars (env wins).
 Nested keys use a double underscore: `RECORDAGENT_SERVER__PORT=8080` sets
 `[server].port`.
 
+The file is read only when you point at it — with `--config PATH`, or by
+setting `RECORDAGENT_CONFIG=PATH` in the environment. The env var is the
+easy way to make **every** command (and the daemon) read the same file
+without repeating `--config`; an explicit `--config` still wins over it.
+There is no auto-discovery of a `recordagent.toml` in the working
+directory, so a daemon or a `reindex` started with neither uses defaults +
+env and ignores a file sitting next to it.
+
 ```bash
 recordagent init                 # writes ./recordagent.toml + creates the data dir
 recordagent serve --config recordagent.toml
@@ -19,6 +27,23 @@ recordagent serve --config recordagent.toml
 
 `init` refuses to overwrite an existing file, and re-loads what it wrote
 before declaring success — if `init` reports success, the file is valid.
+
+## Checking what is in effect
+
+Because env vars override the file, the config a running daemon actually
+uses is not always what the file says. `recordagent config` (or
+`make config`) prints the **resolved** result — which embeddings and
+understanding provider are selected, their models and endpoints, the MCP
+transports, storage path, and auth mode:
+
+```bash
+recordagent config
+```
+
+It prints no secrets. For a provider API key it shows only the env var
+holding it and whether that var is set — so a `GEMINI_API_KEY (NOT SET)`
+line is the quickest way to spot the misconfiguration that would
+otherwise surface as a provider failing on its first request.
 
 ## Reference
 
@@ -89,10 +114,12 @@ orphaned.
 
 ```toml
 [embeddings]
-provider  = "local"                    # only "local" works today
+provider  = "local"                    # local | openai-compat | ollama
 model     = "bge-small-en-v1.5"        # or all-minilm-l6-v2
-cache_dir = "~/.recordagent/models"
+cache_dir = "~/.recordagent/models"    # local only
 ```
+
+### `provider = "local"` (default)
 
 Embeddings are computed in-process, on CPU, with no external service —
 that is why the daemon works with no API key and no network.
@@ -100,12 +127,121 @@ that is why the daemon works with no API key and no network.
 `cache_dir` is where the ~130 MB model lives. The Docker image bakes it
 in at `/models`, so containers never download at runtime. On bare metal
 the model is fetched on first use; `recordagent warm-models` does it
-ahead of time, which is what you want before taking a host offline.
+ahead of time, which is what you want before taking a host offline. Both
+built-in models are 384-dimensional.
 
-**The model is pinned per collection.** Vectors from two different models
-are not comparable, so changing `model` against an existing database is
-refused with an actionable error rather than silently returning nonsense
-rankings. Both supported models are 384-dimensional.
+### Gemini (`gemini`) — native, task-type-aware
+
+A dedicated Google client rather than the OpenAI-compat shim, because
+Gemini's embedding models are **asymmetric**: they embed a document and
+the query meant to retrieve it differently, chosen by a `taskType`. This
+client sends `RETRIEVAL_DOCUMENT` when storing and `RETRIEVAL_QUERY` when
+searching, which the models are trained for and which measurably improves
+recall. The OpenAI-compat endpoint can't express `taskType`, so prefer
+`gemini` over `openai-compat` for a Gemini key.
+
+```toml
+[embeddings]
+provider    = "gemini"
+model       = "text-embedding-004"        # 768-dim
+api_key_env = "GEMINI_API_KEY"            # a Google AI Studio key
+# base_url defaults to Google's endpoint
+```
+
+Auth is via a header, never a `?key=` URL parameter, so the key stays out
+of logs. The key is required.
+
+**For reasoning** (`[understanding]`), `provider = "gemini"` is available
+too — but there it is a *preset* over the OpenAI-compat client pointed at
+Google's endpoint, not a native client. Gemini's chat API exposes nothing
+`taskType`-like that the compatibility endpoint hides, so a second client
+would earn nothing. Configure it the same way, with a chat model:
+
+```toml
+[understanding]
+provider    = "gemini"
+model       = "gemini-2.0-flash"
+api_key_env = "GEMINI_API_KEY"
+# base_url defaults to Google's OpenAI-compatible endpoint
+```
+
+### Remote providers (`openai-compat`, `ollama`)
+
+Point embeddings at any other external provider — the same shape as
+`[understanding]`: a URL, a model name, and (where the provider needs
+one) an API key read from the environment. `openai-compat` also works
+against Gemini's compatibility endpoint, but without the task-type
+advantage above.
+
+```toml
+# OpenAI, or any gateway that copies its /v1/embeddings API
+[embeddings]
+provider    = "openai-compat"
+model       = "text-embedding-3-small"
+base_url    = "https://api.openai.com/v1"   # empty = this default
+api_key_env = "OPENAI_API_KEY"              # names the env var, not the key
+```
+
+```toml
+# A local Ollama — no key, it is unauthenticated
+[embeddings]
+provider = "ollama"
+model    = "nomic-embed-text"
+base_url = "http://127.0.0.1:11434"         # empty = this default
+```
+
+| Key | For |
+|---|---|
+| `base_url` | The provider's address. Empty means its usual one — set it for an OpenAI-compatible gateway (OpenRouter, Together, a local vLLM, LM Studio) or a non-default Ollama host. |
+| `api_key_env` | The **name** of the env var holding the key, never the key itself — a key in a config file gets committed eventually. Leave empty for a keyless local server. Ignored by `ollama`. |
+
+The model's **dimensionality is discovered at startup** by making one
+real embedding request, so there is no dimensions setting to get wrong. A
+bad URL, key or model name stops the daemon immediately with a clear
+error, rather than surfacing later as recalls that return nothing.
+
+### The model is pinned per collection
+
+Vectors from two different models are not comparable, so changing
+`provider` or `model` against an existing database is caught rather than
+allowed to return nonsense rankings — a `text-embedding-3-small` vector
+(1536-dim) cannot live in a store built for 384-dim `bge-small`.
+
+The pin — the model name **and** its dimensionality — is recorded the
+first time you store something; you never set it yourself, and there is no
+dimensions option to get wrong (a remote model's width is discovered by a
+real request at startup). If the configured model later disagrees with the
+pin, **the daemon refuses to start** and tells you exactly what to do:
+
+```
+this store was built with embedding model "bge-small-en-v1.5" (384 dimensions)
+but the service is configured for "gemini-embedding-001" (3072). … run
+`recordagent reindex` (with the daemon stopped) to re-embed every memory
+under the new model in place.
+```
+
+This is a fail-fast at startup, not a raw error on your first recall — and
+it also catches a swap between two different models that happen to share a
+width, which a dimension check alone would miss.
+
+To switch **and keep your memories**, re-embed them in place:
+
+```bash
+# 1. stop the daemon
+# 2. edit [embeddings] to the new provider/model
+recordagent reindex
+# 3. start the daemon
+```
+
+`reindex` reads every stored memory's text (which is model-independent),
+re-embeds it with the new model, rebuilds the vector index at the new
+dimensionality, and updates the pin — all in one transaction, so a failed
+run leaves the old store untouched and can simply be retried. Nothing is
+ever read but the content, so no memory is at risk. Run it with the
+daemon **stopped**: it rebuilds the vector table and holds the write
+lock.
+
+The full-text (BM25) index is model-independent and is not touched.
 
 ## Retrieval
 

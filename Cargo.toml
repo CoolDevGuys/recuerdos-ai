@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time"] }
 axum = "0.8"
+# The `http` types (request::Parts, header names) the MCP HTTP transport
+# reads out of a request context. Pinned to the same 1.x axum and rmcp use
+# so the `Parts` type matches what rmcp stashes.
+http = "1"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "timeout", "request-id", "util"] }
 tracing = "0.1"
@@ -38,7 +42,14 @@ fastembed = "5.17.3"
 sha2 = "0.11.0"
 rmcp = { version = "2.2.0", features = ["server", "client", "transport-io", "transport-streamable-http-server", "macros", "schemars", "transport-streamable-http-client-reqwest"] }
 async-trait = "0.1.91"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `blocking` for the remote embedders: the `Embedder` trait is synchronous
+# (the local ONNX path is CPU-bound), so an HTTP embedder needs a blocking
+# client. reqwest's blocking client owns a Tokio runtime, though, and
+# building/using/dropping it on one of the daemon's async threads panics
+# ("Cannot drop a runtime in a context where blocking is not allowed") —
+# which the startup probe, consolidation and `reindex` all do. So it is
+# confined to a dedicated thread by embeddings::blocking_http.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # Used by the `eval` subcommand, which builds a throwaway instance so that
 # scoring retrieval can never touch a real store.
 tempfile = "3"

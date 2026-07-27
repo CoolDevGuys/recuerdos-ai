@@ -132,7 +132,22 @@ pub async fn serve(host: &str, port: u16, state: AppState) -> std::io::Result<()
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, auth_mode = ?state.auth_mode, "listening");
 
-    axum::serve(listener, router(state))
+    // Mounted here rather than in `router` so it sits *outside* the 30 s
+    // request-timeout layer: an MCP session's connection is long-lived and
+    // must not be cut at 30 s. It forwards to the daemon's own REST over
+    // loopback, so it needs no state — only the port.
+    let mut app = router(state.clone());
+    if state.mcp_http {
+        app = app.nest_service(
+            "/mcp",
+            crate::memories::infrastructure::mcp::http_service::http_service(format!(
+                "http://127.0.0.1:{port}"
+            )),
+        );
+        tracing::info!("MCP over streamable HTTP mounted at /mcp");
+    }
+
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
 }

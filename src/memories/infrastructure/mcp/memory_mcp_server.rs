@@ -4,6 +4,7 @@
 //! method, and renders the result — the same shape as the REST handlers,
 //! over a different protocol. No memory rules live here.
 
+use super::http_memory_toolbox::HttpMemoryToolbox;
 use super::memory_toolbox::{DistillRequest, MemoryToolbox, RecallRequest, SaveRequest};
 use super::tool_text;
 use crate::shared::error::RaError;
@@ -65,9 +66,24 @@ pub struct ForgetParams {
     pub confirm: bool,
 }
 
+/// Where a request's toolbox comes from — the one thing that differs
+/// between the two transports.
+#[derive(Clone)]
+enum Backend {
+    /// stdio: one toolbox, fixed when the shim starts, already bound to
+    /// the operator's key.
+    Fixed(Arc<dyn MemoryToolbox>),
+    /// Streamable HTTP on the daemon: there is no single user, so the
+    /// toolbox is built per request from the bearer token on the request,
+    /// forwarding to the daemon's own REST API over loopback. Reusing the
+    /// HTTP toolbox means the two transports share one code path and
+    /// cannot drift, and auth is whatever the REST layer already enforces.
+    Loopback { base_url: Arc<str> },
+}
+
 #[derive(Clone)]
 pub struct MemoryMcpServer {
-    toolbox: Arc<dyn MemoryToolbox>,
+    backend: Backend,
     /// Recorded as the memory's source so the audit trail can tell an
     /// agent's writes from a curl.
     client_name: String,
@@ -75,10 +91,47 @@ pub struct MemoryMcpServer {
 
 #[tool_router]
 impl MemoryMcpServer {
+    /// A server over a fixed toolbox — the stdio shim, bound to one key.
     pub fn new(toolbox: Arc<dyn MemoryToolbox>, client_name: &str) -> Self {
         Self {
-            toolbox,
+            backend: Backend::Fixed(toolbox),
             client_name: client_name.to_string(),
+        }
+    }
+
+    /// A server for the daemon's streamable-HTTP transport. Each request's
+    /// toolbox is built from that request's bearer token and forwards to
+    /// `base_url` (the daemon's own loopback address).
+    pub fn loopback(base_url: impl Into<Arc<str>>, client_name: &str) -> Self {
+        Self {
+            backend: Backend::Loopback {
+                base_url: base_url.into(),
+            },
+            client_name: client_name.to_string(),
+        }
+    }
+
+    /// The toolbox for this request.
+    ///
+    /// Fixed transports ignore the context; the loopback transport reads
+    /// the `Authorization` header out of the HTTP request parts that the
+    /// streamable-HTTP service stashes in the request context. A missing
+    /// header yields an empty key, which the REST layer then rejects (or
+    /// accepts, under `[auth].mode = "none"`) — the same decision it makes
+    /// for any other caller.
+    fn toolbox(&self, context: &RequestContext<RoleServer>) -> Arc<dyn MemoryToolbox> {
+        match &self.backend {
+            Backend::Fixed(toolbox) => Arc::clone(toolbox),
+            Backend::Loopback { base_url } => {
+                let key = context
+                    .extensions
+                    .get::<http::request::Parts>()
+                    .and_then(|parts| parts.headers.get(http::header::AUTHORIZATION))
+                    .and_then(|value| value.to_str().ok())
+                    .map(strip_bearer)
+                    .unwrap_or_default();
+                Arc::new(HttpMemoryToolbox::new(base_url, &key))
+            }
         }
     }
 
@@ -106,9 +159,10 @@ impl MemoryMcpServer {
     async fn memory_save(
         &self,
         Parameters(params): Parameters<SaveParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let outcome = self
-            .toolbox
+            .toolbox(&context)
             .save(SaveRequest {
                 content: params.content,
                 category: params.category,
@@ -140,9 +194,10 @@ impl MemoryMcpServer {
     async fn memory_recall(
         &self,
         Parameters(params): Parameters<RecallParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let memories = self
-            .toolbox
+            .toolbox(&context)
             .recall(RecallRequest {
                 query: params.query,
                 categories: params.categories,
@@ -176,9 +231,10 @@ impl MemoryMcpServer {
     async fn session_distill(
         &self,
         Parameters(params): Parameters<DistillParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let memories = self
-            .toolbox
+            .toolbox(&context)
             .distill(DistillRequest {
                 content: params.content,
                 session_id: params.session_id,
@@ -209,7 +265,9 @@ impl MemoryMcpServer {
     async fn memory_forget(
         &self,
         Parameters(params): Parameters<ForgetParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let toolbox = self.toolbox(&context);
         // Deleting is the one irreversible thing an agent can do here, so
         // the two-step is enforced by the server rather than trusted to
         // the model: ids alone are not enough without `confirm`.
@@ -222,11 +280,7 @@ impl MemoryMcpServer {
                 )]));
             }
 
-            let deleted = self
-                .toolbox
-                .forget(&params.ids)
-                .await
-                .map_err(to_mcp_error)?;
+            let deleted = toolbox.forget(&params.ids).await.map_err(to_mcp_error)?;
             return Ok(CallToolResult::success(vec![ContentBlock::text(
                 tool_text::render_forgotten(deleted),
             )]));
@@ -239,8 +293,7 @@ impl MemoryMcpServer {
             ));
         };
 
-        let candidates = self
-            .toolbox
+        let candidates = toolbox
             .find_candidates(&query, 10)
             .await
             .map_err(to_mcp_error)?;
@@ -291,7 +344,7 @@ impl ServerHandler for MemoryMcpServer {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, ErrorData> {
         if request.uri != PROFILE_URI {
             return Err(ErrorData::resource_not_found(
@@ -300,13 +353,29 @@ impl ServerHandler for MemoryMcpServer {
             ));
         }
 
-        let profile = self.toolbox.profile().await.map_err(to_mcp_error)?;
+        let profile = self
+            .toolbox(&context)
+            .profile()
+            .await
+            .map_err(to_mcp_error)?;
 
         Ok(ReadResourceResult::new(vec![ResourceContents::text(
             profile,
             PROFILE_URI,
         )]))
     }
+}
+
+/// Strips a leading `Bearer ` (any case) from an Authorization header,
+/// leaving the raw key the toolbox sends back as its own bearer.
+fn strip_bearer(header: &str) -> String {
+    let trimmed = header.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
 }
 
 /// Maps a domain error to an MCP error.

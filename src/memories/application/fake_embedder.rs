@@ -17,7 +17,7 @@
 //! true synonyms ("car"/"automobile") are *not* close, so tests must use
 //! shared vocabulary to express semantic proximity.
 
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::shared::error::Result;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -41,7 +41,7 @@ impl Default for FakeEmbedder {
 }
 
 impl Embedder for FakeEmbedder {
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, texts: &[String], _task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
         Ok(texts
             .iter()
             .map(|text| {
@@ -94,7 +94,11 @@ mod tests {
     use super::*;
 
     fn embed(embedder: &FakeEmbedder, text: &str) -> Vec<f32> {
-        embedder.embed(&[text.to_string()]).unwrap().pop().unwrap()
+        embedder
+            .embed(&[text.to_string()], EmbeddingTask::Document)
+            .unwrap()
+            .pop()
+            .unwrap()
     }
 
     fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -162,7 +166,10 @@ mod tests {
     fn embeds_a_batch_in_order() {
         let embedder = FakeEmbedder::default();
         let batch = embedder
-            .embed(&["first".to_string(), "second".to_string()])
+            .embed(
+                &["first".to_string(), "second".to_string()],
+                EmbeddingTask::Document,
+            )
             .unwrap();
 
         assert_eq!(batch.len(), 2);
@@ -174,7 +181,9 @@ mod tests {
     fn embed_one_returns_a_single_vector() {
         let embedder = FakeEmbedder::default();
         assert_eq!(
-            embedder.embed_one("user prefers pnpm").unwrap(),
+            embedder
+                .embed_one("user prefers pnpm", EmbeddingTask::Query)
+                .unwrap(),
             embed(&embedder, "user prefers pnpm")
         );
     }

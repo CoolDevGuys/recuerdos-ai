@@ -21,7 +21,7 @@
 //!    state that can be rebuilt.
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::text_index::TextIndex;
@@ -58,7 +58,9 @@ impl DirectMemorySaver {
     pub fn execute(&self, context: &UserContext, new: NewMemory, actor: &str) -> Result<Memory> {
         let memory = Memory::create(context.user_id(), new, self.clock.now())?;
 
-        let embedding = self.embedder.embed_one(memory.content())?;
+        let embedding = self
+            .embedder
+            .embed_one(memory.content(), EmbeddingTask::Document)?;
 
         self.memories.insert(context, &memory, actor)?;
 

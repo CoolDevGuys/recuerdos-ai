@@ -81,7 +81,7 @@ impl Default for StorageConfig {
     }
 }
 
-const EMBEDDINGS_PROVIDERS: &[&str] = &["local", "openai-compat", "ollama"];
+const EMBEDDINGS_PROVIDERS: &[&str] = &["local", "gemini", "openai-compat", "ollama"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -92,20 +92,36 @@ pub struct EmbeddingsConfig {
     /// to the library's default, which is the process's working
     /// directory — for a daemon, "wherever it happened to be started
     /// from". The Docker image points this at a baked-in `/models`.
+    /// Ignored by the remote providers.
     pub cache_dir: String,
+    /// Name of the env var holding the provider's API key, mirroring
+    /// `[understanding]`. Empty means "no key" — correct for a local
+    /// server (Ollama, a self-hosted vLLM) and rejected by a hosted one.
+    /// The key itself never lives in the config file.
+    pub api_key_env: String,
+    /// Override the provider's address, for an OpenAI-compatible gateway
+    /// or a non-default Ollama host. Empty means the provider's usual
+    /// address. Ignored by the local provider.
+    pub base_url: String,
 }
 
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
+            // Local by default: embeddings are the one thing that must
+            // work with no account, no key and no network, or the "runs
+            // fully offline" claim is false.
             provider: "local".to_string(),
             model: "bge-small-en-v1.5".to_string(),
             cache_dir: "~/.recordagent/models".to_string(),
+            api_key_env: String::new(),
+            base_url: String::new(),
         }
     }
 }
 
-const UNDERSTANDING_PROVIDERS: &[&str] = &["anthropic", "openai-compat", "ollama", "none"];
+const UNDERSTANDING_PROVIDERS: &[&str] =
+    &["anthropic", "openai-compat", "gemini", "ollama", "none"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -213,7 +229,21 @@ impl AppConfig {
     pub fn load(config_path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut figment = Figment::from(Serialized::defaults(AppConfig::default()));
 
-        if let Some(path) = config_path {
+        // An explicit `--config` wins; otherwise fall back to the
+        // `RECORDAGENT_CONFIG` env var. That fallback is what lets one
+        // setting point the *whole* CLI at a file — `serve`, `reindex`,
+        // `consolidate`, `config` — without repeating `--config` on each
+        // command (the Docker workflow sets it once for every invocation).
+        // A missing file is not an error: `Toml::file` merges nothing and
+        // you fall back to defaults + env, same as with no config at all.
+        //
+        // `RECORDAGENT_CONFIG` is read here, not through the `Env` provider
+        // below, so it never looks like a config key — figment ignores it
+        // there just as it ignores any other unknown `RECORDAGENT_*` var.
+        let env_config = std::env::var("RECORDAGENT_CONFIG")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if let Some(path) = config_path.or(env_config.as_deref().map(Path::new)) {
             figment = figment.merge(Toml::file(path));
         }
 
@@ -262,7 +292,9 @@ impl AppConfig {
         if self.embeddings.model.trim().is_empty() {
             issues.push("[embeddings].model is empty".to_string());
         }
-        if self.embeddings.cache_dir.trim().is_empty() {
+        // Only the local provider reads cache_dir, so only it must have
+        // one — a remote provider legitimately leaves it blank.
+        if self.embeddings.provider == "local" && self.embeddings.cache_dir.trim().is_empty() {
             issues.push("[embeddings].cache_dir is empty".to_string());
         }
 
@@ -381,6 +413,32 @@ mod tests {
     }
 
     #[test]
+    fn recordagent_config_env_names_the_file_when_no_flag_is_passed() {
+        Jail::expect_with(|jail| {
+            jail.create_file("elsewhere.toml", "[server]\nport = 4242\n")?;
+            // No `--config` argument; the env var alone points at the file.
+            jail.set_env("RECORDAGENT_CONFIG", "elsewhere.toml");
+
+            let config = AppConfig::load(None).unwrap();
+            assert_eq!(config.server.port, 4242);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_explicit_config_flag_wins_over_the_env_var() {
+        Jail::expect_with(|jail| {
+            jail.create_file("flag.toml", "[server]\nport = 1111\n")?;
+            jail.create_file("env.toml", "[server]\nport = 2222\n")?;
+            jail.set_env("RECORDAGENT_CONFIG", "env.toml");
+
+            let config = AppConfig::load(Some(Path::new("flag.toml"))).unwrap();
+            assert_eq!(config.server.port, 1111, "the explicit flag must win");
+            Ok(())
+        });
+    }
+
+    #[test]
     fn env_overrides_file() {
         Jail::expect_with(|jail| {
             jail.create_file("recordagent.toml", "[server]\nport = 9999\n")?;
@@ -413,6 +471,56 @@ mod tests {
                 "expected exactly these two issues: {:?}",
                 err.0
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_remote_embeddings_provider_needs_no_cache_dir() {
+        // cache_dir is a local-only concern; a remote provider leaving it
+        // blank must not be a config error.
+        Jail::expect_with(|jail| {
+            // The dev container exports RECORDAGENT_EMBEDDINGS__CACHE_DIR,
+            // and env wins over the file — null it so the empty cache_dir
+            // under test actually reaches validation.
+            jail.set_env("RECORDAGENT_EMBEDDINGS__CACHE_DIR", "");
+            jail.create_file(
+                "recordagent.toml",
+                "[embeddings]\nprovider = \"openai-compat\"\n\
+                 model = \"text-embedding-3-small\"\n",
+            )?;
+
+            let config = AppConfig::load(Some(Path::new("recordagent.toml")))
+                .expect("a remote provider with no cache_dir should load");
+            assert_eq!(config.embeddings.provider, "openai-compat");
+            assert!(config.embeddings.cache_dir.is_empty());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn the_local_provider_still_requires_a_cache_dir() {
+        Jail::expect_with(|jail| {
+            jail.set_env("RECORDAGENT_EMBEDDINGS__CACHE_DIR", "");
+            jail.create_file("recordagent.toml", "[embeddings]\nprovider = \"local\"\n")?;
+
+            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            assert!(
+                err.0.iter().any(|m| m.contains("[embeddings].cache_dir")),
+                "{:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_unknown_embeddings_provider_is_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file("recordagent.toml", "[embeddings]\nprovider = \"cohere\"\n")?;
+
+            let err = AppConfig::load(Some(Path::new("recordagent.toml"))).unwrap_err();
+            assert!(err.0.iter().any(|m| m.contains("[embeddings].provider")));
             Ok(())
         });
     }

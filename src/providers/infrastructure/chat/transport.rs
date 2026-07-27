@@ -70,13 +70,14 @@ fn summarise(body: &str) -> String {
 ///
 /// Keys are never stored in config files — an operator who pastes one
 /// into `recordagent.toml` will commit it eventually. Config names the
-/// variable; the process environment holds the secret.
-pub fn key_from_env(variable: &str) -> crate::shared::error::Result<String> {
+/// variable; the process environment holds the secret. `section` is the
+/// config table to name in the error (`understanding`, `embeddings`), so
+/// the message points at the setting the operator actually wrote.
+pub fn key_from_env(variable: &str, section: &str) -> crate::shared::error::Result<String> {
     let value = std::env::var(variable).map_err(|_| {
         crate::shared::error::RaError::Validation(format!(
-            "[understanding].api_key_env names {variable:?}, but that environment \
-             variable is not set. Export it, or set [understanding].provider = \"none\" \
-             to run without a language model."
+            "[{section}].api_key_env names {variable:?}, but that environment \
+             variable is not set. Export it before starting the daemon."
         ))
     })?;
 

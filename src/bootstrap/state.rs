@@ -36,6 +36,10 @@ pub struct AppState {
     pub understanding: Arc<Understanding>,
     pub consolidation: Arc<Consolidation>,
     pub auth_mode: AuthMode,
+    /// Whether to mount the streamable-HTTP MCP transport at `/mcp`
+    /// (`[server].mcp.http`). Held here so `serve` can decide without
+    /// re-reading config.
+    pub mcp_http: bool,
 }
 
 #[cfg(test)]

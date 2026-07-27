@@ -1,5 +1,6 @@
 services:
   dev:
+    container_name: recordagent
     build:
       context: .
       dockerfile: docker/Dockerfile.dev
@@ -15,6 +16,8 @@ services:
       - models:/models
     ports:
       - "7070:7070"
+    env_file:
+      - .env
     environment:
       RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
       # Container-wide so the daemon (`docker compose up dev`) and the CLI
@@ -38,7 +41,63 @@ services:
     # `docker compose run --rm dev cargo test`. Containers must listen on
     # all interfaces to be reachable through Docker's published port;
     # recordagent.toml still defaults to 127.0.0.1 for bare-metal runs.
-    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve'"]
+    #
+    # `--config recordagent.toml`: the repo is bind-mounted at /app (the
+    # working dir), so this reads the same ./recordagent.toml you edit on
+    # the host. A missing file is not an error — you fall back to defaults
+    # + the RECORDAGENT_* env above. `make config` reads the same file, so
+    # what it prints is what this daemon runs.
+    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve --config recordagent.toml'"]
+
+  # The daemon the Python SDK's integration tests talk to. Runs the
+  # release image — the same artifact users get — rather than a dev
+  # build, so the tests also prove that image actually serves.
+  #
+  # `[auth].mode = "none"`: minting a key needs CLI access to the
+  # daemon's own data dir, and wiring that into a test fixture would mean
+  # either a privileged back door or a much more elaborate harness. What
+  # a key changes on the wire is covered by the SDK's unit tests.
+  sdk-daemon:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    profiles: ["sdk"]
+    environment:
+      RECORDAGENT_AUTH__MODE: none
+      RECORDAGENT_SERVER__HOST: 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7070/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  sdk:
+    image: python:3.12-slim
+    profiles: ["sdk"]
+    depends_on:
+      sdk-daemon:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - pip-cache:/root/.cache/pip
+    working_dir: /app/sdk/python
+    environment:
+      RECORDAGENT_TEST_URL: http://sdk-daemon:7070
+      # The examples default to localhost, which inside this container is
+      # not where the daemon is.
+      RECORDAGENT_URL: http://sdk-daemon:7070
+    command: >
+      sh -c "pip install -q -e '.[dev,langchain]' &&
+             ruff format --check src tests examples &&
+             ruff check src tests examples &&
+             mypy src &&
+             pytest -q -m 'not integration' &&
+             pytest -q -m integration &&
+             echo '--- examples ---' &&
+             python examples/quickstart.py &&
+             python examples/langchain_retriever.py &&
+             python -m py_compile examples/langgraph_memory.py"
 
   ollama:
     image: ollama/ollama
@@ -49,6 +108,7 @@ services:
       - "11434:11434"
 
 volumes:
+  pip-cache:
   cargo-registry:
   cargo-git:
   target:

@@ -3,6 +3,34 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.1.0 — Phase 6: SDK, docs & release
+
+The first release candidate. No new memory behaviour — this phase is
+about making everything from Phases 0–5 installable, documented, and
+usable from something other than curl.
+
+- **Python SDK** (`pip install recordagent`): a thin typed client over
+  the REST API — one method per endpoint, pydantic models, and no
+  caching or retry opinions of its own. The two things it does add are
+  the two a raw `httpx` call makes awkward: errors keyed off the API's
+  stable error `code` so callers branch on a type, and job polling.
+  Ships a LangChain `BaseRetriever` behind a `[langchain]` extra.
+- **Integration recipes** for the client types without one: Hermes,
+  LangChain/LangGraph, and a plain-REST recipe for anything else. Every
+  request and response in them was captured from a running daemon.
+- **Benchmarks** in `docs/performance.md`, measured against the release
+  image rather than a dev build, with the methodology and the hardware
+  written down beside the numbers — including the targets that were
+  missed.
+- **`install.sh`**, which downloads a binary, verifies its checksum, and
+  refuses to install anything unverified. Tested against a tampered
+  tarball and a missing checksum, not just the happy path.
+- **Release workflow**: native builds per architecture (linux
+  x86_64/aarch64, macOS arm64), multi-arch image to GHCR, drafted
+  release notes.
+- **Apache-2.0**, and a recorded name-availability check.
+- **README** rewritten as a launch page.
+
 ## v0.5.0-alpha — Phase 5: Consolidation
 
 Memory that stays clean over time. Until now the store only grew; this

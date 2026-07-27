@@ -1,107 +1,58 @@
 # RecordAgent
 
 [![CI](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml/badge.svg)](https://github.com/alexromer0/recordagent/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> Currently hosted at `alexromer0/recordagent` (private). The project name
-> itself isn't finalized — see project-plan.md §16 — so this may move to
-> its own org/repo before public launch.
+**Long-term memory for your AI agents — one service, all of them, on your
+own machine.**
 
-Every AI agent session starts as a blank slate. You re-explain your
-architecture preferences to Claude Code, your Hermes agent forgets your
-dietary restrictions, and memory saved by one tool is invisible to the
-others — your coding assistant learning you prefer `pnpm` doesn't help
-your life-assistant bot.
+Every agent session starts as a blank slate. You re-explain your
+architecture preferences to Claude Code. Your life-assistant bot forgets
+you went vegetarian. And memory saved by one tool is invisible to the
+others: your coding assistant learning you prefer `pnpm` does nothing for
+anything else you run.
 
-RecordAgent's thesis: memory should be a *service* you own — a single fast
-daemon that any agent can read from and write to over REST or MCP, that
-*understands* what it stores (extracting facts, labeling, categorizing,
-deduplicating, resolving contradictions), and that isolates each user's
-memories strictly. See [project-plan.md](project-plan.md) for the full
-design and [implementation-plan.md](implementation-plan.md) for the phased
-build plan.
+RecordAgent is one daemon that any agent reads from and writes to, over
+REST or MCP. It doesn't just store what you tell it — it works out what is
+worth keeping, labels it, and when you contradict yourself it *replaces*
+the old answer instead of returning both.
 
-> **Status: Phase 5 — Consolidation.** Claude Code and opencode can read
-> and write your memories over MCP. Storage is hybrid semantic + keyword
-> search, strictly per user. Raw text submitted to `POST /v1/memories` is
-> split into durable facts that supersede anything they contradict, a
-> finished session can be distilled down to what outlives it, and a
-> nightly job merges duplicates, retires what has expired and demotes
-> what nobody reads — so the store stays clean instead of only growing.
-> The model-backed parts are opt-in: `[understanding].provider` defaults
-> to `none`, and everything else works offline without it.
+```
+                    ┌──────────────┐
+Claude Code ─MCP──▶ │              │  extract → reconcile → store
+opencode ────MCP──▶ │  RecordAgent │  recall: vector + BM25, fused
+Hermes ─────REST──▶ │    daemon    │  nightly: merge, decay, expire
+LangChain ──SDK───▶ │              │
+                    └──────────────┘
+                       SQLite + local ONNX embeddings
+                       no external services required
+```
 
-## Prerequisites
-
-**Docker only.** All development happens in containers; you don't need a
-local Rust toolchain.
-
-## Quickstart
+## 90-second quickstart
 
 ```bash
-git clone <repo-url> recordagent && cd recordagent
-just dev
+docker run -d --name recordagent -p 7070:7070 \
+  -v recordagent-data:/data \
+  -e RECORDAGENT_AUTH__MODE=none \
+  ghcr.io/alexromer0/recordagent
 ```
 
-This builds the dev image (matching your host UID/GID so bind-mounted files
-stay yours, not root's), starts the daemon with auto-rebuild on file
-change, and publishes it on `localhost:7070`.
+`AUTH__MODE=none` makes every request the built-in `default` user — fine
+on a laptop, and one less step for a first look. [Turn it on](docs/configuration.md#authentication)
+before anything else can reach the port.
+
+Store something:
 
 ```bash
-curl localhost:7070/healthz   # {"status":"ok"}
-curl localhost:7070/version   # {"version":"0.1.0","git_sha":"..."}
+curl -X POST localhost:7070/v1/memories:direct -H 'Content-Type: application/json' \
+  -d '{"content": "User forbids barrel files / index.ts re-exports",
+       "category": "preference.coding"}'
 ```
 
-Edit any file under `src/`; `cargo-watch` rebuilds and restarts the daemon
-automatically.
-
-### Create a user and an API key
-
-Every `/v1` route requires a key. Keys are issued from the CLI — there is
-deliberately no HTTP endpoint that hands them out.
-
-With `just dev` still running, in a second terminal:
+Then ask a question that shares almost none of its words:
 
 ```bash
-alias ra='docker compose run --rm dev cargo run -q --bin recordagent --'
-
-ra user add alex --email alex@example.com
-ra key issue --user alex --scopes read,write --name laptop
-```
-
-(The CLI runs in its own container but shares the daemon's database
-through the `data` volume, so a key issued here works against the server
-already running.)
-
-```
-API key created for alex (name: laptop, scopes: read,write)
-
-  ra_live_b99f884ae92dd2318af8929b09018970a53acc6c
-
-This is the only time this key is shown. Store it now.
-```
-
-Only a hash of the key is stored, so a lost key can be replaced but never
-recovered. Use it as a bearer token:
-
-```bash
-curl -H "Authorization: Bearer ra_live_..." localhost:7070/v1/ping
-# {"user":"alex","scopes":["read","write"]}
-
-curl localhost:7070/v1/ping
-# 401 {"error":{"code":"unauthorized","message":"invalid API key"}}
-```
-
-### Save and recall
-
-```bash
-curl -X POST localhost:7070/v1/memories:direct \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
-    "content": "User forbids barrel files / index.ts re-exports",
-    "category": "preference.coding", "tags": ["typescript"]
-  }'
-
-curl -X POST localhost:7070/v1/memories/search \
-  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+curl -X POST localhost:7070/v1/memories/search -H 'Content-Type: application/json' \
   -d '{"query": "how should I structure my typescript imports?"}'
 ```
 
@@ -111,27 +62,17 @@ curl -X POST localhost:7070/v1/memories/search \
   "matched": {"vector_rank": 1, "bm25_rank": 2}}], "took_ms": 9}
 ```
 
-The question shares almost no words with the memory — that's the vector
-leg. Ask for `useQuery` and the keyword leg finds the literal token a
-vector would blur into its neighbours. Both run on every search and their
-rankings are fused.
+That's the semantic leg. Search for `useQuery` and the keyword leg finds
+the literal token a vector would blur into its neighbours. Both run on
+every query and their rankings are fused.
 
-Nothing left the machine: embeddings are computed in-process by a local
+**Nothing left the machine.** Embeddings are computed in-process by an
 ONNX model baked into the image.
 
-Export everything you've stored, any time:
+### Point Claude Code at it
 
-```bash
-curl "localhost:7070/v1/memories/export" -H "Authorization: Bearer $KEY"
-```
-
-See [docs/api.md](docs/api.md) for the full surface.
-
-### Connect your agent
-
-Claude Code, opencode and any other MCP client talk to the same store:
-
-```json
+```jsonc
+// .mcp.json
 {
   "mcpServers": {
     "recordagent": {
@@ -151,51 +92,200 @@ And in a **new** session, in a **different** project:
 
 > How should I structure imports here?
 
-It recalls the preference without being told. Three tools
-(`memory_save`, `memory_recall`, `memory_forget`) plus a
-`memory://profile` resource that gives an agent your standing
-preferences before it asks anything.
+It recalls the preference without being told.
 
-See [docs/mcp.md](docs/mcp.md) and the
-[Claude Code](docs/integrations/claude-code.md) /
-[opencode](docs/integrations/opencode.md) recipes.
+Recipes: [Claude Code](docs/integrations/claude-code.md) ·
+[opencode](docs/integrations/opencode.md) ·
+[Hermes](docs/integrations/hermes.md) ·
+[LangChain](docs/integrations/langchain.md) ·
+[any REST client](docs/integrations/custom-agents.md)
 
-Other key commands:
+### Or install the binary
 
 ```bash
-ra key list --user alex      # prefixes, scopes, last used, status
-ra key revoke b99f884a       # revoke by prefix (the visible half)
-ra user list
+curl -fsSL https://raw.githubusercontent.com/alexromer0/recordagent/main/install.sh | sh
+recordagent init && recordagent serve
 ```
 
-See [docs/api.md](docs/api.md) for the HTTP surface and
-[docs/security.md](docs/security.md) for how isolation is enforced.
+### Or from Python
 
-Don't have `just`? Run the underlying commands directly:
-`docker compose up dev`, `docker compose run --rm dev cargo test`, etc. —
-see [justfile](justfile).
+```bash
+pip install recordagent
+```
 
-## Common commands
+```python
+from recordagent import Client
 
-| Command | What it does |
+ra = Client(api_key="ra_live_…")
+ra.save("We moved the backend to Hetzner; fly.io got too expensive")
+
+for hit in ra.search("where do we deploy?"):
+    print(hit.content)
+```
+
+[Full SDK reference](docs/sdk-python.md).
+
+## What it does
+
+| | |
 |---|---|
-| `just dev` | Start the daemon with auto-rebuild |
-| `just check` | fmt --check + clippy -D warnings + boundary script + tests, in Docker |
-| `just test` | Run the test suite in Docker |
-| `just fmt` | Format the code |
-| `just llm` | Start the optional local Ollama profile, for zero-egress understanding |
-| `just docker-build` | Build the release image (`docker/Dockerfile`) |
+| **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25), fused by reciprocal rank. Paraphrases *and* exact identifiers. |
+| **Understands what it stores** | Raw text in, atomic labelled memories out. One sentence with two unrelated facts becomes two separately recallable memories. |
+| **Resolves contradictions** | "We moved to Hetzner" supersedes "we deploy on Fly.io" — the old one is retained for audit, gone from recall. |
+| **Session distillation** | Hand over a finished session; keep the two or three things that outlive it. |
+| **Stays clean over time** | A nightly job merges duplicates, retires expired memories, and demotes what nobody reads. |
+| **Strict per-user isolation** | Enforced by the type system, not by remembering to write `WHERE user_id`. |
+| **Works offline** | Embeddings, storage and search need no external service. LLM understanding is opt-in. |
+| **Yours** | SQLite on your disk. `GET /v1/memories/export` any time. Apache-2.0. |
 
-A local-toolchain contributor can run the same checks without Docker via
-the `*-native` recipes (`just check-native`, `just test-native`, ...).
+## Performance
+
+Measured on the release image — see [docs/performance.md](docs/performance.md)
+for methodology, hardware and the raw numbers.
+
+| Corpus | Recall p50 | Recall p95 |
+|---|---|---|
+| 2,000 memories | 26 ms | 34 ms |
+| 20,000 memories | 24 ms | 36 ms |
+| 100,000 memories | 70 ms | 83 ms |
+
+Ingest acknowledgement is 4.5 ms at p95 and stays flat at 100k — the
+pipeline runs off the request path. Cold start is ~300 ms; idle RSS is
+~190 MiB, most of it the resident ONNX model.
+
+Recall is flat from 2k to 20k, so at the scale anyone actually reaches it
+is effectively instant. It rises to 83 ms at 100k, which **misses the
+50 ms target** the project set for itself. That, the two other missed
+targets, and the fact that the 1M run and the 24-hour soak were never
+executed are all written up in [docs/performance.md](docs/performance.md)
+rather than left out.
+
+Measured on Docker Desktop / Apple Silicon, which is the pessimistic
+runtime — a VM with a virtualised filesystem, for a workload dominated by
+SQLite writes and ONNX inference.
+
+## Your data stays yours
+
+**Nothing leaves the machine by default.** `[understanding].provider`
+defaults to `none`: embeddings, storage, indexing and search are all
+local, and no network call happens at all. Configuring a provider is what
+turns on extraction and reconciliation — an explicit, reversible choice,
+and the only thing that ever sends your memories anywhere.
+
+**Isolation is a compile-time property.** Every repository method takes a
+`UserContext`, and a `UserContext` cannot be constructed outside the
+`identity` context — so reaching another user's memories does not
+typecheck. A grep in CI guards the constructors, and a cross-tenant test
+suite has grown with every phase since Phase 1.
+
+**Keys are argon2 hashes.** A lost key can be replaced, never recovered.
+Deleting is soft by default, so "what happened to that memory?" stays
+answerable in the audit trail.
+
+Details, plus the threat model: [docs/security.md](docs/security.md).
 
 ## Configuration
 
-See [docs/configuration.md](docs/configuration.md).
+Settings come from three layers, each overriding the one before:
+
+**defaults → `recordagent.toml` → `RECORDAGENT_*` environment variables**
+
+So an env var always wins over the file, and the file always wins over the
+built-in defaults. [`recordagent.example.toml`](recordagent.example.toml)
+lists every key with its default and a comment; copy it (or run
+`recordagent init`) and change only what you need.
+
+**The file is read only when you point at it** — with `--config PATH`, or
+by setting `RECORDAGENT_CONFIG=PATH`. There is no automatic discovery:
+`recordagent serve` on its own uses defaults + env and *ignores* a
+`recordagent.toml` sitting next to it. This trips people up, so it is
+worth saying plainly:
+
+```bash
+recordagent serve  --config recordagent.toml     # bare metal
+recordagent config --config recordagent.toml     # print what that resolves to
+
+# …or point the whole CLI at one file, no --config to repeat:
+export RECORDAGENT_CONFIG=recordagent.toml
+recordagent serve
+recordagent reindex
+```
+
+`recordagent config` (or `make config`) prints the **effective**
+configuration — which embeddings and understanding provider is selected,
+the models, endpoints, MCP transports and storage path — after all three
+layers are merged. It is the fastest way to confirm your file is actually
+being used. It prints no secrets.
+
+### With Docker / the Makefile
+
+The dev daemon (`make up`) and `make config` both read `./recordagent.toml`
+from the repo (it is bind-mounted into the container), so what `make
+config` prints is what the running daemon uses. Edit the file, then:
+
+```bash
+make config      # confirm the providers you set are the ones in effect
+make restart     # apply them to the running daemon
+```
+
+The container also sets a few `RECORDAGENT_*` env vars of its own
+(`STORAGE__PATH=/data`, `EMBEDDINGS__CACHE_DIR=/models`). Because env wins,
+those paths override whatever the file says — which is intended, so data
+lands on the Docker volume regardless of the file.
+
+### API keys never live in the file
+
+Provider keys are supplied through the **environment**, and the file only
+names the variable that holds one:
+
+```toml
+[embeddings]
+provider    = "gemini"
+model       = "text-embedding-004"
+api_key_env = "GEMINI_API_KEY"   # the NAME of an env var — not the key itself
+
+[understanding]                  # the reasoning provider
+provider    = "gemini"           # a preset over the OpenAI-compat protocol
+model       = "gemini-2.0-flash"
+api_key_env = "GEMINI_API_KEY"
+```
+
+Then put the actual key in the environment (a `.env` file next to
+`docker-compose.yml` is auto-loaded by Compose; for bare metal, export it):
+
+```bash
+# .env
+GEMINI_API_KEY=AIza…
+```
+
+Pasting the key straight into `api_key_env` does **not** work — the daemon
+reads it as the name of a variable to look up, finds nothing, and behaves
+as if no key were set. `recordagent config` shows `GEMINI_API_KEY (NOT SET)`
+when the named variable is missing, which is the quickest way to catch this.
+
+Full reference: [docs/configuration.md](docs/configuration.md).
+
+## Docs
+
+| | |
+|---|---|
+| [api.md](docs/api.md) | Every REST endpoint and field |
+| [mcp.md](docs/mcp.md) | MCP tools and the `memory://profile` resource |
+| [configuration.md](docs/configuration.md) | Every config key |
+| [sdk-python.md](docs/sdk-python.md) | The Python client |
+| [security.md](docs/security.md) | Isolation guarantees and threat model |
+| [performance.md](docs/performance.md) | Benchmarks and how they were run |
+| [architecture.md](docs/architecture.md) | Bounded contexts and layer rules |
+| [evaluation.md](docs/evaluation.md) | How retrieval quality is measured |
+| [CHANGELOG.md](docs/CHANGELOG.md) | What landed, per phase |
 
 ## Status
 
-| Phase | Scope | Status |
+`v0.1.0` — a release candidate. Used daily by its author since Phase 3;
+the API is stable enough to build on, and the storage format has migrated
+cleanly across five phases.
+
+| Phase | Scope | |
 |---|---|---|
 | 0 — Foundation | Docker dev env, config, HTTP skeleton, CI | ✅ |
 | 1 — Identity | Users, API keys, per-user isolation | ✅ |
@@ -203,60 +293,42 @@ See [docs/configuration.md](docs/configuration.md).
 | 3 — MCP server | Claude Code / opencode integration | ✅ |
 | 4 — Understanding | Extraction, labeling, reconciliation | ✅ |
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ✅ |
-| 6 — Release | SDK, docs, packaging | ⬜ |
+| 6 — Release | SDK, docs, packaging | ✅ |
 
-## Architecture
+Not yet: a web dashboard, Postgres/Qdrant backends, or the graph layer.
+See [project-plan.md](project-plan.md) for where it is going.
 
-Bounded contexts, each a vertical slice of `domain` / `application` /
-`infrastructure` — see [docs/architecture.md](docs/architecture.md) and
-[implementation-plan.md §2](implementation-plan.md#2-architecture) for the
-full boundary rules.
-
-```
-identity        users, API keys, authentication, UserContext
-memories        storing, indexing, searching, exporting memories
-understanding   LLM pipeline: extract → reconcile → label
-providers       concrete LLM/embedding implementations
-consolidation   background jobs: dedup/merge, decay, distillation, profile
-shared          shared kernel: ids, error type, clock
-```
-
-The target end-state (most of this arrives in later phases — see the
-status table above for what's real today):
-
-```
-                                ┌────────────────────────────────────────────┐
-  Claude Code ── MCP(stdio) ──▶ │                RECORDAGENT DAEMON          │
-  opencode ──── MCP(http) ────▶ │  ┌──────────┐  ┌──────────────────────┐    │
-  Hermes ────── REST ─────────▶ │  │ API layer│  │  Memory Engine       │    │
-  LangChain ─── REST/SDK ─────▶ │  │ axum+rmcp│─▶│  ingest → understand │    │
-                                │  │ auth mw  │  │  → label → store     │    │
-                                │  └──────────┘  │  retrieve: hybrid    │    │
-                                │        │       │  (vector+BM25+filter)│    │
-                                │        ▼       └──────┬───────────────┘    │
-                                │  ┌──────────┐         │   ┌─────────────┐  │
-                                │  │ Job queue│◀────────┘   │ Provider hub│  │
-                                │  │ (async   │             │ anthropic / │  │
-                                │  │  ingest, │────────────▶│ openai-compat│ │
-                                │  │  consol.)│             │ ollama /    │  │
-                                │  └──────────┘             │ onnx-local  │  │
-                                │        │                  └─────────────┘  │
-                                │        ▼                                   │
-                                │  MemoryStore trait                         │
-                                │  ├─ embedded: SQLite + sqlite-vec + tantivy│
-                                │  └─ scale:    Postgres+pgvector | Qdrant   │
-                                └────────────────────────────────────────────┘
-```
+> The project name is a working title — see
+> [docs/name-check.md](docs/name-check.md). The repo may move before
+> public launch.
 
 ## Contributing
 
-Retrieval quality has its own gate — `just eval` scores recall against a
-committed baseline, because no unit test would notice a change that made
-ranking worse. See [docs/evaluation.md](docs/evaluation.md).
+**Docker is the only prerequisite.** No local Rust toolchain needed.
 
-See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) (Docker-only dev flow,
-boundary rules).
+```bash
+git clone <repo-url> recordagent && cd recordagent
+just dev          # daemon with auto-rebuild on localhost:7070
+just check        # fmt + clippy -D warnings + boundary script + tests
+just sdk-test     # the Python SDK against a real daemon
+just eval         # retrieval quality against the committed baseline
+```
+
+That last one matters more than it looks: retrieval quality emerges from
+the embedder, the tokenizer, the RRF constant and the recency multiplier,
+and a one-line change to any of them can make recall worse with every
+unit test still green. `just eval` is the only check that would notice.
+
+Prefer `make`? A `Makefile` wraps the same dev commands and adds the
+operational ones — starting the daemon, creating users, issuing keys,
+running consolidation. `make help` lists them; `make quickstart` brings
+the daemon up and prints a ready-to-use API key.
+
+Architecture is bounded contexts, each a vertical slice of `domain` /
+`application` / `infrastructure`, with the layer rules enforced by a CI
+script. Read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) and
+[docs/architecture.md](docs/architecture.md) before a first PR.
 
 ## License
 
-Apache-2.0.
+Apache-2.0. See [LICENSE](LICENSE).

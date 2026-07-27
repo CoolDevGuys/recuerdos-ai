@@ -12,7 +12,7 @@
 
 use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
 use crate::memories::domain::recall_ranker::RecallRanker;
@@ -558,11 +558,11 @@ impl FallibleEmbedder {
 }
 
 impl Embedder for FallibleEmbedder {
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, texts: &[String], task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(RaError::Internal("injected embedding failure".to_string()));
         }
-        self.inner.embed(texts)
+        self.inner.embed(texts, task)
     }
 
     fn model_id(&self) -> &str {

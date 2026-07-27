@@ -16,7 +16,38 @@ recordagent key issue --user alex --scopes read,write
 ## Configure
 
 In `opencode.json` (project) or `~/.config/opencode/opencode.json`
-(global):
+(global). There are two ways to connect; **HTTP is simpler**, especially
+for a daemon in Docker.
+
+### Option A — HTTP (recommended)
+
+Connect straight to the daemon's `/mcp` endpoint with the key as a bearer
+token. Nothing but the daemon has to be installed — no `recordagent`
+binary on your machine, no `docker exec`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "recordagent": {
+      "type": "remote",
+      "url": "http://localhost:7070/mcp",
+      "enabled": true,
+      "headers": { "Authorization": "Bearer ra_live_…" }
+    }
+  }
+}
+```
+
+Memories saved this way are recorded with the source `mcp-http` (the HTTP
+transport can't tell one client from another). The endpoint accepts only
+loopback hosts by default — fine for a local daemon; behind a proxy on a
+real hostname, terminate there.
+
+### Option B — stdio shim
+
+If you'd rather spawn a local process (or your daemon is only reachable
+by a command), point opencode at `recordagent mcp`:
 
 ```json
 {
@@ -26,19 +57,25 @@ In `opencode.json` (project) or `~/.config/opencode/opencode.json`
       "type": "local",
       "command": ["recordagent", "mcp", "--client", "opencode"],
       "enabled": true,
-      "environment": {
-        "RECORDAGENT_API_KEY": "ra_live_…"
-      }
+      "environment": { "RECORDAGENT_API_KEY": "ra_live_…" }
     }
   }
 }
 ```
 
-`--client opencode` is recorded as the source of memories saved from
-here, so the audit trail distinguishes them from other clients.
+`--client opencode` is recorded as the source, so the audit trail
+distinguishes these writes. Add `"RECORDAGENT_URL"` to `environment` if
+the daemon is not on `localhost:7070`.
 
-Add `"RECORDAGENT_URL"` to `environment` if the daemon is not on
-`localhost:7070`.
+If the `recordagent` binary lives only in a Docker container, spawn the
+shim there instead:
+
+```json
+"command": ["docker", "exec", "-e", "RECORDAGENT_API_KEY", "-i", "recordagent", "recordagent", "mcp", "--client", "opencode"]
+```
+
+(with the key in `environment`, and the daemon container named
+`recordagent`). Option A avoids all of this.
 
 ## Verify
 

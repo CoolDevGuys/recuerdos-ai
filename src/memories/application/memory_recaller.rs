@@ -17,7 +17,7 @@
 //! recall becomes a common path rather than an occasional one.
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
@@ -60,7 +60,9 @@ impl MemoryRecaller {
         let depth = query.candidate_depth();
         let now = self.clock.now();
 
-        let embedding = self.embedder.embed_one(query.text())?;
+        let embedding = self
+            .embedder
+            .embed_one(query.text(), EmbeddingTask::Query)?;
         let vector_hits = RankedIds(self.vectors.search(context, &embedding, depth)?);
 
         // A keyword failure degrades the result rather than failing the

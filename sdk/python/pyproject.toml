@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "recordagent"
+version = "0.1.0"
+description = "Python client for RecordAgent, a self-hostable long-term memory service for AI agents."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "RecordAgent contributors" }]
+keywords = ["memory", "agents", "llm", "rag", "mcp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+
+# Deliberately two. Everything else an agent framework needs is either
+# already in its own dependency tree or belongs in an extra — an SDK that
+# drags LangChain in for everyone is not a thin client.
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.11",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/alexromer0/recordagent"
+Documentation = "https://github.com/alexromer0/recordagent/blob/main/docs/sdk-python.md"
+Source = "https://github.com/alexromer0/recordagent"
+Changelog = "https://github.com/alexromer0/recordagent/blob/main/docs/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recordagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Integration tests need a running daemon and are opt-in, so a plain
+# `pytest` on a laptop with no Docker still passes rather than erroring.
+markers = ["integration: needs a running RecordAgent daemon"]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

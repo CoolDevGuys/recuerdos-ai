@@ -242,6 +242,29 @@ jobs:
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" .ci-cache
 
+  # Lint, type-check and test the Python SDK, including its integration
+  # suite against a daemon running the release image.
+  #
+  # Its own job because it needs no Rust toolchain at all — only Docker —
+  # and because an SDK failure should read as "the client is wrong", not
+  # as a server test failure.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The integration suite runs against `docker/Dockerfile` — the same
+      # artifact users get — so a client that works only against a dev
+      # build cannot pass here.
+      - name: Lint, type-check and test the SDK
+        run: docker compose --profile sdk run --rm sdk
+
+      - name: Daemon logs on failure
+        if: failure()
+        run: docker compose --profile sdk logs sdk-daemon 2>&1 | tail -50 || true
+
   # Build the release image and smoke-test it — proves docker/Dockerfile
   # actually produces a working, non-root, healthchecked daemon, not just
   # that it compiles.

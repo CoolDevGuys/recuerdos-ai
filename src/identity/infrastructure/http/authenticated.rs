@@ -201,6 +201,7 @@ mod tests {
             understanding,
             consolidation,
             auth_mode,
+            mcp_http: false,
         };
 
         let router = Router::new()

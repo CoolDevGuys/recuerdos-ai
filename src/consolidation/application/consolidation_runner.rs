@@ -50,7 +50,7 @@ use crate::consolidation::domain::similarity::cosine;
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
 use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::blocking::blocking;
@@ -262,7 +262,7 @@ impl ConsolidationRunner {
             .iter()
             .map(|memory| memory.content().to_string())
             .collect();
-        let vectors = self.embedder.embed(&texts)?;
+        let vectors = self.embedder.embed(&texts, EmbeddingTask::Document)?;
 
         let mut builder = ClusterBuilder::new();
         for (left, left_vector) in vectors.iter().enumerate() {

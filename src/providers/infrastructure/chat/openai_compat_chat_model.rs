@@ -26,6 +26,17 @@ use std::time::Duration;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
+/// Google's OpenAI-compatibility endpoint. `[understanding].provider =
+/// "gemini"` is a preset that points this same client here: Gemini speaks
+/// the chat-completions protocol, so — unlike embeddings, where a native
+/// client is needed for `taskType` — no separate reasoning client is
+/// warranted. It exposes only the standard features this client uses
+/// (`messages`, `max_tokens`, `response_format`), and the schema is
+/// repeated in the prompt with a repair pass besides, so structured
+/// extraction holds up regardless of how faithfully it honours
+/// `response_format`.
+pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+
 pub struct OpenAiCompatChatModel {
     client: reqwest::Client,
     base_url: String,
