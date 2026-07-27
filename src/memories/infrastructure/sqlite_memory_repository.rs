@@ -66,13 +66,7 @@ impl SqliteMemoryRepository {
 
         if let Some((id, model, dimensions)) = existing {
             if model != self.embedding_model || dimensions as usize != self.dimensions {
-                return Err(RaError::Validation(format!(
-                    "this collection was built with embedding model {model:?} ({dimensions} \
-                     dimensions) but the service is configured for {:?} ({}). Vectors from \
-                     different models are not comparable — either restore the previous \
-                     [embeddings] settings or re-index.",
-                    self.embedding_model, self.dimensions
-                )));
+                return Err(self.pin_mismatch(&model, dimensions));
             }
             return Ok(id);
         }
@@ -94,6 +88,53 @@ impl SqliteMemoryRepository {
             .map_err(|e| map_sqlite_error(e, "collection already exists"))?;
 
         Ok(id)
+    }
+
+    /// The actionable error for a store whose embedding pin no longer
+    /// matches the configured model — shared by the lazy write-path guard
+    /// ([`collection_id`](Self::collection_id)) and the startup check
+    /// ([`verify_pin`](Self::verify_pin)) so both say the same thing.
+    fn pin_mismatch(&self, stored_model: &str, stored_dimensions: i64) -> RaError {
+        RaError::Validation(format!(
+            "this store was built with embedding model {stored_model:?} ({stored_dimensions} \
+             dimensions) but the service is configured for {:?} ({}). Vectors from different \
+             models are not comparable. Either restore the previous [embeddings] settings, or \
+             run `recordagent reindex` (with the daemon stopped) to re-embed every memory \
+             under the new model in place.",
+            self.embedding_model, self.dimensions
+        ))
+    }
+
+    /// Fails fast at startup if any collection in the store was built with
+    /// a different embedding model or dimensionality than the service is
+    /// now configured for.
+    ///
+    /// The per-collection guard in [`collection_id`](Self::collection_id)
+    /// only runs on the write path, so without this a provider change
+    /// surfaces much later as a raw dimension-mismatch from sqlite-vec on
+    /// the first recall. Checked here, the daemon refuses to start and
+    /// names the fix instead.
+    pub fn verify_pin(&self) -> Result<()> {
+        self.database.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT DISTINCT embedding_model, dimensions FROM collections")
+                .map_err(|e| map_sqlite_error(e, "reading the embedding pin"))?;
+
+            let pins = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| map_sqlite_error(e, "reading the embedding pin"))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| map_sqlite_error(e, "reading the embedding pin"))?;
+
+            for (model, dimensions) in pins {
+                if model != self.embedding_model || dimensions as usize != self.dimensions {
+                    return Err(self.pin_mismatch(&model, dimensions));
+                }
+            }
+            Ok(())
+        })
     }
 
     fn write_audit(

@@ -1,6 +1,6 @@
 # MCP server
 
-**Status: Phase 4.** Three tools and one resource, over stdio.
+Four tools and one resource, over **two transports** — stdio and HTTP.
 
 RecordAgent speaks the [Model Context Protocol](https://modelcontextprotocol.io),
 so any MCP client — Claude Code, opencode, Hermes Agent, MCP Inspector —
@@ -8,36 +8,55 @@ reads and writes the same memory store.
 
 ## Setup
 
-MCP clients spawn a server process and talk to it over stdin/stdout. That
-process is a **shim**: it forwards to a running RecordAgent daemon.
+Either way you need the daemon running and an API key:
+
+```bash
+recordagent serve &                 # leave it running
+recordagent user add alex
+recordagent key issue --user alex --scopes read,write
+```
+
+### Streamable HTTP (`/mcp`) — no local binary
+
+The daemon serves MCP directly at `/mcp`, so a client connects over the
+network with the key as a bearer token. This is the easiest path for a
+**containerised daemon**: nothing but the daemon has to be installed, and
+there is no `docker exec` wrapper.
+
+```
+opencode ──HTTP /mcp──▶ recordagent serve ──▶ SQLite
+```
+
+Point the client at `http://<daemon>:7070/mcp` with
+`Authorization: Bearer ra_live_…`. It is enabled by default; turn it off
+with `[server].mcp.http = false`.
+
+The endpoint honours the MCP spec's DNS-rebinding guard, accepting only
+loopback `Host` values (`localhost`, `127.0.0.1`, `::1`) — which covers a
+local editor. Behind a reverse proxy on a real hostname, terminate there.
+
+### stdio (`recordagent mcp`) — a per-session shim
+
+MCP clients can instead spawn a server process and talk to it over
+stdin/stdout. That process is a **shim**: it forwards to the running
+daemon over the same HTTP API.
 
 ```
 Claude Code ──stdio──▶ recordagent mcp ──HTTP──▶ recordagent serve ──▶ SQLite
                        (one per session)         (one, shared)
 ```
 
-So you need two things: the daemon running, and an API key in the
-client's config.
-
-```bash
-# 1. the daemon (leave it running)
-recordagent serve
-
-# 2. a key for this client
-recordagent user add alex
-recordagent key issue --user alex --scopes read,write
-```
-
-Then point the client at `recordagent mcp` with that key in its
-environment:
-
 | Variable | Required | Default |
 |---|---|---|
 | `RECORDAGENT_API_KEY` | yes | — |
 | `RECORDAGENT_URL` | no | `http://127.0.0.1:7070` |
 
+Use this when the client only supports local (stdio) MCP servers, or when
+the `recordagent` binary is already on the client's machine.
+
 See [integrations/claude-code.md](integrations/claude-code.md) and
-[integrations/opencode.md](integrations/opencode.md) for exact config.
+[integrations/opencode.md](integrations/opencode.md) for exact config for
+each transport.
 
 ### Why a shim rather than a self-contained server
 
@@ -263,20 +282,28 @@ carries nothing else.
 `memory_save` and `memory_forget` need `write`; `memory_recall` and the
 profile need `read`. `session_distill` needs `write`.
 
-## Not yet implemented
+## Verifying the HTTP transport by hand
 
-**Streamable HTTP (`/mcp` on the daemon).** Only stdio ships today.
-rmcp's session factory cannot see request headers, so per-user
-authentication needs a per-call path that would complicate keeping the
-tool definitions identical across transports — and no target client
-requires it: Claude Code, opencode and Hermes all speak stdio. The
-`MemoryToolbox` trait exists so adding it later is one new
-implementation rather than a second copy of the tools.
+The streamable-HTTP endpoint is plain JSON-RPC over POST, so `curl` can
+drive it. `initialize` returns an `Mcp-Session-Id` header you pass to
+every later call:
+
+```bash
+KEY=ra_live_…
+BASE=http://localhost:7070
+H='-H "Authorization: Bearer '$KEY'" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream"'
+
+# initialize — note the Mcp-Session-Id response header
+curl -si -X POST $BASE/mcp $H -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+# then, with SID=<that header>:
+curl -s -X POST $BASE/mcp $H -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+curl -s -X POST $BASE/mcp $H -H "Mcp-Session-Id: $SID" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+A wrong key gets an authentication error from the tool rather than data —
+the endpoint forwards to the same REST auth as everything else.
+
+## Not yet implemented
 
 **Prompts.** No MCP prompts are exposed. The server's `instructions`
 field carries the "read the profile first" guidance instead.
-
-**`session_distill`.** Submitting a whole transcript for distillation is
-Phase 5 work. Until then, a session-end hook can POST the summary to
-[`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content), which
-runs the same extraction pipeline over it.

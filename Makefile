@@ -16,7 +16,15 @@ COMPOSE := docker compose
 # starts a throwaway container that mounts the same `data` volume the
 # `up` daemon uses, so a key issued here is visible to the running server
 # (docker-compose.yml sets RECORDAGENT_STORAGE__PATH=/data on both).
-CLI := $(COMPOSE) run --rm dev cargo run -q --bin recordagent --
+#
+# `-e RECORDAGENT_CONFIG=$(CONFIG)` makes every CLI command read the same
+# recordagent.toml the daemon reads, so `make reindex`, `make consolidate`
+# etc. honour your configured provider instead of falling back to defaults.
+# Scoped to `run` (not the compose `environment:` block) so it never
+# reaches `docker compose run ... cargo test`, which must stay env-only.
+# Deferred (`=` not `:=`) so $(CONFIG), defined further down, is in scope
+# when a recipe expands this.
+CLI = $(COMPOSE) run --rm -e RECORDAGENT_CONFIG=$(CONFIG) dev cargo run -q --bin recordagent --
 
 # Defaults, overridable on the command line: `make key-issue HANDLE=sam`.
 # HANDLE rather than USER on purpose — `$(USER)` in a Makefile expands to
@@ -26,6 +34,11 @@ HANDLE ?= alex
 SCOPES ?= read,write
 NAME   ?= default
 PREFIX ?=
+# The config file the CLI reads, relative to the repo (bind-mounted at
+# /app in the container). The compose daemon reads the same path, so
+# `make config` reflects what the running daemon uses. A missing file is
+# not an error — you fall back to defaults + RECORDAGENT_* env.
+CONFIG ?= recordagent.toml
 
 .DEFAULT_GOAL := help
 
@@ -87,6 +100,10 @@ quickstart: up ## Start the daemon, create a user, and issue a key in one go
 init: ## Write a default recordagent.toml and data dir
 	$(CLI) init
 
+.PHONY: config
+config: ## Show the resolved config (providers, models, transports) — no secrets
+	$(CLI) config
+
 .PHONY: migrate
 migrate: ## Apply pending SQL migrations (they also run automatically on 'up')
 	@echo "migrations run at startup; forcing them now by opening the database…"
@@ -95,6 +112,10 @@ migrate: ## Apply pending SQL migrations (they also run automatically on 'up')
 .PHONY: warm
 warm: ## Download the embedding model into the shared volume
 	$(CLI) warm-models
+
+.PHONY: reindex
+reindex: ## Re-embed every memory after changing the embedding model (stop the daemon first)
+	$(CLI) reindex
 
 # ---------------------------------------------------------------------------
 ##@ Users & keys

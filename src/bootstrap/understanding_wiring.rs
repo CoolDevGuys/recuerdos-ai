@@ -55,14 +55,26 @@ pub fn build_chat_model(config: &AppConfig) -> Result<Option<Arc<dyn ChatModel>>
 
         "anthropic" => Arc::new(AnthropicChatModel::new(
             &understanding.model,
-            transport::key_from_env(&understanding.api_key_env)?,
+            transport::key_from_env(&understanding.api_key_env, "understanding")?,
             &base_url(anthropic_chat_model::DEFAULT_BASE_URL),
         )?),
 
         "openai-compat" => Arc::new(OpenAiCompatChatModel::new(
             &understanding.model,
-            transport::key_from_env(&understanding.api_key_env)?,
+            transport::key_from_env(&understanding.api_key_env, "understanding")?,
             &base_url(openai_compat_chat_model::DEFAULT_BASE_URL),
+        )?),
+
+        // Gemini for reasoning is the OpenAI-compat client pointed at
+        // Google's endpoint — Gemini speaks that protocol, and (unlike
+        // embeddings, which need a native client for `taskType`) the chat
+        // path uses nothing the compat endpoint hides. A preset rather than
+        // a second client: same code, one fewer thing to maintain, and the
+        // config reads the same as `[embeddings].provider = "gemini"`.
+        "gemini" => Arc::new(OpenAiCompatChatModel::new(
+            &understanding.model,
+            transport::key_from_env(&understanding.api_key_env, "understanding")?,
+            &base_url(openai_compat_chat_model::GEMINI_BASE_URL),
         )?),
 
         // No key: Ollama is unauthenticated by design.
@@ -199,6 +211,35 @@ mod tests {
             .expect("ollama must build without an API key")
             .expect("a model");
         assert_eq!(model.model_id(), "some-model");
+    }
+
+    #[test]
+    fn gemini_reasoning_builds_over_the_openai_compatible_protocol() {
+        // `provider = "gemini"` needs no native chat client: it is a preset
+        // over the OpenAI-compat client with Google's endpoint as the
+        // default base_url. A distinct env var (not the shared test key) so
+        // this cannot race the missing-key test that removes that one.
+        //
+        // SAFETY: a variable this test uniquely owns, set and cleared here.
+        unsafe { std::env::set_var("RECORDAGENT_TEST_GEMINI_KEY", "gk-test") };
+
+        let config = AppConfig {
+            understanding: UnderstandingConfig {
+                provider: "gemini".to_string(),
+                model: "gemini-2.0-flash".to_string(),
+                api_key_env: "RECORDAGENT_TEST_GEMINI_KEY".to_string(),
+                ..UnderstandingConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        let model = build_chat_model(&config)
+            .expect("gemini must build")
+            .expect("a model, not None");
+        assert_eq!(model.model_id(), "gemini-2.0-flash");
+
+        // SAFETY: same single-threaded ownership as the set above.
+        unsafe { std::env::remove_var("RECORDAGENT_TEST_GEMINI_KEY") };
     }
 
     #[test]

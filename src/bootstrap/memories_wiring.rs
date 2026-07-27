@@ -16,7 +16,12 @@ use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
 use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
+use crate::providers::infrastructure::chat::transport;
 use crate::providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder;
+use crate::providers::infrastructure::embeddings::gemini_embedder::{self, GeminiEmbedder};
+use crate::providers::infrastructure::embeddings::remote_embedder::{
+    EmbeddingApi, OLLAMA_DEFAULT_BASE_URL, OPENAI_DEFAULT_BASE_URL, RemoteEmbedder,
+};
 use crate::shared::clock::{Clock, SystemClock};
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
@@ -77,11 +82,17 @@ impl Memories {
         database: Arc<SqliteDatabase>,
         embedder: Arc<dyn Embedder>,
     ) -> Result<Self> {
-        let repository: Arc<dyn MemoryRepository> = Arc::new(SqliteMemoryRepository::new(
+        let concrete_repository = SqliteMemoryRepository::new(
             Arc::clone(&database),
             embedder.model_id(),
             embedder.dimensions(),
-        ));
+        );
+        // Fail fast, before the vector table is opened at the new width:
+        // a store built by a different model must send the operator to
+        // `reindex` with a clear message, not surface later as a raw
+        // dimension-mismatch on the first recall.
+        concrete_repository.verify_pin()?;
+        let repository: Arc<dyn MemoryRepository> = Arc::new(concrete_repository);
         let vectors: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::open(
             Arc::clone(&database),
             embedder.dimensions(),
@@ -133,17 +144,76 @@ impl Memories {
     }
 }
 
-fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
-    match config.embeddings.provider.as_str() {
+pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
+    let embeddings = &config.embeddings;
+    let configured_base = embeddings.base_url.trim();
+    let base_url = |default: &str| {
+        if configured_base.is_empty() {
+            default.to_string()
+        } else {
+            configured_base.to_string()
+        }
+    };
+
+    // The key is optional for a remote provider: a hosted endpoint needs
+    // one, a local server (Ollama, a self-hosted vLLM) does not. An empty
+    // `api_key_env` means "send no auth"; a named-but-unset variable is a
+    // misconfiguration and stops startup.
+    let api_key = |section: &str| -> Result<Option<String>> {
+        if embeddings.api_key_env.trim().is_empty() {
+            Ok(None)
+        } else {
+            transport::key_from_env(&embeddings.api_key_env, section).map(Some)
+        }
+    };
+
+    match embeddings.provider.as_str() {
         "local" => Ok(Arc::new(FastembedEmbedder::load(
-            &config.embeddings.model,
+            &embeddings.model,
             config.model_cache_dir(),
         )?)),
-        // Remote embedding providers are Phase 4 work; refusing loudly
-        // beats starting up and failing on the first save.
+
+        // Native Gemini: its own client, so it can pass the taskType that
+        // the OpenAI-compat endpoint hides — RETRIEVAL_DOCUMENT on store,
+        // RETRIEVAL_QUERY on search — for better retrieval.
+        "gemini" => {
+            let key = api_key("embeddings")?.ok_or_else(|| {
+                RaError::Validation(
+                    "[embeddings].provider = \"gemini\" needs an API key; set \
+                     [embeddings].api_key_env to the env var holding a Google AI \
+                     Studio key"
+                        .to_string(),
+                )
+            })?;
+            Ok(Arc::new(GeminiEmbedder::load(
+                &embeddings.model,
+                &base_url(gemini_embedder::DEFAULT_BASE_URL),
+                key,
+            )?))
+        }
+
+        "openai-compat" => Ok(Arc::new(RemoteEmbedder::load(
+            EmbeddingApi::OpenAiCompat,
+            &embeddings.model,
+            &base_url(OPENAI_DEFAULT_BASE_URL),
+            api_key("embeddings")?,
+        )?)),
+
+        // Ollama is unauthenticated by design; any configured key is
+        // ignored rather than sent.
+        "ollama" => Ok(Arc::new(RemoteEmbedder::load(
+            EmbeddingApi::Ollama,
+            &embeddings.model,
+            &base_url(OLLAMA_DEFAULT_BASE_URL),
+            None,
+        )?)),
+
+        // Unreachable via `AppConfig::load`, which validates the provider
+        // name against the same list; kept as an error rather than a
+        // panic so a provider added to config but not here fails to start
+        // instead of at runtime.
         other => Err(RaError::Validation(format!(
-            "[embeddings].provider {other:?} is not implemented yet — only \"local\" \
-             works today (remote providers arrive in Phase 4)"
+            "[embeddings].provider {other:?} has no implementation"
         ))),
     }
 }

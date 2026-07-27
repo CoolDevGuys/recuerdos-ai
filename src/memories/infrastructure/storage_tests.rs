@@ -453,9 +453,65 @@ fn a_changed_embedding_model_is_refused_rather_than_silently_mixed() {
         "{message}"
     );
     assert!(
-        message.contains("re-index"),
-        "should say how to fix it: {message}"
+        message.contains("recordagent reindex"),
+        "should name the command that fixes it: {message}"
     );
+}
+
+#[test]
+fn verify_pin_catches_a_dimension_change_at_startup_not_on_the_first_recall() {
+    // The scenario behind the raw "Expected 384 dimensions but received
+    // 3072" error: a store built by one model, reopened under another of a
+    // different width. `verify_pin` must catch it up front — the recall
+    // path never runs the write-path guard, so without this the mismatch
+    // reaches sqlite-vec.
+    let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+    let identity =
+        crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+    let alex = authenticate(&identity, "alex");
+
+    // A store pinned to a 384-dim model.
+    let original = SqliteMemoryRepository::new(Arc::clone(&database), "small", 384);
+    original
+        .insert(&alex, &memory_for(&alex, "written by the small model"), "t")
+        .unwrap();
+
+    // Same store, now configured for a 3072-dim model.
+    let reconfigured = SqliteMemoryRepository::new(Arc::clone(&database), "gemini-embedding", 3072);
+    let error = reconfigured.verify_pin().unwrap_err();
+
+    assert!(matches!(error, RaError::Validation(_)), "got {error:?}");
+    let message = error.to_string();
+    assert!(
+        message.contains("384") && message.contains("3072"),
+        "{message}"
+    );
+    assert!(
+        message.contains("recordagent reindex"),
+        "should name the fix: {message}"
+    );
+}
+
+#[test]
+fn verify_pin_is_happy_with_a_fresh_store_and_a_matching_one() {
+    let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+    let identity =
+        crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+    let alex = authenticate(&identity, "alex");
+
+    let repository = SqliteMemoryRepository::new(Arc::clone(&database), "test-model", DIMENSIONS);
+    // Fresh: nothing pinned yet.
+    repository
+        .verify_pin()
+        .expect("an empty store has no pin to conflict with");
+
+    // After a write, the pin exists and still matches the same config.
+    repository
+        .insert(&alex, &memory_for(&alex, "hello"), "t")
+        .unwrap();
+    repository
+        .verify_pin()
+        .expect("the pin matches the configured model");
 }
 
 // ---- vector index ----

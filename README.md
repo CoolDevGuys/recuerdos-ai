@@ -184,6 +184,87 @@ answerable in the audit trail.
 
 Details, plus the threat model: [docs/security.md](docs/security.md).
 
+## Configuration
+
+Settings come from three layers, each overriding the one before:
+
+**defaults → `recordagent.toml` → `RECORDAGENT_*` environment variables**
+
+So an env var always wins over the file, and the file always wins over the
+built-in defaults. [`recordagent.example.toml`](recordagent.example.toml)
+lists every key with its default and a comment; copy it (or run
+`recordagent init`) and change only what you need.
+
+**The file is read only when you point at it** — with `--config PATH`, or
+by setting `RECORDAGENT_CONFIG=PATH`. There is no automatic discovery:
+`recordagent serve` on its own uses defaults + env and *ignores* a
+`recordagent.toml` sitting next to it. This trips people up, so it is
+worth saying plainly:
+
+```bash
+recordagent serve  --config recordagent.toml     # bare metal
+recordagent config --config recordagent.toml     # print what that resolves to
+
+# …or point the whole CLI at one file, no --config to repeat:
+export RECORDAGENT_CONFIG=recordagent.toml
+recordagent serve
+recordagent reindex
+```
+
+`recordagent config` (or `make config`) prints the **effective**
+configuration — which embeddings and understanding provider is selected,
+the models, endpoints, MCP transports and storage path — after all three
+layers are merged. It is the fastest way to confirm your file is actually
+being used. It prints no secrets.
+
+### With Docker / the Makefile
+
+The dev daemon (`make up`) and `make config` both read `./recordagent.toml`
+from the repo (it is bind-mounted into the container), so what `make
+config` prints is what the running daemon uses. Edit the file, then:
+
+```bash
+make config      # confirm the providers you set are the ones in effect
+make restart     # apply them to the running daemon
+```
+
+The container also sets a few `RECORDAGENT_*` env vars of its own
+(`STORAGE__PATH=/data`, `EMBEDDINGS__CACHE_DIR=/models`). Because env wins,
+those paths override whatever the file says — which is intended, so data
+lands on the Docker volume regardless of the file.
+
+### API keys never live in the file
+
+Provider keys are supplied through the **environment**, and the file only
+names the variable that holds one:
+
+```toml
+[embeddings]
+provider    = "gemini"
+model       = "text-embedding-004"
+api_key_env = "GEMINI_API_KEY"   # the NAME of an env var — not the key itself
+
+[understanding]                  # the reasoning provider
+provider    = "gemini"           # a preset over the OpenAI-compat protocol
+model       = "gemini-2.0-flash"
+api_key_env = "GEMINI_API_KEY"
+```
+
+Then put the actual key in the environment (a `.env` file next to
+`docker-compose.yml` is auto-loaded by Compose; for bare metal, export it):
+
+```bash
+# .env
+GEMINI_API_KEY=AIza…
+```
+
+Pasting the key straight into `api_key_env` does **not** work — the daemon
+reads it as the name of a variable to look up, finds nothing, and behaves
+as if no key were set. `recordagent config` shows `GEMINI_API_KEY (NOT SET)`
+when the named variable is missing, which is the quickest way to catch this.
+
+Full reference: [docs/configuration.md](docs/configuration.md).
+
 ## Docs
 
 | | |

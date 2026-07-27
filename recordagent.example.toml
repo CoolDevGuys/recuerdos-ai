@@ -9,7 +9,11 @@
 [server]
 host = "127.0.0.1"
 port = 7070
-# Which MCP transports to expose (Phase 3+).
+# MCP transports. `stdio` is the `recordagent mcp` shim (a per-client
+# process). `http` mounts the streamable-HTTP MCP endpoint at `/mcp` on
+# this daemon, so a client can connect over HTTP with a bearer token and
+# no local binary — see docs/mcp.md. `stdio` here is informational; the
+# shim is a separate command. Set `http = false` to not expose `/mcp`.
 mcp = { stdio = true, http = true }
 
 [storage]
@@ -18,13 +22,53 @@ backend = "embedded"
 path = "~/.recordagent/data"
 
 [embeddings]
-# local | openai-compat | ollama — "local" needs no external service.
+# local | gemini | openai-compat | ollama.
+#
+# "local" is the default and needs no external service: embeddings are
+# computed in-process on CPU, so the store works with no account, no key
+# and no network. The others connect an external provider — see below.
+#
+# "gemini" is a native Google client, not the OpenAI-compat shim: it
+# sends Gemini's taskType (RETRIEVAL_DOCUMENT when storing, RETRIEVAL_QUERY
+# when searching), which its embedding models are trained for and which
+# measurably improves recall. Use it over openai-compat for Gemini.
 provider = "local"
-# Pinned per collection; changing it requires the (future) `reindex` command.
+# The embedding model. For "local" this is the ONNX model name
+# (bge-small-en-v1.5). For a remote provider it is that provider's model
+# id — e.g. "text-embedding-3-small" (openai-compat) or "nomic-embed-text"
+# (ollama).
+#
+# Pinned per collection: the vector dimensions are fixed the first time a
+# user stores something, so switching model on an existing store is a
+# breaking change that requires the (future) `reindex` command. The
+# daemon refuses to open a store whose pinned model no longer matches.
 model = "bge-small-en-v1.5"
+# Where the local ONNX model files live. Ignored by the remote providers.
+cache_dir = "~/.recordagent/models"
+# --- remote providers only (gemini, openai-compat, ollama) ---
+# Override the provider's address. Empty means its usual one. Set this
+# for an OpenAI-compatible gateway (OpenRouter, Together, a local vLLM,
+# LM Studio) or an Ollama that isn't on localhost:11434. For gemini the
+# default is Google's endpoint.
+base_url = ""
+# Name of the env var holding the provider's API key — never the key
+# itself, which would end up committed. Required for gemini and for a
+# hosted openai-compat provider; leave empty for a keyless local server.
+# Ignored by ollama, which is unauthenticated.
+#
+# The model's dimensionality is discovered at startup by making one real
+# embedding request, so a wrong URL, key or model name stops the daemon
+# immediately rather than surfacing as empty recalls later.
+api_key_env = ""
+
+# Example — native Gemini embeddings (asymmetric, task-type-aware):
+#   provider    = "gemini"
+#   model       = "text-embedding-004"        # 768-dim
+#   api_key_env = "GEMINI_API_KEY"            # a Google AI Studio key
+#   # base_url defaults to Google's endpoint; leave it empty.
 
 [understanding]
-# anthropic | openai-compat | ollama | none.
+# anthropic | openai-compat | gemini | ollama | none.
 #
 # "none" is the default and means zero LLM egress: submitted content is
 # stored verbatim, with the category inferred from unambiguous phrasing
@@ -33,6 +77,12 @@ model = "bge-small-en-v1.5"
 # reconciled, so a contradiction is stored alongside what it contradicts.
 #
 # Set a provider and both of those start happening. No client changes.
+#
+# "gemini" here is a preset over the openai-compat client pointed at
+# Google's endpoint — Gemini speaks the chat-completions protocol, so
+# reasoning needs no native client (unlike [embeddings], where "gemini" is
+# a native client for taskType). Leave base_url empty and it defaults to
+# Google's OpenAI-compatible endpoint.
 provider = "none"
 model = "claude-haiku-4-5"
 # Name of the env var holding the provider API key (not the key itself).
@@ -40,8 +90,15 @@ model = "claude-haiku-4-5"
 api_key_env = "ANTHROPIC_API_KEY"
 # Override the provider's address. Empty means its usual one. Set this for
 # an OpenAI-compatible gateway (OpenRouter, Groq, a local vLLM) or an
-# Ollama that isn't on localhost:11434.
+# Ollama that isn't on localhost:11434. For "gemini" the default is
+# Google's OpenAI-compatible endpoint.
 base_url = ""
+
+# Example — Gemini for reasoning (its own OpenAI-compatible endpoint):
+#   provider    = "gemini"
+#   model       = "gemini-2.0-flash"          # verify the id you can access
+#   api_key_env = "GEMINI_API_KEY"            # a Google AI Studio key
+#   # base_url defaults to Google's OpenAI-compatible endpoint; leave empty.
 # Run the ADD/UPDATE/DELETE/NOOP reconcile pass against similar memories.
 # With this off, extraction still labels and splits, but nothing is ever
 # superseded or deleted by a model.

@@ -1,7 +1,7 @@
 //! Edits an existing memory, keeping both indexes in step.
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemoryEdit};
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::text_index::TextIndex;
@@ -59,7 +59,9 @@ impl MemoryUpdater {
         // Re-embedding is the expensive part, so it only happens when the
         // text actually changed. A tag-only edit leaves the vector valid.
         if content_changed {
-            let embedding = self.embedder.embed_one(updated.content())?;
+            let embedding = self
+                .embedder
+                .embed_one(updated.content(), EmbeddingTask::Document)?;
             self.vectors.upsert(context, updated.id(), &embedding)?;
         }
 

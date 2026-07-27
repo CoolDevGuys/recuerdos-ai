@@ -14,7 +14,7 @@
 //! all — the first `POST /v1/memories` after `docker run` should not
 //! depend on HuggingFace being reachable.
 
-use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::shared::error::{RaError, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ impl FastembedEmbedder {
 }
 
 impl Embedder for FastembedEmbedder {
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn embed(&self, texts: &[String], _task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -154,10 +154,13 @@ mod tests {
         let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
 
         let embeddings = embedder
-            .embed(&[
-                "User prefers pnpm over npm".to_string(),
-                "The deployment target is Hetzner".to_string(),
-            ])
+            .embed(
+                &[
+                    "User prefers pnpm over npm".to_string(),
+                    "The deployment target is Hetzner".to_string(),
+                ],
+                EmbeddingTask::Document,
+            )
             .unwrap();
 
         assert_eq!(embeddings.len(), 2);
@@ -173,11 +176,14 @@ mod tests {
         let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
 
         let embeddings = embedder
-            .embed(&[
-                "User prefers pnpm as their package manager".to_string(),
-                "Which package manager should I use?".to_string(),
-                "The cat sat on the mat".to_string(),
-            ])
+            .embed(
+                &[
+                    "User prefers pnpm as their package manager".to_string(),
+                    "Which package manager should I use?".to_string(),
+                    "The cat sat on the mat".to_string(),
+                ],
+                EmbeddingTask::Document,
+            )
             .unwrap();
 
         let paraphrase = cosine(&embeddings[0], &embeddings[1]);
@@ -195,8 +201,8 @@ mod tests {
         let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
         let text = vec!["User prefers pnpm".to_string()];
 
-        let first = embedder.embed(&text).unwrap();
-        let second = embedder.embed(&text).unwrap();
+        let first = embedder.embed(&text, EmbeddingTask::Document).unwrap();
+        let second = embedder.embed(&text, EmbeddingTask::Document).unwrap();
 
         assert_eq!(first, second, "the same text must embed identically");
     }
@@ -205,7 +211,12 @@ mod tests {
     #[ignore = "requires the ONNX model; run with --ignored"]
     fn an_empty_batch_is_not_an_error() {
         let embedder = FastembedEmbedder::load("bge-small-en-v1.5", model_cache_dir()).unwrap();
-        assert!(embedder.embed(&[]).unwrap().is_empty());
+        assert!(
+            embedder
+                .embed(&[], EmbeddingTask::Document)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn model_cache_dir() -> PathBuf {

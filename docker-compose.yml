@@ -1,5 +1,6 @@
 services:
   dev:
+    container_name: recordagent
     build:
       context: .
       dockerfile: docker/Dockerfile.dev
@@ -15,6 +16,8 @@ services:
       - models:/models
     ports:
       - "7070:7070"
+    env_file:
+      - .env
     environment:
       RECORDAGENT_LOG: ${RECORDAGENT_LOG:-info}
       # Container-wide so the daemon (`docker compose up dev`) and the CLI
@@ -38,7 +41,13 @@ services:
     # `docker compose run --rm dev cargo test`. Containers must listen on
     # all interfaces to be reachable through Docker's published port;
     # recordagent.toml still defaults to 127.0.0.1 for bare-metal runs.
-    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve'"]
+    #
+    # `--config recordagent.toml`: the repo is bind-mounted at /app (the
+    # working dir), so this reads the same ./recordagent.toml you edit on
+    # the host. A missing file is not an error — you fall back to defaults
+    # + the RECORDAGENT_* env above. `make config` reads the same file, so
+    # what it prints is what this daemon runs.
+    command: ["sh", "-c", "RECORDAGENT_SERVER__HOST=0.0.0.0 cargo watch -x 'run -- serve --config recordagent.toml'"]
 
   # The daemon the Python SDK's integration tests talk to. Runs the
   # release image — the same artifact users get — rather than a dev

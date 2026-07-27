@@ -5,4 +5,7 @@
 //! test concern of the `memories` use cases, so it sits with their other
 //! doubles rather than masquerading as a provider.
 
+pub mod blocking_http;
 pub mod fastembed_embedder;
+pub mod gemini_embedder;
+pub mod remote_embedder;

@@ -32,6 +32,16 @@ enum Command {
         #[arg(long, default_value = "recordagent.toml")]
         config: PathBuf,
     },
+    /// Print the resolved configuration — providers, models, transports.
+    ///
+    /// Shows the effective values after defaults, the file and
+    /// `RECORDAGENT_*` env vars are merged, so it answers "which provider
+    /// am I actually using". Prints no secrets: for an API key it shows
+    /// only the env var's name and whether it is set, never the value.
+    Config {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Serve MCP over stdio, for an MCP client to spawn.
     ///
     /// Forwards to a running daemon; set RECORDAGENT_API_KEY (and
@@ -70,6 +80,15 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Re-embed every memory under the current [embeddings] model, in place.
+    ///
+    /// Run this after changing the embedding model or provider: it lets
+    /// the store keep its memories instead of needing a fresh data
+    /// directory. Stop the daemon first — it rebuilds the vector index.
+    Reindex {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Merge duplicate memories now, instead of waiting for the timer.
     Consolidate {
         /// Report what would be merged and change nothing. Calls no
@@ -102,6 +121,7 @@ async fn main() {
     let result = match cli.command {
         Command::Serve { config } => run_serve(config.as_deref()).await,
         Command::Init { config } => run_init(&config),
+        Command::Config { config } => run_config(config.as_deref()),
         Command::Mcp { client } => run_mcp(&client).await,
         Command::Eval {
             cases,
@@ -117,6 +137,7 @@ async fn main() {
             config.as_deref(),
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
+        Command::Reindex { config } => run_reindex(config.as_deref()),
         Command::Consolidate { dry_run, config } => {
             run_consolidate(dry_run, config.as_deref()).await
         }
@@ -236,6 +257,7 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         understanding,
         consolidation,
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
+        mcp_http: config.server.mcp.http,
     };
 
     let outcome = bootstrap::server::serve(&config.server.host, config.server.port, state).await;
@@ -307,10 +329,51 @@ fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
     // the files downloaded — a truncated download would otherwise only
     // surface on the first real request.
     embedder
-        .embed(&["warm".to_string()])
+        .embed(
+            &["warm".to_string()],
+            memories::domain::embedder::EmbeddingTask::Document,
+        )
         .map_err(|e| e.to_string())?;
 
     println!("model ready ({} dimensions)", embedder.dimensions());
+    Ok(())
+}
+
+fn run_reindex(config_path: Option<&Path>) -> Result<(), String> {
+    bootstrap::server::init_tracing();
+
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+
+    // Build the *new* embedder first — a misconfigured provider should
+    // stop here, before a single vector is touched. For a remote provider
+    // this also probes it end to end.
+    let embedder =
+        bootstrap::memories_wiring::build_embedder(&config).map_err(|e| e.to_string())?;
+    let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
+
+    println!(
+        "re-embedding every memory with {} ({} dimensions)…",
+        embedder.model_id(),
+        embedder.dimensions()
+    );
+
+    let report =
+        memories::infrastructure::sqlite_reindexer::SqliteReindexer::new(database, embedder)
+            .execute()
+            .map_err(|e| e.to_string())?;
+
+    match report.from {
+        Some((model, dims)) if (model.as_str(), dims) != (report.to.0.as_str(), report.to.1) => {
+            println!(
+                "reindexed {} memories: {model} ({dims}) → {} ({})",
+                report.reindexed, report.to.0, report.to.1
+            );
+        }
+        _ => println!(
+            "reindexed {} memories under {} ({})",
+            report.reindexed, report.to.0, report.to.1
+        ),
+    }
     Ok(())
 }
 
@@ -333,6 +396,95 @@ fn run_key(
 fn build_identity(config_path: Option<&Path>) -> Result<bootstrap::wiring::Identity, String> {
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
     bootstrap::wiring::Identity::build(&config).map_err(|e| e.to_string())
+}
+
+fn run_config(config_path: Option<&Path>) -> Result<(), String> {
+    // No tracing init: this is a one-shot report, and its whole value is
+    // clean stdout the operator can read at a glance.
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let embeddings = &config.embeddings;
+    let understanding = &config.understanding;
+
+    println!("recordagent configuration (defaults + file + RECORDAGENT_* env)\n");
+
+    println!("embeddings");
+    println!("  provider   {}", embeddings.provider);
+    println!("  model      {}", embeddings.model);
+    if embeddings.provider == "local" {
+        // The one field that only matters offline; a remote provider
+        // ignores it, so showing it there would just mislead.
+        println!("  cache_dir  {}", config.model_cache_dir().display());
+    } else {
+        println!("  base_url   {}", display_base_url(&embeddings.base_url));
+        println!("  api_key    {}", key_status(&embeddings.api_key_env));
+    }
+
+    println!("\nunderstanding");
+    println!("  provider   {}", understanding.provider);
+    if understanding.provider != "none" {
+        println!("  model      {}", understanding.model);
+        println!("  base_url   {}", display_base_url(&understanding.base_url));
+        println!("  api_key    {}", key_status(&understanding.api_key_env));
+        println!("  reconcile  {}", understanding.reconcile);
+    }
+
+    println!("\nconsolidation");
+    if config.consolidation.enabled {
+        println!("  enabled ({})", config.consolidation.schedule);
+    } else {
+        println!("  disabled");
+    }
+
+    println!("\nserver");
+    println!("  listen     {}:{}", config.server.host, config.server.port);
+    let mut transports = Vec::new();
+    if config.server.mcp.http {
+        transports.push("http (/mcp)");
+    }
+    if config.server.mcp.stdio {
+        transports.push("stdio (recordagent mcp)");
+    }
+    println!(
+        "  mcp        {}",
+        if transports.is_empty() {
+            "none".to_string()
+        } else {
+            transports.join(", ")
+        }
+    );
+
+    println!("\nstorage");
+    println!("  backend    {}", config.storage.backend);
+    println!("  path       {}", config.data_dir().display());
+
+    println!("\nauth");
+    println!("  mode       {}", config.auth.mode);
+
+    Ok(())
+}
+
+/// How a `base_url` reads in the report: an empty one means the provider's
+/// built-in address, which is clearer said than shown blank.
+fn display_base_url(base_url: &str) -> String {
+    if base_url.trim().is_empty() {
+        "(provider default)".to_string()
+    } else {
+        base_url.to_string()
+    }
+}
+
+/// Report an API key by the env var that holds it and whether that var is
+/// currently set — never the value. An empty name means the provider needs
+/// no key (a local server); a named-but-unset var is the likely cause of a
+/// provider that fails on its first real request, so it is called out.
+fn key_status(env_name: &str) -> String {
+    if env_name.trim().is_empty() {
+        "none".to_string()
+    } else if std::env::var(env_name).is_ok() {
+        format!("{env_name} (set)")
+    } else {
+        format!("{env_name} (NOT SET)")
+    }
 }
 
 fn run_init(config_path: &PathBuf) -> Result<(), String> {
