@@ -91,7 +91,9 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          # `dist-` prefix so the release job can download exactly these and
+          # nothing else — not the image job's digests or build records.
+          name: dist-${{ matrix.target }}
           path: |
             ${{ steps.package.outputs.asset }}
             ${{ steps.package.outputs.asset }}.sha256
@@ -139,6 +141,11 @@ jobs:
       - name: Build
         id: build
         uses: docker/build-push-action@v6
+        # Skip the `.dockerbuild` build-record artifact this action uploads
+        # by default. Nothing here consumes it, and downloading it in the
+        # release job was what failed. The job summary is still produced.
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
         with:
           context: .
           file: docker/Dockerfile
@@ -265,6 +272,9 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          # Only the binary tarballs + checksums — not the image job's
+          # per-arch digests or any build-record artifacts.
+          pattern: dist-*
           path: artifacts
           merge-multiple: true
 
