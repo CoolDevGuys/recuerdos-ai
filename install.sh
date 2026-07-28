@@ -51,7 +51,7 @@ case "$os" in
     Linux)  os_target="unknown-linux-gnu" ;;
     Darwin) os_target="apple-darwin" ;;
     *)      die "unsupported OS: $os. Build from source, or use the Docker image:
-    docker run -p 7070:7070 ghcr.io/$REPO" ;;
+    docker run -p 7070:7070 ghcr.io/cooldevguys/recuerdos-ai" ;;
 esac
 
 case "$arch" in
@@ -65,7 +65,7 @@ esac
 # maintaining — say so rather than 404ing on a download.
 if [ "$os" = "Darwin" ] && [ "$arch_target" = "x86_64" ]; then
     die "no Intel macOS build is published. Use the Docker image:
-    docker run -p 7070:7070 ghcr.io/$REPO"
+    docker run -p 7070:7070 ghcr.io/cooldevguys/recuerdos-ai"
 fi
 
 target="${arch_target}-${os_target}"

@@ -34,7 +34,7 @@ LangChain ──SDK───▶ │              │
 docker run -d --name recuerdos-ai -p 7070:7070 \
   -v recuerdos-ai-data:/data \
   -e RECUERDOS_AI_AUTH__MODE=none \
-  ghcr.io/CoolDevGuys/recuerdos-ai
+  ghcr.io/cooldevguys/recuerdos-ai
 ```
 
 `AUTH__MODE=none` makes every request the built-in `default` user — fine

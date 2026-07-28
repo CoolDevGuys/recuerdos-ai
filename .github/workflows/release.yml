@@ -97,20 +97,98 @@ jobs:
             ${{ steps.package.outputs.asset }}.sha256
           if-no-files-found: error
 
-  # Multi-arch, built with QEMU rather than on two runners: the image
-  # build is dominated by the same cargo compile the job above already
-  # did natively, and this one only needs to be correct, not fast.
+  # Multi-arch image, built natively on one runner per architecture and
+  # then stitched into a single manifest by the `image-manifest` job.
+  #
+  # The old approach emulated arm64 with QEMU on an amd64 runner, which for
+  # this dependency tree (ONNX Runtime, SQLite and tantivy, all compiled
+  # from source) turned a ~15-minute compile into a multi-hour one. A
+  # native arm64 runner builds at the same speed as the amd64 one, and the
+  # two run in parallel — so the image is as fast as its slower half.
   image:
-    name: Docker image
-    runs-on: ubuntu-latest
+    name: Image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase the image name
+        # GHCR (OCI) requires a lowercase repository, but github.repository
+        # keeps the org's original case (CoolDevGuys). Compute it once.
+        run: echo "IMAGE_LC=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=release-image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-image-${{ matrix.arch }}
+          # On a tag: push this arch's image by digest (no tag yet — the
+          # manifest job below applies the version tags across both). On a
+          # rehearsal: `cacheonly` still compiles and links the whole thing
+          # to prove it builds, but publishes nothing.
+          outputs: ${{ startsWith(github.ref, 'refs/tags/') && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_LC) || 'type=cacheonly' }}
+
+      - name: Export the digest
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload the digest
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the per-arch images pushed above into one multi-arch tag. This
+  # is a metadata-only operation (seconds) — it references the digests, it
+  # does not rebuild anything.
+  image-manifest:
+    name: Image manifest
+    needs: [image]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase the image name
+        run: echo "IMAGE_LC=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -121,28 +199,24 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_LC }}
           # `latest` only for a final release. A prerelease tag that
           # quietly became `docker run …/recuerdos-ai` for everyone would
           # be a nasty surprise.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ !contains(github.ref, '-') && startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          # Only a tag publishes. A manual run builds both architectures
-          # and throws them away, which is the point of the rehearsal.
-          push: ${{ startsWith(github.ref, 'refs/tags/') }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=release-image
-          cache-to: type=gha,mode=max,scope=release-image
+      - name: Create and push the manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_LC }}@sha256:%s ' *)
+
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_LC }}:${{ steps.meta.outputs.version }}
 
   # Publishes the Python SDK (sdk/python) to PyPI via Trusted Publishing:
   # PyPI trusts this repo+workflow over OIDC, so there is no API token to
@@ -183,7 +257,7 @@ jobs:
 
   release:
     name: Draft the release
-    needs: [binaries, image]
+    needs: [binaries, image-manifest]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

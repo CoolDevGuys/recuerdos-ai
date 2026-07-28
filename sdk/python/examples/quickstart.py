@@ -5,7 +5,7 @@
 Needs a daemon. The fastest way to get one:
 
     docker run -p 7070:7070 -e RECUERDOS_AI_AUTH__MODE=none \\
-      ghcr.io/CoolDevGuys/recuerdos-ai
+      ghcr.io/cooldevguys/recuerdos-ai
 
 With authentication on (the default), issue a key and export it:
 

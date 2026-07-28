@@ -11,7 +11,7 @@ You need a running daemon. The fastest way:
 
 ```bash
 docker run -p 7070:7070 -v recuerdos-ai-data:/data \
-  -e RECUERDOS_AI_AUTH__MODE=none ghcr.io/CoolDevGuys/recuerdos-ai
+  -e RECUERDOS_AI_AUTH__MODE=none ghcr.io/cooldevguys/recuerdos-ai
 ```
 
 ## The loop

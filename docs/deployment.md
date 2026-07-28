@@ -1,6 +1,6 @@
 # Deploying on a server
 
-This is the guide for running RecordAgent as a personal memory server —
+This is the guide for running Recuerdos AI as a personal memory server —
 one daemon on a machine you own, reachable by Claude Code, opencode,
 Hermes and anything else, from wherever you are.
 
@@ -19,7 +19,7 @@ docker run -d --name recuerdos-ai \
   --restart unless-stopped \
   -p 127.0.0.1:7070:7070 \
   -v recuerdos-ai-data:/data \
-  ghcr.io/alexromer0/recuerdos-ai
+  ghcr.io/cooldevguys/recuerdos-ai
 ```
 
 What each part does:
@@ -165,7 +165,7 @@ volume.
 ## 6. Upgrade
 
 ```bash
-docker pull ghcr.io/alexromer0/recuerdos-ai
+docker pull ghcr.io/cooldevguys/recuerdos-ai
 docker stop recuerdos-ai && docker rm recuerdos-ai
 # re-run the `docker run …` from step 1 — the volume (your data) is untouched
 ```
@@ -206,7 +206,7 @@ docker run -d --name recuerdos-ai \
   -v "$PWD/recuerdos-ai.toml:/recuerdos-ai.toml:ro" \
   -e RECUERDOS_AI_CONFIG=/recuerdos-ai.toml \
   -e GEMINI_API_KEY=your-real-key \
-  ghcr.io/alexromer0/recuerdos-ai
+  ghcr.io/cooldevguys/recuerdos-ai
 ```
 
 Two things worth repeating from [configuration.md](configuration.md),

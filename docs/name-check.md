@@ -27,7 +27,7 @@ registry your users install from is expensive to undo.
 | | |
 |---|---|
 | `github.com/CoolDevGuys/recuerdos-ai` | the canonical repo (currently private, so an unauthenticated check reads as 404) |
-| `ghcr.io/CoolDevGuys/recuerdos-ai` | namespaced under the same account; available by construction |
+| `ghcr.io/cooldevguys/recuerdos-ai` | namespaced under the same account; available by construction |
 
 Six other GitHub repos carry the name, all dormant — the largest has 2
 stars, and none is a memory service:

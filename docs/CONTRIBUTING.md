@@ -62,7 +62,7 @@ Releases are tag-driven. Pushing a `v*` tag runs
 - builds native binaries (linux x86_64/aarch64, macOS arm64), checksums
   them, and drafts a GitHub release for you to review and publish;
 - builds and pushes the multi-arch Docker image to
-  `ghcr.io/CoolDevGuys/recuerdos-ai`;
+  `ghcr.io/cooldevguys/recuerdos-ai`;
 - publishes the Python SDK to PyPI (final releases only — not `-rc` tags).
 
 ```bash
