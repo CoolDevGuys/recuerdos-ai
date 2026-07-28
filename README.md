@@ -220,6 +220,38 @@ Pin a specific version instead of the latest with a tag
 
 ---
 
+## 🗑️ Uninstalling
+
+Removing the tool **does not delete your memories** — the data lives apart
+from the binary. Want to keep them? Export first (see [api.md](docs/api.md)):
+
+```bash
+curl -sS localhost:7070/v1/memories/export -H "Authorization: Bearer ra_live_…" > memories.json
+```
+
+Then remove the tool the way you installed it:
+
+| Installed with | Remove |
+|---|---|
+| 🐳 Docker | `docker rm -f recuerdos-ai` — add `docker rmi ghcr.io/cooldevguys/recuerdos-ai` to drop the image too |
+| 📦 Binary / `install.sh` | `rm "$(command -v recuerdos-ai)"` (usually `/usr/local/bin/` or `~/.local/bin/`) |
+| 🔨 Source | delete the cloned repo |
+| 🐍 Python client | `pip uninstall recuerdos-ai` |
+
+Finally, delete the data **only if you no longer want it**:
+
+```bash
+docker volume rm recuerdos-ai-data     # Docker: the SQLite database volume
+rm -rf ~/.recuerdos-ai recuerdos-ai.toml   # binary/source: data, models, config
+```
+
+> ⚠️ That last step is **irreversible** — every memory, user and API key
+> goes with it. Leave it out to keep your data for later: a fresh install
+> pointed at the same volume or `~/.recuerdos-ai` picks up exactly where you
+> left off.
+
+---
+
 ## ⚡ Try it in 60 seconds
 
 Once the daemon is running, store something:
