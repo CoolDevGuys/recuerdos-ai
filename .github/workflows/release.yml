@@ -25,6 +25,13 @@ jobs:
   # compression — and setting up a working cross toolchain for all of
   # them is more fragile than paying for a second runner. A native build
   # also means the artifact is exercised on the platform it ships to.
+  #
+  # Note on portability: the ONNX Runtime prebuilt that `ort`/`fastembed`
+  # link is itself compiled against glibc 2.38 (it references __isoc23_*
+  # and __cxa_call_terminate), so the Linux binary requires glibc >= 2.38
+  # (Debian 13, Ubuntu 24.04+, Fedora 39+) no matter which runner we build
+  # on — building on an older glibc simply fails to link. Older or minimal
+  # systems use the Docker image instead, which bundles everything.
   binaries:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}

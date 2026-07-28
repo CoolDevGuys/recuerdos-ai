@@ -152,6 +152,13 @@ Downloads the release binary for your OS (Linux x86_64/arm64, macOS arm64),
 to do it by hand? Grab the tarball straight from the
 [Releases page](https://github.com/CoolDevGuys/recuerdos-ai/releases).
 
+> ⚠️ **The Linux binaries need a recent distro — glibc ≥ 2.38** (Debian 13,
+> Ubuntu 24.04+, Fedora 39+). That floor is set by ONNX Runtime's prebuilt
+> library, not by our code, so it can't be lowered here. On anything older
+> (Debian 12, Ubuntu 22.04, …) the binary won't start — use **🐳 Docker**
+> above instead. The image bundles everything and runs on any distro Docker
+> runs on, whatever its glibc. (Seeing `GLIBC_2.38 not found`? That's this.)
+
 ### 🔨 From source
 
 ```bash

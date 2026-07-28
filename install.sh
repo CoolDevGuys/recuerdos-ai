@@ -68,6 +68,30 @@ if [ "$os" = "Darwin" ] && [ "$arch_target" = "x86_64" ]; then
     docker run -p 7070:7070 ghcr.io/cooldevguys/recuerdos-ai"
 fi
 
+# glibc floor. ONNX Runtime's prebuilt library (linked via fastembed) is
+# compiled against glibc 2.38, so the binary needs glibc >= 2.38 and won't
+# even start on an older one — it would fail with a cryptic
+# `GLIBC_2.38 not found` well after this script "succeeded". Catch it here
+# and point at Docker, which has no such requirement.
+if [ "$os" = "Linux" ] && command -v ldd >/dev/null 2>&1; then
+    glibc=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')
+    if [ -n "$glibc" ]; then
+        major=${glibc%.*}; minor=${glibc#*.}
+        if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 38 ]; }; then
+            die "this binary needs glibc >= 2.38 (Debian 13, Ubuntu 24.04+, Fedora 39+),
+but this system has glibc $glibc. The requirement comes from ONNX Runtime and
+cannot be worked around here. Use the Docker image instead — it bundles
+everything and does not depend on the host's glibc:
+
+    docker run -d --name recuerdos-ai -p 7070:7070 \\
+      -v recuerdos-ai-data:/data -e RECUERDOS_AI_AUTH__MODE=none \\
+      ghcr.io/cooldevguys/recuerdos-ai
+
+See https://github.com/$REPO#-install--run"
+        fi
+    fi
+fi
+
 target="${arch_target}-${os_target}"
 asset="recuerdos-ai-${target}.tar.gz"
 
