@@ -187,6 +187,39 @@ for hit in ra.search("where do we deploy?"):
 
 ---
 
+## ⬆️ Updating
+
+Your **data and API keys are never touched by an update** — they live in the
+Docker volume (`/data`) or `~/.recuerdos-ai/`, and the storage format
+**migrates itself forward** on startup. Update the same way you installed:
+
+| Installed with | Update |
+|---|---|
+| 🐳 Docker | `docker pull …` + recreate the container (the volume is untouched) |
+| 📦 Binary / `install.sh` | Re-run the `install.sh` one-liner — it fetches the latest release and overwrites the binary in place |
+| 🔨 Source | `git pull && cargo build --release --bin recuerdos-ai` |
+| 🐍 Python client | `pip install -U recuerdos-ai` |
+
+🐳 **Docker**, in full:
+
+```bash
+docker pull ghcr.io/cooldevguys/recuerdos-ai
+docker stop recuerdos-ai && docker rm recuerdos-ai
+# re-run your original `docker run …` — the -v volume keeps every memory
+```
+
+Pin a specific version instead of the latest with a tag
+(`ghcr.io/cooldevguys/recuerdos-ai:0.1.0`), or, for the binary,
+`RECUERDOS_AI_VERSION=v0.1.0` before the install one-liner.
+
+> The one manual step an update can *occasionally* ask for: if a release
+> changes the **default embedding model**, the daemon won't start against a
+> store built by the old model and tells you to run `recuerdos-ai reindex`
+> (re-embeds every memory in place — your data is preserved). Ordinary
+> updates keep the model, so this is rare.
+
+---
+
 ## ⚡ Try it in 60 seconds
 
 Once the daemon is running, store something:
