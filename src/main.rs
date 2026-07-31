@@ -258,6 +258,7 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         consolidation,
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
         mcp_http: config.server.mcp.http,
+        mcp_allowed_hosts: config.server.mcp.allowed_hosts.clone(),
     };
 
     let outcome = bootstrap::server::serve(&config.server.host, config.server.port, state).await;

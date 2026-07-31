@@ -202,6 +202,7 @@ mod tests {
             consolidation,
             auth_mode,
             mcp_http: false,
+            mcp_allowed_hosts: Vec::new(),
         };
 
         let router = Router::new()

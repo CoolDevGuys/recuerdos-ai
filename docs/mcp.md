@@ -50,6 +50,24 @@ Bind the daemon itself to `127.0.0.1` (not `0.0.0.0`) so only the proxy is
 exposed, and it terminates TLS — the bearer token should never cross the
 network in cleartext. See [deployment.md](deployment.md).
 
+### Allowing hosts directly (proxy-less)
+
+If you connect straight to the daemon without a proxy, list the
+hostname(s) clients use in `[server].mcp.allowed_hosts` — they are added to
+the loopback defaults, so local access keeps working:
+
+```toml
+[server.mcp]
+allowed_hosts = ["memory.example.com"]   # or "memory.example.com:7070"
+```
+
+A single `"*"` disables the guard entirely (accepts any `Host`) — only for
+a trusted private network. Either way this turns off a browser-side
+protection, not a substitute for auth: keep `[auth].mode = "api-key"` on,
+and put TLS in front, since a proxy-less setup sends the bearer token in
+cleartext. A reverse proxy is still the recommended shape for anything
+internet-facing.
+
 ### stdio (`recuerdos-ai mcp`) — a per-session shim
 
 MCP clients can instead spawn a server process and talk to it over

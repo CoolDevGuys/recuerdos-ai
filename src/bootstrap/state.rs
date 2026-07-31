@@ -40,6 +40,9 @@ pub struct AppState {
     /// (`[server].mcp.http`). Held here so `serve` can decide without
     /// re-reading config.
     pub mcp_http: bool,
+    /// Extra `Host` values the `/mcp` DNS-rebinding guard accepts, beyond
+    /// the loopback defaults (`[server].mcp.allowed_hosts`).
+    pub mcp_allowed_hosts: Vec<String>,
 }
 
 #[cfg(test)]

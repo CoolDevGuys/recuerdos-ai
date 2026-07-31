@@ -14,7 +14,16 @@ port = 7070
 # this daemon, so a client can connect over HTTP with a bearer token and
 # no local binary — see docs/mcp.md. `stdio` here is informational; the
 # shim is a separate command. Set `http = false` to not expose `/mcp`.
-mcp = { stdio = true, http = true }
+#
+# `allowed_hosts` widens the `/mcp` DNS-rebinding guard, which by default
+# accepts only loopback Host headers (localhost, 127.0.0.1, ::1) — correct
+# when a reverse proxy fronts the daemon. To allow direct, proxy-less
+# network access, list the hostname(s) clients connect with (added to the
+# loopback defaults, so local access keeps working):
+#   allowed_hosts = ["memory.example.com"]      # or "memory.example.com:7070"
+# A single "*" disables the guard entirely (accept any Host) — only sensible
+# on a trusted private network, and never a substitute for TLS + a key.
+mcp = { stdio = true, http = true, allowed_hosts = [] }
 
 [storage]
 # embedded | postgres | qdrant (postgres/qdrant land post-POC, Phase 3+ roadmap)
