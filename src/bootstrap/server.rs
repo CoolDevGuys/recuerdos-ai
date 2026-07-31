@@ -140,11 +140,15 @@ pub async fn serve(host: &str, port: u16, state: AppState) -> std::io::Result<()
     if state.mcp_http {
         app = app.nest_service(
             "/mcp",
-            crate::memories::infrastructure::mcp::http_service::http_service(format!(
-                "http://127.0.0.1:{port}"
-            )),
+            crate::memories::infrastructure::mcp::http_service::http_service(
+                format!("http://127.0.0.1:{port}"),
+                state.mcp_allowed_hosts.clone(),
+            ),
         );
-        tracing::info!("MCP over streamable HTTP mounted at /mcp");
+        tracing::info!(
+            allowed_hosts = ?state.mcp_allowed_hosts,
+            "MCP over streamable HTTP mounted at /mcp"
+        );
     }
 
     axum::serve(listener, app)

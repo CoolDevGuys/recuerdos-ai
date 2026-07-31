@@ -52,6 +52,17 @@ impl Default for ServerConfig {
 pub struct McpConfig {
     pub stdio: bool,
     pub http: bool,
+    /// Extra `Host` header values the streamable-HTTP `/mcp` endpoint will
+    /// accept, on top of the loopback defaults (`localhost`, `127.0.0.1`,
+    /// `::1`) that the MCP spec's DNS-rebinding guard allows.
+    ///
+    /// Empty (the default) keeps the guard loopback-only, which is right
+    /// when a reverse proxy fronts the daemon. Set it to the hostname(s)
+    /// clients actually connect with — e.g. `["memory.example.com"]` or
+    /// `["memory.example.com:7070"]` — to allow direct, proxy-less network
+    /// access. A single `"*"` entry disables the guard entirely (accept any
+    /// `Host`); only sensible on a trusted private network.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for McpConfig {
@@ -59,6 +70,7 @@ impl Default for McpConfig {
         Self {
             stdio: true,
             http: true,
+            allowed_hosts: Vec::new(),
         }
     }
 }

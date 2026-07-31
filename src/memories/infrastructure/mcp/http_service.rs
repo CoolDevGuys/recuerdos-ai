@@ -28,12 +28,24 @@ use std::sync::Arc;
 /// stdio shim, which is told its client with `--client`.
 const HTTP_CLIENT: &str = "mcp-http";
 
+/// The loopback hosts the DNS-rebinding guard accepts out of the box (the
+/// same set rmcp defaults to). Configured `allowed_hosts` are added to
+/// these rather than replacing them, so the local shim and local testing
+/// keep working even after a deployment opens up its own hostname.
+const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
 /// Builds the tower service to mount at `/mcp`.
 ///
 /// `loopback_base` is the daemon's own address (e.g.
 /// `http://127.0.0.1:7070`); each session's server forwards there.
+///
+/// `allowed_hosts` extends the `Host`-header allow-list of the MCP
+/// DNS-rebinding guard beyond the loopback defaults
+/// ([`LOOPBACK_HOSTS`]) — see [`mcp_config`]. Empty keeps it loopback-only
+/// (a reverse proxy rewrites `Host`); a `"*"` entry disables the guard.
 pub fn http_service(
     loopback_base: String,
+    allowed_hosts: Vec<String>,
 ) -> StreamableHttpService<MemoryMcpServer, LocalSessionManager> {
     StreamableHttpService::new(
         // Called once per MCP session. Auth is not known here — it is read
@@ -46,12 +58,63 @@ pub fn http_service(
             ))
         },
         Arc::new(LocalSessionManager::default()),
-        // No SSE keep-alive pings: tool calls are request/response, and a
-        // keep-alive would hold a connection open with nothing to say.
-        // The default host allow-list (localhost, 127.0.0.1, ::1) is the
-        // DNS-rebinding guard the MCP spec asks for and covers the local
-        // case; a non-loopback deployment sits behind the operator's own
-        // proxy and auth.
-        StreamableHttpServerConfig::default().with_sse_keep_alive(None),
+        mcp_config(&allowed_hosts),
     )
+}
+
+/// Turns the configured `allowed_hosts` into the streamable-HTTP server
+/// config, applying the DNS-rebinding-guard policy:
+///
+/// - empty      → loopback-only (rmcp's default), the safe baseline;
+/// - `["*"]`    → guard disabled (accept any `Host`) — trusted networks only;
+/// - otherwise  → loopback defaults **plus** the configured hosts.
+///
+/// No SSE keep-alive pings either way: tool calls are request/response, so
+/// a keep-alive would hold a connection open with nothing to say.
+fn mcp_config(allowed_hosts: &[String]) -> StreamableHttpServerConfig {
+    let config = StreamableHttpServerConfig::default().with_sse_keep_alive(None);
+
+    if allowed_hosts.iter().any(|host| host == "*") {
+        // rmcp treats an empty allow-list as "accept any host".
+        config.disable_allowed_hosts()
+    } else if allowed_hosts.is_empty() {
+        config
+    } else {
+        let hosts = LOOPBACK_HOSTS
+            .iter()
+            .map(|host| host.to_string())
+            .chain(allowed_hosts.iter().cloned());
+        config.with_allowed_hosts(hosts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_config_is_loopback_only() {
+        // The default: exactly the three loopback hosts, nothing added.
+        let config = mcp_config(&[]);
+        assert_eq!(config.allowed_hosts, LOOPBACK_HOSTS.map(String::from));
+    }
+
+    #[test]
+    fn configured_hosts_are_added_to_the_loopback_defaults() {
+        let config = mcp_config(&["memory.example.com".to_string()]);
+        // Loopback still works (local shim/testing) and the new host is allowed.
+        assert!(config.allowed_hosts.contains(&"localhost".to_string()));
+        assert!(
+            config
+                .allowed_hosts
+                .contains(&"memory.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_star_disables_the_guard() {
+        // rmcp reads an empty allow-list as "accept any Host".
+        let config = mcp_config(&["*".to_string()]);
+        assert!(config.allowed_hosts.is_empty());
+    }
 }
