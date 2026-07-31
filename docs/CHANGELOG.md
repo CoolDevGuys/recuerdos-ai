@@ -3,6 +3,22 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.1.1
+
+- **`[server].mcp.allowed_hosts`.** The streamable-HTTP `/mcp` endpoint's
+  DNS-rebinding guard accepted only loopback `Host` headers, so reaching it
+  over the network needed a reverse proxy that rewrites `Host`. This option
+  lets an operator allow the hostname(s) clients connect with directly
+  (added to the loopback defaults, so local access still works); a single
+  `"*"` disables the guard for a trusted private network. Empty — the
+  default — is unchanged.
+- **Docs & install hardening** since v0.1.0: reverse-proxy setups must
+  rewrite `Host` for `/mcp` (Caddy `header_up Host localhost`); the Linux
+  binary's glibc-2.38 floor (imposed by ONNX Runtime's prebuilt) is
+  documented and `install.sh` now checks it up front and points to Docker
+  below it; the GHCR image name is lowercased; and the README gained
+  Updating and Uninstalling sections plus a comparison and use cases.
+
 ## v0.1.0 — Phase 6: SDK, docs & release
 
 The first release candidate. Mostly about making everything from Phases
