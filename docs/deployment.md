@@ -54,7 +54,13 @@ file called `Caddyfile`:
 
 ```
 memory.example.com {
-    reverse_proxy 127.0.0.1:7070
+    reverse_proxy 127.0.0.1:7070 {
+        # The MCP endpoint (/mcp) has a DNS-rebinding guard that only
+        # accepts a loopback Host header. Rewrite it so proxied MCP
+        # requests are accepted; without this, /mcp returns
+        # "403 Forbidden: Host header is not allowed" (REST is unaffected).
+        header_up Host localhost
+    }
 }
 ```
 

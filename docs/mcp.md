@@ -33,7 +33,22 @@ with `[server].mcp.http = false`.
 
 The endpoint honours the MCP spec's DNS-rebinding guard, accepting only
 loopback `Host` values (`localhost`, `127.0.0.1`, `::1`) — which covers a
-local editor. Behind a reverse proxy on a real hostname, terminate there.
+local editor. **Reaching it over the network therefore needs a reverse
+proxy that rewrites the `Host` header to a loopback value** — otherwise
+`/mcp` returns `403 Forbidden: Host header is not allowed` (a direct,
+proxy-less connection from another host hits exactly this). In Caddy:
+
+```
+memory.example.com {
+    reverse_proxy 127.0.0.1:7070 {
+        header_up Host localhost
+    }
+}
+```
+
+Bind the daemon itself to `127.0.0.1` (not `0.0.0.0`) so only the proxy is
+exposed, and it terminates TLS — the bearer token should never cross the
+network in cleartext. See [deployment.md](deployment.md).
 
 ### stdio (`recuerdos-ai mcp`) — a per-session shim
 
