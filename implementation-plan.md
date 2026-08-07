@@ -1,10 +1,27 @@
 # Recuerdos AI — Technical Implementation Plan
 
-**v0.1 · 2026-07-18 · companion to [project-plan.md](project-plan.md)**
+**v0.2 · updated 2026-08-04 · companion to [project-plan.md](project-plan.md)**
 
 Actionable, phased breakdown of the build. Every phase lives on its own git branch,
 ends in a **shippable, usable** state, and every task has a goal, step-by-step
 procedure, examples where they apply, and a Definition of Done (DoD).
+
+> **Status (2026-08-04): Phases 0–6 are ✅ SHIPPED.** The build described below is
+> complete and released as `v0.1.0` (release candidate) and `v0.1.1`. Those phase
+> sections are kept as the **build record** — a faithful account of what was
+> designed and delivered, not a to-do list. Forward work lives in
+> [Phase 7 — Memory-science performance & capability upgrades](#phase-7); its
+> **Tasks 7.1 and 7.2 are now ✅ shipped**, and Task 7.3 (the graph layer) remains
+> deferred.
+>
+> **Why this file and [project-plan.md](project-plan.md) both exist.** They are not
+> merged on purpose: `project-plan.md` is the *product & architecture reference*
+> (problem, competitive positioning, strategy choice, data model, the rationale
+> behind each decision) and stays a living document; this file is the *execution
+> record + forward task breakdown*. Combining them would produce a ~1,500-line
+> document and mix "why we chose SQLite" with "the DoD for the tantivy adapter."
+> Where they touch the same topic (architecture, data model, taxonomy), this file
+> links to `project-plan.md` rather than restating it.
 
 ---
 
@@ -20,8 +37,9 @@ procedure, examples where they apply, and a Definition of Done (DoD).
 8. [Phase 4 — Understanding: extraction, labeling, reconciliation](#phase-4)
 9. [Phase 5 — Consolidation, distillation & profile](#phase-5)
 10. [Phase 6 — SDK, docs, packaging & release](#phase-6)
-11. [Test strategy summary](#11-test-strategy-summary)
-12. [Documentation deliverables matrix](#12-documentation-deliverables-matrix)
+11. [Phase 7 — Memory-science performance & capability upgrades (planned)](#phase-7)
+12. [Test strategy summary](#12-test-strategy-summary)
+13. [Documentation deliverables matrix](#13-documentation-deliverables-matrix)
 
 ---
 
@@ -169,7 +187,7 @@ recuerdos-ai/
 ---
 
 <a name="phase-0"></a>
-## Phase 0 — Foundation & Docker dev environment
+## Phase 0 — Foundation & Docker dev environment ✅ SHIPPED (`v0.1.0-alpha.0`)
 
 **Branch:** `phase/0-foundation` · **Size:** ~3–4 days total
 **Shippable outcome:** `docker compose up` starts a daemon that loads validated TOML
@@ -288,7 +306,7 @@ README explains all of it. It's a real (if empty) service.
 ---
 
 <a name="phase-1"></a>
-## Phase 1 — Identity: users, API keys, isolation
+## Phase 1 — Identity: users, API keys, isolation ✅ SHIPPED (`v0.1.0-alpha.1`)
 
 **Branch:** `phase/1-identity` · **Size:** ~4 days
 **Shippable outcome:** multi-user daemon: create users, issue/revoke scoped API
@@ -381,7 +399,7 @@ Usable as-is as an auth'd skeleton; the isolation test suite exists from day one
 ---
 
 <a name="phase-2"></a>
-## Phase 2 — Memories: store + hybrid search (REST)
+## Phase 2 — Memories: store + hybrid search (REST) ✅ SHIPPED (`v0.2.0-alpha`)
 
 **Branch:** `phase/2-memories-core` · **Size:** ~7–9 days
 **Shippable outcome:** the first genuinely useful release: store memories and
@@ -534,7 +552,7 @@ Rust speed — before any LLM understanding.
 ---
 
 <a name="phase-3"></a>
-## Phase 3 — MCP server
+## Phase 3 — MCP server ✅ SHIPPED (`v0.3.0-alpha`)
 
 **Branch:** `phase/3-mcp` · **Size:** ~4–5 days
 **Shippable outcome:** Claude Code (and opencode) connect to Recuerdos AI over MCP
@@ -608,7 +626,7 @@ daily from here on.
 ---
 
 <a name="phase-4"></a>
-## Phase 4 — Understanding: extraction, labeling, reconciliation
+## Phase 4 — Understanding: extraction, labeling, reconciliation ✅ SHIPPED (`v0.4.0-alpha`)
 
 **Branch:** `phase/4-understanding` · **Size:** ~8–10 days
 **Shippable outcome:** the differentiator: `POST /v1/memories` (async) runs
@@ -733,7 +751,7 @@ degraded verbatim mode when no provider is configured.
 ---
 
 <a name="phase-5"></a>
-## Phase 5 — Consolidation, distillation & profile digest
+## Phase 5 — Consolidation, distillation & profile digest ✅ SHIPPED (`v0.5.0-alpha`)
 
 **Branch:** `phase/5-consolidation` · **Size:** ~5–6 days
 **Shippable outcome:** memory that stays clean over time: session distillation
@@ -792,7 +810,7 @@ expiry, and the LLM-written `memory://profile` digest.
 ---
 
 <a name="phase-6"></a>
-## Phase 6 — SDK, docs, packaging & release
+## Phase 6 — SDK, docs, packaging & release ✅ SHIPPED (`v0.1.0`, hardened in `v0.1.1`)
 
 **Branch:** `phase/6-release` · **Size:** ~5–6 days
 **Shippable outcome:** `v0.1.0` public release candidate: Python SDK, complete
@@ -856,7 +874,187 @@ Docker image + install script.
 
 ---
 
-## 11. Test strategy summary
+<a name="phase-7"></a>
+## Phase 7 — Memory-science performance & capability upgrades
+
+**Branch:** `phase/7-memory-science` · **Status:** 🚧 IN PROGRESS — Tasks 7.1 & 7.2 ✅ shipped, Task 7.3 deferred
+**Shippable outcome (target):** consolidation that spends its LLM budget on the
+memories that actually need it, an optional finer label users can filter on, and a
+clear, de-risked path to the graph layer — without regressing the dedup guarantees
+Phase 5 shipped.
+
+### Provenance & how this supersedes `framework_implementation_plan.md`
+
+This phase absorbs the salvageable parts of `framework_implementation_plan.md`
+(a memory-research → computational-analogue exploration) and rejects the parts that
+don't survive contact with the code. That file used its own `Phase 1/2/3` numbering
+which **collides** with both this file's `Phase 0–6` and `project-plan.md §15`'s
+`Phase 0–4`; it is folded in here as `Phase 7` and should be treated as **superseded
+by this section.** Keep it only as background reading.
+
+**The reframe that drives every task below.** The framework plan's headline metric —
+"25×/100×/125× fewer cosine comparisons" — optimizes the cheap axis. Pairwise cosine
+within a category is bounded at `MAX_MEMORIES_PER_CATEGORY = 2000`
+(`consolidation_runner.rs`), and the code's own note puts 2 M comparisons at *"a
+second or two"* of local CPU. The real cost of a consolidation run is the **LLM merge
+call per cluster** (network, latency, tokens); in a future graph phase it's the **LLM
+extraction call per memory.** So Phase 7 measures success in *LLM calls avoided and
+retrieval precision gained*, never in cosine math.
+
+### What was rejected from the framework plan, and why
+
+- **"Rank/skip by `importance`" (its Task 1.1/1.2).** Fresh memories start at
+  `importance = 1.0` (`memory.rs`: *"Starts at 1.0"*, pinned by a ranker test), and
+  importance only drops after a nightly rescore. Skipping `importance > 0.80` from
+  clustering would skip **every newly-created memory** — exactly where duplicates come
+  from (the canonical test saves the same line 5×). It would silently regress the
+  Phase 5 dedup guarantee. The spaced-repetition analogy is mapped onto the wrong job:
+  consolidation here is *deduplication*, whose value tracks *recency of creation*, not
+  *decay*. Task 7.1 below keeps the useful half (budget + skip unchanged work) and
+  drops the importance ordering.
+- **SVD-RAG digests + hierarchical beam search (its Phase 2).** The motivating example
+  ("Personal contains family, health, career…") describes a taxonomy that doesn't
+  exist: the real set is 8 already-granular types (`preference.personal`,
+  `fact.person`, …) that is *already user-extensible* via `Category::Custom` /
+  `[understanding.taxonomy].extra_categories`. Pulling in `linfa`/LAPACK for SVD also
+  cuts against the single-static-binary, zero-egress identity. And a `profile_digests`
+  table already exists (migration V5). Task 7.2 keeps only the cheap, high-value core.
+- **Its "zero LLM cost / 100% saved" and "2×/3× precision" numbers.** These compare
+  against a RAPTOR/graph baseline that isn't in the codebase (today's baseline is
+  *zero*), so the percentages are framing, not measurement. Replaced with the eval
+  harness (`recuerdos-ai eval`, Phase 4.6) as the arbiter — no capability lands here
+  without a recall@k number beside it.
+
+### Task 7.1 — Budget-aware consolidation + skip-unchanged work (M) ✅ DONE
+
+- **Goal:** a nightly run that never blows past a configured LLM/time budget and never
+  re-does work on memories nothing has touched since the last pass — cutting merge-call
+  volume **without** the freshness regression the framework plan's importance-skip
+  would cause.
+- **Steps:**
+  1. `[consolidation].budget` in config: `max_llm_calls` (default 100),
+     `max_duration_secs` (300), `max_memories` (5000). `ConsolidationRunner::execute`
+     tracks consumed budget and stops cleanly at the limit.
+  2. Report `budget_exhausted: bool` + `reason` in `ConsolidationReport` (extends the
+     existing report struct; surfaced in the CLI/dry-run output).
+  3. **Skip heuristic that is safe by construction:** exclude a group's memories
+     from re-clustering only when *nothing in that group changed since the last
+     successful run* (compare against a stored max `updated_at`). New and edited
+     memories always enter clustering; a stable, untouched group is skipped whole.
+     This is the genuine win — it removes redundant LLM merge attempts on clusters
+     already resolved — and it *cannot* skip a fresh duplicate, because a fresh save
+     bumps the group's max `updated_at`.
+  4. Order remaining work **largest-group-first** so the budget is spent where
+     duplicates are densest, not by importance.
+- **DoD:**
+  - [x] Budget-exhaustion test: induce the cap mid-run, assert a partial-but-consistent
+        report and no half-applied merge.
+        (`budget_exhaustion_stops_the_run_and_reports_why`)
+  - [x] **Regression guard (the load-bearing test):** save the same line 5×, run
+        consolidation → still exactly 1 merged memory, 5 retired (Phase 5's guarantee
+        holds under the new skip path).
+        (`fresh_duplicates_still_merge_with_a_state_store`, plus the original
+        `duplicates_become_one_memory_and_the_originals_are_retired`)
+  - [x] Skip test: a group untouched since the last run makes **zero** LLM calls on
+        the next run; touching one memory in it re-enables clustering for that group.
+        (`an_unchanged_group_is_skipped_on_the_next_run`, `touching_a_group_re_enables_it`)
+  - [x] No change to merge/cluster *logic* — only order and scope. Existing
+        `consolidation_runner` tests pass unmodified.
+
+- **As built (2026-08-05):**
+  - **Watermark grain is `(user_id, category, subcategory)`**, not the plan's original
+    `(user_id, category)` — because Task 7.2 clusters within a `(category,
+    subcategory)` group, so the skip watermark has to match that grain or it would
+    compare a subcategory's max against a whole category's. Migration
+    `V6__consolidation_state.sql` was updated accordingly (empty-string sentinel for
+    "no subcategory" so the primary key behaves).
+  - **`updated_at` is the change signal, and it is trustworthy here:** nightly
+    rescoring (`set_importance`) and recall bookkeeping (`touch_accessed`) deliberately
+    do **not** bump it (verified in `sqlite_memory_repository`), so only a create /
+    edit / supersede lifts a group's maximum above its watermark.
+  - **The watermark is written only after a successful pass:** a group whose merge
+    errored, or any group when the run stopped early on the budget, is left
+    unrecorded so its duplicates are retried next run rather than skipped forever.
+    Guarded by `a_failed_merge_is_retried_next_run_not_skipped`.
+  - **New code:** `consolidation/domain/consolidation_state.rs` (`ConsolidationStateStore`
+    trait), `consolidation/infrastructure/sqlite_consolidation_state_store.rs`
+    (+ its own unit tests), skip/record logic and the budget struct in
+    `consolidation/application/consolidation_runner.rs`, wired in
+    `bootstrap/consolidation_wiring.rs`. `just check` (fmt, clippy `-D warnings`,
+    boundary script, full test suite) is green.
+
+### Task 7.2 — Optional finer sub-label (rescoped "chunking") (M) ✅ DONE
+
+- **Goal:** let a memory carry an optional, open-ended sub-label under its category
+  (`preference.coding / testing`, `fact.person / family`) that recall and consolidation
+  can scope to — the useful 20% of the framework plan's Phase 2, with none of the SVD,
+  beam-search, or new-table machinery.
+- **Steps:**
+  1. A dedicated `subcategory: Option<String>` on `Memory` + a nullable column
+     (migration `V7__subcategory.sql`), normalized (lowercase/trim/empty → `None`) and
+     length-capped in the domain model.
+  2. Understanding pipeline (Phase 4) *suggests* a sub-label during extraction; it is
+     never required and never blocks a save. Degraded/verbatim mode leaves it `None`.
+  3. `MemoryRecaller` gains an optional sub-label filter (`RecallQuery.subcategories`,
+     OR-ed), and `ConsolidationRunner` clusters within `(category, subcategory)`
+     groups (smaller n, tighter merges), falling back to category-level when absent.
+- **DoD:**
+  - [x] Eval case: a query targeting one sub-label returns its memories ahead of
+        sibling sub-labels (`subcategory filter: tooling only` in `eval/cases.toml`,
+        with seeded `tooling`/`structure`/`testing` sub-labels).
+  - [x] Consolidation with sub-labels never merges across two different sub-labels of
+        the same category (`memories_with_different_subcategories_are_never_clustered_together`).
+
+- **As built:** the `subcategory` column was shipped rather than deferred behind a
+  "tags first" experiment — a deliberate choice, since the sub-label is a distinct
+  filter/cluster axis from free-form tags (tags AND-narrow; a sub-label is the single
+  grain consolidation groups by). Wired end to end: `memories/domain/memory.rs`,
+  `recall_query.rs`, `memory_recaller.rs`, `sqlite_memory_repository.rs`,
+  `sqlite_reindexer.rs`, the understanding extraction/reconciliation/merge prompts,
+  the HTTP DTOs/handlers, and the eval harness.
+
+### Task 7.3 — Graph layer: fold into Strategy B, don't reinvent it (L, deferred)
+
+- **Goal:** the entity/relation graph the framework plan's "method of loci" describes is
+  **already the roadmap's Strategy B** (`project-plan.md §4, §15 "Phase 3 — Scale &
+  moat"`). This task is a pointer + guardrails, not a parallel design. It stays
+  **deferred** until Phase 7.1/7.2 land and an eval shows relational queries are the
+  next real gap.
+- **Guardrails for whoever builds it:**
+  1. **Keep bi-temporality.** Strategy B's differentiation is `valid_from`/`invalid_at`
+     facts that answer *"what DB did we use **before** the migration?"*. The framework
+     plan's schema dropped the temporal columns, leaving a commodity co-occurrence
+     graph. Don't. Model time.
+  2. **Build on the `Entity` that already exists.** `memory.rs` already carries
+     `Entity { name, kind }` on every memory, added deliberately so the graph layer
+     doesn't require re-running an LLM over the whole corpus. The framework plan's
+     normalized `memory_entities` table ignored it — reconcile with the existing field
+     instead of duplicating it.
+  3. **Budget the extraction.** `project-plan.md` flags that graph extraction *"burns
+     significantly more LLM tokens per ingest"* — "one-time cost" understates it. Reuse
+     Phase 7.1's budget machinery; extract in the background job, not on the hot path.
+  4. **SQLite-first, measured.** Start with SQLite edge tables + app-side PPR; only
+     reach for Neo4j/Memgraph if a hop-latency eval demands it (Strategy B already says
+     so).
+- **DoD (when un-deferred):** graph-hop retrieval beats semantic-only on a
+  relational-query eval set by a *measured* margin, ingest stays inside its token
+  budget, and bi-temporal supersedence is covered by a time-travel test.
+
+### Sequencing & risk
+
+| Task | Effort | Risk | Status | Real payoff |
+|---|---|---|---|---|
+| 7.1 Budget + skip-unchanged | M | Low | ✅ Done | Fewer LLM merge calls; bounded run time — the honest version of the framework plan's Phase 1 |
+| 7.2 Optional sub-label | M | Low–Med | ✅ Done | Tighter clusters + a subcategory recall filter, exercised by the eval harness |
+| 7.3 Graph (Strategy B) | L | Med–High | ◻ Deferred | Relational recall — but it's `project-plan.md`'s moat item, deferred until an eval justifies it |
+
+Do **not** carry over the framework plan's cumulative "125× / 3×" projections. Each
+task above ships behind the Phase 4.6 eval gate and is described by the number it
+actually moves.
+
+---
+
+## 12. Test strategy summary
 
 | Level | Location | Runs | What it proves |
 |---|---|---|---|
@@ -874,7 +1072,7 @@ Harness principles: every test gets an isolated tmp data dir; `FakeEmbedder`
 reproducible; the `Clock` trait makes time testable; **no test may sleep** —
 job completion is awaited via status polling with timeout.
 
-## 12. Documentation deliverables matrix
+## 13. Documentation deliverables matrix
 
 | Doc | Created | Completed |
 |---|---|---|

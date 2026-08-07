@@ -119,6 +119,7 @@ impl MemoryMerger {
             NewMemory {
                 content,
                 category,
+                subcategory: None,
                 tags,
                 // Entities are re-derivable from the merged content by a
                 // later extraction pass, and picking a union of the

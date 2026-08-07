@@ -50,6 +50,7 @@ pub fn new_memory(content: &str) -> NewMemory {
     NewMemory {
         content: content.to_string(),
         category: crate::memories::domain::category::Category::PreferenceCoding,
+        subcategory: None,
         tags: vec![],
         entities: vec![],
         confidence: 1.0,

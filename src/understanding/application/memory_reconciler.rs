@@ -275,6 +275,7 @@ impl MemoryReconciler {
                 NewMemory {
                     content: candidate.content.clone(),
                     category: candidate.category.clone(),
+                    subcategory: candidate.subcategory.clone(),
                     tags: candidate.tags.clone(),
                     entities: candidate.entities.clone(),
                     confidence: candidate.confidence,
@@ -316,6 +317,7 @@ mod tests {
         Candidate {
             content: content.to_string(),
             category: Category::FactProject,
+            subcategory: None,
             tags: vec![],
             entities: vec![],
             confidence: 0.9,

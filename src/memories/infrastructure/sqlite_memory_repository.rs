@@ -20,10 +20,10 @@ use rusqlite::{Connection, Row};
 use std::str::FromStr;
 use std::sync::Arc;
 
-const COLUMNS: &str = "id, user_id, content, category, tags, entities, confidence, \
-                       source_client, source_session_id, created_at, updated_at, \
-                       last_accessed_at, access_count, importance, expires_at, \
-                       superseded_by";
+const COLUMNS: &str = "id, user_id, content, category, subcategory, tags, entities, confidence, \
+                        source_client, source_session_id, created_at, updated_at, \
+                        last_accessed_at, access_count, importance, expires_at, \
+                        superseded_by";
 
 /// Phase 2 gives each user a single collection. It exists so the
 /// embedding model can be pinned per collection (see V2__memories.sql);
@@ -172,16 +172,17 @@ impl MemoryRepository for SqliteMemoryRepository {
             connection
                 .execute(
                     "INSERT INTO memories (
-                        id, user_id, collection_id, content, category, tags, entities,
+                        id, user_id, collection_id, content, category, subcategory, tags, entities,
                         confidence, source_client, source_session_id,
                         created_at, updated_at, last_accessed_at, expires_at, superseded_by
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                     rusqlite::params![
                         memory.id().to_string(),
                         context.user_id().to_string(),
                         collection_id,
                         memory.content(),
                         memory.category().as_str(),
+                        memory.subcategory(),
                         encode_tags(memory.tags()),
                         encode_entities(memory.entities()),
                         memory.confidence(),
@@ -212,14 +213,15 @@ impl MemoryRepository for SqliteMemoryRepository {
             let affected = connection
                 .execute(
                     "UPDATE memories SET
-                        content = ?3, category = ?4, tags = ?5, entities = ?6,
-                        confidence = ?7, updated_at = ?8, expires_at = ?9, superseded_by = ?10
-                     WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
+                        content = ?3, category = ?4, subcategory = ?5, tags = ?6, entities = ?7,
+                        confidence = ?8, updated_at = ?9, expires_at = ?10, superseded_by = ?11
+                      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
                     rusqlite::params![
                         memory.id().to_string(),
                         context.user_id().to_string(),
                         memory.content(),
                         memory.category().as_str(),
+                        memory.subcategory(),
                         encode_tags(memory.tags()),
                         encode_entities(memory.entities()),
                         memory.confidence(),
@@ -598,18 +600,19 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Result<Memory>> {
         row.get::<_, String>(1)?,
         row.get::<_, String>(2)?,
         row.get::<_, String>(3)?,
-        row.get::<_, String>(4)?,
+        row.get::<_, Option<String>>(4)?,
         row.get::<_, String>(5)?,
-        row.get::<_, f32>(6)?,
-        row.get::<_, Option<String>>(7)?,
+        row.get::<_, String>(6)?,
+        row.get::<_, f32>(7)?,
         row.get::<_, Option<String>>(8)?,
-        row.get::<_, String>(9)?,
+        row.get::<_, Option<String>>(9)?,
         row.get::<_, String>(10)?,
-        row.get::<_, Option<String>>(11)?,
-        row.get::<_, u32>(12)?,
-        row.get::<_, f32>(13)?,
-        row.get::<_, Option<String>>(14)?,
+        row.get::<_, String>(11)?,
+        row.get::<_, Option<String>>(12)?,
+        row.get::<_, u32>(13)?,
+        row.get::<_, f32>(14)?,
         row.get::<_, Option<String>>(15)?,
+        row.get::<_, Option<String>>(16)?,
     ))
 }
 
@@ -619,6 +622,7 @@ fn build_memory(
     user_id: String,
     content: String,
     category: String,
+    subcategory: Option<String>,
     tags: String,
     entities: String,
     confidence: f32,
@@ -639,6 +643,7 @@ fn build_memory(
             .map_err(|e| RaError::Internal(format!("stored user id {user_id:?}: {e}")))?,
         content,
         Category::from_stored(&category),
+        subcategory,
         decode_tags(&tags),
         decode_entities(&entities),
         confidence,

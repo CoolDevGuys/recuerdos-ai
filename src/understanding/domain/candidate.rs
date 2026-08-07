@@ -30,6 +30,8 @@ pub struct RawCandidate {
     #[serde(default)]
     pub category: String,
     #[serde(default)]
+    pub subcategory: Option<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub entities: Vec<RawEntity>,
@@ -53,6 +55,7 @@ pub struct RawEntity {
 pub struct Candidate {
     pub content: String,
     pub category: Category,
+    pub subcategory: Option<String>,
     pub tags: Vec<String>,
     pub entities: Vec<Entity>,
     pub confidence: f32,
@@ -101,6 +104,7 @@ impl RawCandidate {
         Ok(Candidate {
             content: content.to_string(),
             category,
+            subcategory: normalise_subcategory(self.subcategory),
             tags: normalise_tags(self.tags),
             entities: normalise_entities(self.entities),
             confidence: self
@@ -108,6 +112,17 @@ impl RawCandidate {
                 .unwrap_or(DEFAULT_CONFIDENCE)
                 .clamp(0.0, 1.0),
         })
+    }
+}
+
+/// Lowercased, trimmed, empty → None.
+fn normalise_subcategory(subcategory: Option<String>) -> Option<String> {
+    match subcategory {
+        Some(s) => {
+            let s = s.trim().to_ascii_lowercase();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        None => None,
     }
 }
 
@@ -172,6 +187,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidate.content, "The backend runs on Hetzner");
+        assert_eq!(candidate.subcategory, None);
         assert_eq!(candidate.tags, ["infrastructure", "hetzner"]);
         assert_eq!(
             candidate.entities,
@@ -277,5 +293,29 @@ mod tests {
                 .unwrap();
             assert_eq!(candidate.confidence, expected);
         }
+    }
+
+    #[test]
+    fn subcategory_is_normalized_on_validate() {
+        let candidate = raw(json!({
+            "content": "x",
+            "subcategory": "  Testing  ",
+        }))
+        .validate(Category::PreferenceCoding)
+        .unwrap();
+
+        assert_eq!(candidate.subcategory, Some("testing".to_string()));
+    }
+
+    #[test]
+    fn subcategory_empty_becomes_none() {
+        let candidate = raw(json!({
+            "content": "x",
+            "subcategory": "   ",
+        }))
+        .validate(Category::PreferenceCoding)
+        .unwrap();
+
+        assert_eq!(candidate.subcategory, None);
     }
 }

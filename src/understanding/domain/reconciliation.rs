@@ -229,6 +229,7 @@ mod tests {
         Candidate {
             content: content.to_string(),
             category: Category::FactProject,
+            subcategory: None,
             tags: vec![],
             entities: vec![],
             confidence: 0.9,
@@ -241,6 +242,7 @@ mod tests {
             NewMemory {
                 content: content.to_string(),
                 category: Category::FactProject,
+                subcategory: None,
                 tags: vec![],
                 entities: vec![],
                 confidence: 1.0,

@@ -46,6 +46,7 @@ use crate::consolidation::application::memory_maintainer::MemoryMaintainer;
 use crate::consolidation::application::memory_merger::{MemoryMerger, MergeOutcome};
 use crate::consolidation::domain::cluster_builder::ClusterBuilder;
 use crate::consolidation::domain::consolidation_run::{ClusterPreview, ConsolidationReport};
+use crate::consolidation::domain::consolidation_state::ConsolidationStateStore;
 use crate::consolidation::domain::similarity::cosine;
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
 use crate::identity::domain::user_context::UserContext;
@@ -55,10 +56,12 @@ use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::blocking::blocking;
 use crate::shared::clock::Clock;
-use crate::shared::error::Result;
+use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
-use std::collections::HashMap;
+use chrono::{DateTime, Utc};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Most memories one category is compared within, per run.
 ///
@@ -83,6 +86,114 @@ pub struct ConsolidationRunner {
     merger: Option<Arc<MemoryMerger>>,
     clock: Arc<dyn Clock>,
     threshold: f32,
+    /// Maximum LLM merge calls per run. `None` means unlimited.
+    max_llm_calls: Option<usize>,
+    /// Maximum wall-clock seconds per run. `None` means unlimited.
+    max_duration_secs: Option<u64>,
+    /// Maximum memories retired per run. `None` means unlimited.
+    max_memories: Option<usize>,
+    /// Watermark store for the skip-unchanged heuristic. `None` disables
+    /// skipping — every group is examined every run, the pre-7.1
+    /// behaviour.
+    state_store: Option<Arc<dyn ConsolidationStateStore>>,
+}
+
+/// A `(category, subcategory)` group that was examined this run, and the
+/// maximum `updated_at` seen in it. Recorded as the skip watermark once
+/// the group's clusters have been handled without error.
+struct ProcessedGroup {
+    category: String,
+    subcategory: Option<String>,
+    max_updated_at: DateTime<Utc>,
+}
+
+/// What [`ConsolidationRunner::plan`] produces: how many memories were
+/// examined, the clusters worth a model call, how many groups were
+/// skipped as unchanged, and the watermark to record for each group that
+/// was examined.
+type PlanOutcome = (usize, Vec<Vec<Memory>>, usize, Vec<ProcessedGroup>);
+
+/// Tracks remaining budget during a consolidation run.
+struct ConsolidationBudget {
+    max_llm_calls: Option<usize>,
+    max_duration_secs: Option<u64>,
+    max_memories: Option<usize>,
+    llm_calls_made: usize,
+    memories_retired: usize,
+    start: Instant,
+    exhausted: bool,
+    reason: Option<String>,
+}
+
+impl ConsolidationBudget {
+    fn new(
+        max_llm_calls: Option<usize>,
+        max_duration_secs: Option<u64>,
+        max_memories: Option<usize>,
+    ) -> Self {
+        Self {
+            max_llm_calls,
+            max_duration_secs,
+            max_memories,
+            llm_calls_made: 0,
+            memories_retired: 0,
+            start: Instant::now(),
+            exhausted: false,
+            reason: None,
+        }
+    }
+
+    /// Returns true if the budget is exhausted.
+    fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// Check all budget limits. Mark exhausted if any limit is reached.
+    fn check(&mut self) {
+        if self.exhausted {
+            return;
+        }
+
+        if let Some(max) = self.max_llm_calls {
+            if self.llm_calls_made >= max {
+                self.exhausted = true;
+                self.reason = Some("max_llm_calls reached".to_string());
+                return;
+            }
+        }
+
+        if let Some(max_secs) = self.max_duration_secs {
+            let elapsed = self.start.elapsed().as_secs();
+            if elapsed >= max_secs {
+                self.exhausted = true;
+                self.reason = Some(format!("max_duration_secs reached ({elapsed}s)"));
+                return;
+            }
+        }
+
+        if let Some(max) = self.max_memories {
+            if self.memories_retired >= max {
+                self.exhausted = true;
+                self.reason = Some("max_memories reached".to_string());
+            }
+        }
+    }
+
+    /// Record that an LLM merge call was made. Returns true if the budget
+    /// is now exhausted and the caller should stop.
+    fn record_llm_call(&mut self) -> bool {
+        self.llm_calls_made += 1;
+        self.check();
+        self.exhausted
+    }
+
+    /// Record that memories were retired. Returns true if the budget is
+    /// now exhausted and the caller should stop.
+    fn record_retired(&mut self, count: usize) -> bool {
+        self.memories_retired += count;
+        self.check();
+        self.exhausted
+    }
 }
 
 impl ConsolidationRunner {
@@ -90,6 +201,7 @@ impl ConsolidationRunner {
     /// it. Passing both would let a caller hand over two different user
     /// tables — one to walk, another to authenticate against — which is
     /// not a configuration that means anything.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         users: Arc<dyn UserRepository>,
         memories: Arc<dyn MemoryRepository>,
@@ -98,6 +210,10 @@ impl ConsolidationRunner {
         merger: Option<Arc<MemoryMerger>>,
         clock: Arc<dyn Clock>,
         threshold: f32,
+        max_llm_calls: Option<usize>,
+        max_duration_secs: Option<u64>,
+        max_memories: Option<usize>,
+        state_store: Option<Arc<dyn ConsolidationStateStore>>,
     ) -> Self {
         Self {
             resolver: Arc::new(BackgroundUserResolver::new(Arc::clone(&users))),
@@ -108,6 +224,10 @@ impl ConsolidationRunner {
             merger,
             clock,
             threshold,
+            max_llm_calls,
+            max_duration_secs,
+            max_memories,
+            state_store,
         }
     }
 
@@ -124,7 +244,23 @@ impl ConsolidationRunner {
             ..ConsolidationReport::default()
         };
 
+        let mut budget = ConsolidationBudget::new(
+            self.max_llm_calls,
+            self.max_duration_secs,
+            self.max_memories,
+        );
+
         for user in all {
+            if budget.is_exhausted() {
+                tracing::info!(
+                    "stopping consolidation: budget exhausted ({})",
+                    budget.reason.as_deref().unwrap_or("limit reached")
+                );
+                report.budget_exhausted = true;
+                report.budget_reason = budget.reason;
+                break;
+            }
+
             let context = match self.resolver.execute(user.id()) {
                 Ok(context) => context,
                 Err(error) => {
@@ -133,7 +269,7 @@ impl ConsolidationRunner {
                 }
             };
 
-            match self.consolidate_user(&context, dry_run).await {
+            match self.consolidate_user(&context, dry_run, &mut budget).await {
                 Ok(theirs) => report.absorb(theirs),
                 Err(error) => {
                     // Logged and skipped: one user's failure must not
@@ -155,6 +291,7 @@ impl ConsolidationRunner {
         &self,
         context: &UserContext,
         dry_run: bool,
+        budget: &mut ConsolidationBudget,
     ) -> Result<ConsolidationReport> {
         // Maintenance first, and before the snapshot: a memory that
         // expired last night should not be clustered, merged, and only
@@ -169,12 +306,14 @@ impl ConsolidationRunner {
 
         let this = self.clone();
         let owned = context.clone();
-        let (examined, clusters) = blocking(move || this.plan(&owned)).await?;
+        let (examined, clusters, categories_skipped, processed) =
+            blocking(move || this.plan(&owned)).await?;
 
         let mut report = ConsolidationReport {
             dry_run,
             memories_examined: examined,
             clusters_found: clusters.len(),
+            categories_skipped,
             expired: maintenance.expired,
             rescored: maintenance.rescored,
             ..ConsolidationReport::default()
@@ -187,23 +326,102 @@ impl ConsolidationRunner {
 
         let Some(merger) = self.merger.as_ref() else {
             // No provider. Expiry and decay have already run, which is
-            // everything this installation can do.
+            // everything this installation can do. No watermark is
+            // recorded: nothing was consolidated, so a later run once a
+            // provider is configured must still examine these groups.
             return Ok(report);
         };
 
+        // Groups whose merge errored this run: their watermark must not be
+        // recorded, or the unmerged duplicates would be skipped next time.
+        let mut failed: HashSet<(String, Option<String>)> = HashSet::new();
+        // Set when the run stops mid-clusters on a budget limit: the
+        // groups after the break went unexamined, so nothing is recorded.
+        let mut budget_broke = false;
+
         for cluster in clusters {
+            if budget.is_exhausted() {
+                tracing::info!(
+                    "stopping user consolidation: budget exhausted ({})",
+                    budget.reason.as_deref().unwrap_or("limit reached")
+                );
+                report.budget_exhausted = true;
+                report.budget_reason = budget.reason.clone();
+                budget_broke = true;
+                break;
+            }
+
+            let key = group_key(&cluster);
+
             match merger.execute(context, &cluster).await {
                 Ok(MergeOutcome::Merged { retired, .. }) => {
                     report.merged += 1;
                     report.retired += retired;
+                    // A merge costs both an LLM call and retires memories.
+                    if budget.record_llm_call() {
+                        report.budget_exhausted = true;
+                        report.budget_reason = budget.reason.clone();
+                        budget_broke = true;
+                        break;
+                    }
+                    if budget.record_retired(retired) {
+                        report.budget_exhausted = true;
+                        report.budget_reason = budget.reason.clone();
+                        budget_broke = true;
+                        break;
+                    }
                 }
-                Ok(MergeOutcome::KeptSeparate { .. }) => report.kept_separate += 1,
+                Ok(MergeOutcome::KeptSeparate { .. }) => {
+                    report.kept_separate += 1;
+                    if budget.record_llm_call() {
+                        report.budget_exhausted = true;
+                        report.budget_reason = budget.reason.clone();
+                        budget_broke = true;
+                        break;
+                    }
+                }
                 Err(error) => {
                     // Same reasoning as the per-user skip, one level down:
                     // a provider hiccup on one cluster should not cost the
                     // user their other clusters.
                     tracing::warn!(%error, "a cluster could not be merged; leaving it alone");
+                    failed.insert(key);
                 }
+            }
+        }
+
+        // Record the skip watermark for every group examined this run
+        // whose clusters were all handled without error. Skipped entirely
+        // when the budget cut the run short, so no half-consolidated group
+        // is ever marked done. The recorded watermark is the group's
+        // pre-merge maximum; a group that merged will read one changed
+        // (post-merge) memory on the next run and be re-examined once more
+        // — a cheap pass that finds nothing to merge — before settling
+        // into being skipped.
+        if let Some(store) = self.state_store.clone()
+            && !budget_broke
+        {
+            let to_record: Vec<ProcessedGroup> = processed
+                .into_iter()
+                .filter(|group| {
+                    !failed.contains(&(group.category.clone(), group.subcategory.clone()))
+                })
+                .collect();
+
+            if !to_record.is_empty() {
+                let owned = context.clone();
+                blocking(move || {
+                    for group in &to_record {
+                        store.record(
+                            &owned,
+                            &group.category,
+                            group.subcategory.as_deref(),
+                            group.max_updated_at,
+                        )?;
+                    }
+                    Ok::<(), RaError>(())
+                })
+                .await?;
             }
         }
 
@@ -212,11 +430,13 @@ impl ConsolidationRunner {
 
     /// The synchronous half: snapshot, embed, cluster.
     ///
-    /// Returns how many memories were examined and the clusters worth a
-    /// model call. Kept in one blocking section because it is all
-    /// database and ONNX work, and splitting it would only multiply the
-    /// hops on and off the runtime.
-    fn plan(&self, context: &UserContext) -> Result<(usize, Vec<Vec<Memory>>)> {
+    /// Returns how many memories were examined, the clusters worth a
+    /// model call, how many groups were skipped because nothing changed
+    /// since the last run, and — for the groups it did examine — the
+    /// watermark to record once their merges succeed. Groups are
+    /// processed largest-first so the budget is spent where duplicates
+    /// are densest.
+    fn plan(&self, context: &UserContext) -> Result<PlanOutcome> {
         let now = self.clock.now();
         let active: Vec<Memory> = self
             .memories
@@ -227,11 +447,38 @@ impl ConsolidationRunner {
 
         let examined = active.len();
         let mut clusters = Vec::new();
+        let mut categories_skipped = 0usize;
+        let mut processed: Vec<ProcessedGroup> = Vec::new();
 
-        for (category, group) in by_category(active) {
+        let mut groups = by_category_and_subcategory(active);
+        // Largest-group-first: spend the budget where duplicates are
+        // densest.
+        groups.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+
+        for ((category, subcategory), group) in groups {
             if group.len() < 2 {
                 continue;
             }
+
+            // The group's watermark: the newest change to any of its
+            // active memories. `max()` is only `None` for an empty group,
+            // already excluded above.
+            let Some(current_max) = group.iter().map(|memory| memory.updated_at()).max() else {
+                continue;
+            };
+
+            // Skip-unchanged heuristic: if nothing in this group has
+            // changed since it was last consolidated, skip it entirely.
+            if self.should_skip(context, &category, subcategory.as_deref(), current_max)? {
+                categories_skipped += 1;
+                continue;
+            }
+
+            processed.push(ProcessedGroup {
+                category: category.clone(),
+                subcategory: subcategory.clone(),
+                max_updated_at: current_max,
+            });
 
             let group = match group.len() > MAX_MEMORIES_PER_CATEGORY {
                 false => group,
@@ -253,7 +500,25 @@ impl ConsolidationRunner {
             clusters.extend(self.cluster(group)?);
         }
 
-        Ok((examined, clusters))
+        Ok((examined, clusters, categories_skipped, processed))
+    }
+
+    /// Returns true if this `(category, subcategory)` group should be
+    /// skipped because nothing in it changed since it was last
+    /// consolidated. Without a state store the answer is always false —
+    /// the pre-7.1 behaviour of examining every group every run.
+    fn should_skip(
+        &self,
+        context: &UserContext,
+        category: &str,
+        subcategory: Option<&str>,
+        current_max: DateTime<Utc>,
+    ) -> Result<bool> {
+        let Some(store) = &self.state_store else {
+            return Ok(false);
+        };
+        let stored = store.last_max_updated_at(context, category, subcategory)?;
+        Ok(stored == Some(current_max))
     }
 
     /// Embeds one category's memories and groups the near-duplicates.
@@ -288,14 +553,35 @@ impl ConsolidationRunner {
     }
 }
 
-fn by_category(memories: Vec<Memory>) -> Vec<(String, Vec<Memory>)> {
-    let mut groups: Vec<(String, Vec<Memory>)> = Vec::new();
+type CategoryGroup = Vec<((String, Option<String>), Vec<Memory>)>;
+
+/// The `(category, subcategory)` a cluster belongs to, taken from its
+/// first memory — every memory in a cluster shares both, since clustering
+/// happens within a group. Matches the watermark key in `plan`.
+fn group_key(cluster: &[Memory]) -> (String, Option<String>) {
+    match cluster.first() {
+        Some(memory) => (
+            memory.category().as_str().to_string(),
+            memory.subcategory().map(|sub| sub.to_string()),
+        ),
+        None => (String::new(), None),
+    }
+}
+
+fn by_category_and_subcategory(memories: Vec<Memory>) -> CategoryGroup {
+    let mut groups: CategoryGroup = Vec::new();
 
     for memory in memories {
-        let category = memory.category().as_str().to_string();
-        match groups.iter_mut().find(|(name, _)| *name == category) {
+        let key = (
+            memory.category().as_str().to_string(),
+            memory.subcategory().map(|s| s.to_string()),
+        );
+        match groups
+            .iter_mut()
+            .find(|((cat, sub), _)| *cat == key.0 && *sub == key.1)
+        {
             Some((_, group)) => group.push(memory),
-            None => groups.push((category, vec![memory])),
+            None => groups.push((key, vec![memory])),
         }
     }
 
@@ -319,7 +605,7 @@ fn preview(cluster: &[Memory]) -> ClusterPreview {
 mod tests {
     use super::*;
     use crate::consolidation::application::memory_merger::ACTOR;
-    use crate::memories::application::test_doubles::{Fixture, fixed_clock};
+    use crate::memories::application::test_doubles::{Fixture, fixed_clock, new_memory, now};
     use crate::memories::domain::category::Category;
     use crate::memories::domain::memory_repository::AuditOperation;
     use crate::memories::domain::recall_query::RecallQuery;
@@ -334,6 +620,58 @@ mod tests {
     /// text clusters", keeping these tests about the runner rather than
     /// about embedding quality.
     const STRICT: f32 = 0.999;
+
+    /// In-memory watermark store, deterministic and offline like the rest
+    /// of the fixture. Keys on the user so cross-tenant behaviour is
+    /// exercised the same way the SQLite store is.
+    #[derive(Default)]
+    struct InMemoryStateStore {
+        watermarks: std::sync::Mutex<HashMap<(String, String, String), DateTime<Utc>>>,
+    }
+
+    impl InMemoryStateStore {
+        fn key(
+            context: &UserContext,
+            category: &str,
+            subcategory: Option<&str>,
+        ) -> (String, String, String) {
+            (
+                context.user_id().to_string(),
+                category.to_string(),
+                subcategory.unwrap_or("").to_string(),
+            )
+        }
+    }
+
+    impl ConsolidationStateStore for InMemoryStateStore {
+        fn last_max_updated_at(
+            &self,
+            context: &UserContext,
+            category: &str,
+            subcategory: Option<&str>,
+        ) -> Result<Option<DateTime<Utc>>> {
+            Ok(self
+                .watermarks
+                .lock()
+                .unwrap()
+                .get(&Self::key(context, category, subcategory))
+                .copied())
+        }
+
+        fn record(
+            &self,
+            context: &UserContext,
+            category: &str,
+            subcategory: Option<&str>,
+            max_updated_at: DateTime<Utc>,
+        ) -> Result<()> {
+            self.watermarks
+                .lock()
+                .unwrap()
+                .insert(Self::key(context, category, subcategory), max_updated_at);
+            Ok(())
+        }
+    }
 
     fn build_runner(
         fixture: &Fixture,
@@ -360,6 +698,46 @@ mod tests {
                 Some(merger),
                 fixed_clock(),
                 threshold,
+                None,
+                None,
+                None,
+                None,
+            ),
+            model,
+        )
+    }
+
+    /// A runner wired with a state store, for the skip-unchanged tests.
+    fn build_runner_with_state(
+        fixture: &Fixture,
+        model: ScriptedChatModel,
+        threshold: f32,
+        state: Arc<dyn ConsolidationStateStore>,
+    ) -> (ConsolidationRunner, Arc<ScriptedChatModel>) {
+        let model = Arc::new(model);
+        let merger = Arc::new(MemoryMerger::new(
+            Arc::new(fixture.saver()),
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&model) as Arc<dyn ChatModel>,
+            Arc::new(Taxonomy::new(vec![])),
+        ));
+
+        (
+            ConsolidationRunner::new(
+                Arc::clone(&fixture.users) as Arc<dyn UserRepository>,
+                Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
+                Arc::new(MemoryMaintainer::new(
+                    Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                    Arc::new(fixture.forgetter()),
+                )),
+                Some(merger),
+                fixed_clock(),
+                threshold,
+                None,
+                None,
+                None,
+                Some(state),
             ),
             model,
         )
@@ -619,5 +997,297 @@ mod tests {
 
         assert_eq!(merges.len(), 2);
         assert!(merges.iter().all(|entry| entry.actor == ACTOR));
+    }
+
+    #[tokio::test]
+    async fn memories_with_different_subcategories_are_never_clustered_together() {
+        // Same category, different sub-label: the runner should create
+        // separate groups so consolidation never merges across sub-labels.
+        let fixture = Fixture::new();
+
+        // Two "tooling" memories that are near-duplicates
+        for _ in 0..2 {
+            let mut new = new_memory("User prefers pnpm for package management");
+            new.subcategory = Some("tooling".to_string());
+            fixture.saver().execute(&fixture.alex, new, "test").unwrap();
+        }
+
+        // Two "testing" memories that are near-duplicates
+        for _ in 0..2 {
+            let mut new = new_memory("User prefers Vitest for unit tests");
+            new.subcategory = Some("testing".to_string());
+            fixture.saver().execute(&fixture.alex, new, "test").unwrap();
+        }
+
+        let (runner, _model) = build_runner(
+            &fixture,
+            ScriptedChatModel::new()
+                .queue(json!({
+                    "merge": true,
+                    "content": "User prefers pnpm",
+                    "category": "preference.coding",
+                    "subcategory": "tooling",
+                    "tags": [],
+                    "reason": "duplicates"
+                }))
+                .queue(json!({
+                    "merge": true,
+                    "content": "User prefers Vitest",
+                    "category": "preference.coding",
+                    "subcategory": "testing",
+                    "tags": [],
+                    "reason": "duplicates"
+                })),
+            STRICT,
+        );
+        let report = runner.execute(false).await.unwrap();
+
+        // Two clusters — one per subcategory — not one cluster of four.
+        assert_eq!(
+            report.clusters_found, 2,
+            "each subcategory forms its own cluster independently"
+        );
+        assert_eq!(report.merged, 2);
+        assert_eq!(report.retired, 4);
+
+        // Each subcategory has exactly one surviving memory.
+        let all = recall(&fixture, &fixture.alex, "user prefers");
+        assert_eq!(all.len(), 2, "two merged memories, one per subcategory");
+        assert!(
+            all.iter().any(|c| c.contains("pnpm")),
+            "tooling subcategory has its own merged memory"
+        );
+        assert!(
+            all.iter().any(|c| c.contains("Vitest")),
+            "testing subcategory has its own merged memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_exhaustion_stops_the_run_and_reports_why() {
+        // When the budget is exhausted mid-run, the report says so and no
+        // half-applied merge is left behind. The budget is per-run, not
+        // per-user, so the second user never starts.
+        let fixture = Fixture::new();
+        for _ in 0..2 {
+            fixture.save(&fixture.alex, "User prefers pnpm");
+        }
+        for _ in 0..2 {
+            fixture.save(&fixture.sam, "Sam prefers cargo");
+        }
+
+        let (_runner, model) = build_runner(
+            &fixture,
+            ScriptedChatModel::new().queue(merged_reply()),
+            STRICT,
+        );
+
+        // Manually create a runner with a tight budget: 1 LLM call max.
+        let tight_runner = ConsolidationRunner::new(
+            Arc::clone(&fixture.users) as Arc<dyn UserRepository>,
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
+            Arc::new(MemoryMaintainer::new(
+                Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                Arc::new(fixture.forgetter()),
+            )),
+            Some(Arc::new(MemoryMerger::new(
+                Arc::new(fixture.saver()),
+                Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                Arc::clone(&model) as Arc<dyn ChatModel>,
+                Arc::new(Taxonomy::new(vec![])),
+            ))),
+            fixed_clock(),
+            STRICT,
+            Some(1),
+            None,
+            None,
+            None,
+        );
+
+        let report = tight_runner.execute(false).await.unwrap();
+
+        assert!(report.budget_exhausted, "run should have stopped early");
+        assert!(
+            report.budget_reason.as_deref() == Some("max_llm_calls reached"),
+            "reason should name the limit that was hit"
+        );
+        // Only one cluster was merged; the second user was never started.
+        assert_eq!(report.merged, 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_duplicates_still_merge_with_a_state_store() {
+        // The load-bearing regression guard: the skip path must never cost
+        // the dedup guarantee. On the first run there is no watermark, so
+        // nothing is skipped and the duplicates merge exactly as before.
+        let fixture = Fixture::new();
+        for _ in 0..5 {
+            fixture.save(&fixture.alex, "User prefers pnpm");
+        }
+
+        let state: Arc<dyn ConsolidationStateStore> = Arc::new(InMemoryStateStore::default());
+        let (runner, _) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new().queue(merged_reply()),
+            STRICT,
+            state,
+        );
+        let report = runner.execute(false).await.unwrap();
+
+        assert_eq!(
+            report.categories_skipped, 0,
+            "nothing to skip on a first run"
+        );
+        assert_eq!(report.merged, 1);
+        assert_eq!(report.retired, 5);
+        assert_eq!(
+            recall(&fixture, &fixture.alex, "package manager"),
+            ["User uses pnpm; never npm or yarn"],
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_group_is_skipped_on_the_next_run() {
+        // Two distinct memories in one group: examined on the first run
+        // (they don't cluster), skipped on the second because nothing
+        // changed. The skip means the second run never embeds or asks the
+        // model about them.
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+        fixture.save(&fixture.alex, "User forbids barrel files");
+
+        let state: Arc<dyn ConsolidationStateStore> = Arc::new(InMemoryStateStore::default());
+
+        let (first, first_model) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new(),
+            STRICT,
+            Arc::clone(&state),
+        );
+        let first_report = first.execute(false).await.unwrap();
+        assert_eq!(
+            first_report.categories_skipped, 0,
+            "the first run has no watermark to skip against"
+        );
+        assert_eq!(
+            first_model.call_count(),
+            0,
+            "distinct memories don't cluster"
+        );
+
+        let (second, _) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new(),
+            STRICT,
+            Arc::clone(&state),
+        );
+        let second_report = second.execute(false).await.unwrap();
+
+        assert_eq!(
+            second_report.categories_skipped, 1,
+            "the unchanged group should be skipped the second time"
+        );
+        assert_eq!(
+            second_report.clusters_found, 0,
+            "a skipped group produces no clusters to consider"
+        );
+    }
+
+    #[tokio::test]
+    async fn touching_a_group_re_enables_it() {
+        // A group skipped last run must be examined again once a memory in
+        // it changes. A new memory carries a later `updated_at`, lifting
+        // the group's maximum above the recorded watermark.
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+        fixture.save(&fixture.alex, "User forbids barrel files");
+
+        let state: Arc<dyn ConsolidationStateStore> = Arc::new(InMemoryStateStore::default());
+
+        // Run once to record the watermark, and again to confirm the skip.
+        for _ in 0..2 {
+            let (runner, _) = build_runner_with_state(
+                &fixture,
+                ScriptedChatModel::new(),
+                STRICT,
+                Arc::clone(&state),
+            );
+            runner.execute(false).await.unwrap();
+        }
+
+        // A newer memory in the same group — inserted with a later
+        // timestamp so the group's max `updated_at` moves past the mark.
+        let later = now() + chrono::Duration::hours(1);
+        let fresh = Memory::create(
+            fixture.alex.user_id(),
+            new_memory("User writes doc comments on every public fn"),
+            later,
+        )
+        .unwrap();
+        fixture
+            .memories
+            .insert(&fixture.alex, &fresh, "test")
+            .unwrap();
+
+        let (runner, _) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new(),
+            STRICT,
+            Arc::clone(&state),
+        );
+        let report = runner.execute(false).await.unwrap();
+
+        assert_eq!(
+            report.categories_skipped, 0,
+            "a changed group must be re-examined, not skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_merge_is_retried_next_run_not_skipped() {
+        // The correctness guard for the watermark: a group whose merge
+        // errored must NOT be recorded as consolidated, or its duplicates
+        // would be skipped forever. The next run, with a working model,
+        // must still merge them.
+        let fixture = Fixture::new();
+        for _ in 0..2 {
+            fixture.save(&fixture.alex, "User prefers pnpm");
+        }
+
+        let state: Arc<dyn ConsolidationStateStore> = Arc::new(InMemoryStateStore::default());
+
+        // First run: the model errors on the only cluster.
+        let (failing, _) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new().queue_error(
+                crate::understanding::domain::chat_model::ChatError::Transient("429".to_string()),
+            ),
+            STRICT,
+            Arc::clone(&state),
+        );
+        let failed_report = failing.execute(false).await.unwrap();
+        assert_eq!(failed_report.merged, 0, "the merge failed this run");
+
+        // Second run: nothing changed, but because the first run's merge
+        // failed the group was never watermarked, so it is examined again
+        // and merges cleanly.
+        let (retry, _) = build_runner_with_state(
+            &fixture,
+            ScriptedChatModel::new().queue(merged_reply()),
+            STRICT,
+            Arc::clone(&state),
+        );
+        let retry_report = retry.execute(false).await.unwrap();
+
+        assert_eq!(
+            retry_report.categories_skipped, 0,
+            "a group whose merge failed must not be skipped"
+        );
+        assert_eq!(
+            retry_report.merged, 1,
+            "the retry should merge the duplicates"
+        );
+        assert_eq!(recall(&fixture, &fixture.alex, "package manager").len(), 1);
     }
 }

@@ -160,6 +160,7 @@ mod tests {
             NewMemory {
                 content: "a memory".to_string(),
                 category,
+                subcategory: None,
                 tags: vec![],
                 entities: vec![],
                 confidence: 1.0,

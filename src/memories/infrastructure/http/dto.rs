@@ -22,6 +22,7 @@ pub struct SaveMemoryRequest {
     /// pipeline is what makes this a real classification; a verbatim save
     /// should not be forced to guess.
     pub category: Option<String>,
+    pub subcategory: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default = "default_confidence")]
@@ -41,6 +42,7 @@ impl SaveMemoryRequest {
         Ok(NewMemory {
             content: self.content,
             category,
+            subcategory: self.subcategory,
             tags: self.tags,
             entities: Vec::new(),
             confidence: self.confidence,
@@ -57,6 +59,7 @@ impl SaveMemoryRequest {
 pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     pub category: Option<String>,
+    pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     /// `null` clears the expiry; omitting the field leaves it alone.
     #[serde(default, with = "serde_with_double_option")]
@@ -70,6 +73,8 @@ pub struct SearchRequest {
     #[serde(default)]
     pub categories: Vec<String>,
     #[serde(default)]
+    pub subcategories: Vec<String>,
+    #[serde(default)]
     pub tags: Vec<String>,
     pub since: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -81,6 +86,8 @@ pub struct MemoryResponse {
     pub id: String,
     pub content: String,
     pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<String>,
     pub tags: Vec<String>,
     pub confidence: f32,
     pub created_at: DateTime<Utc>,
@@ -97,6 +104,7 @@ impl From<&Memory> for MemoryResponse {
             id: memory.id().to_string(),
             content: memory.content().to_string(),
             category: memory.category().as_str().to_string(),
+            subcategory: memory.subcategory().map(|s| s.to_string()),
             tags: memory.tags().to_vec(),
             confidence: memory.confidence(),
             created_at: memory.created_at(),
@@ -236,6 +244,7 @@ mod tests {
                 id: "m1".to_string(),
                 content: "x".to_string(),
                 category: "decision".to_string(),
+                subcategory: None,
                 tags: vec![],
                 confidence: 1.0,
                 created_at: Utc::now(),

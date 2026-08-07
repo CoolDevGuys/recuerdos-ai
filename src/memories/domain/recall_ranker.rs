@@ -213,6 +213,7 @@ mod tests {
             NewMemory {
                 content: "x".to_string(),
                 category: Category::PreferenceCoding,
+                subcategory: None,
                 tags: vec![],
                 entities: vec![],
                 confidence,

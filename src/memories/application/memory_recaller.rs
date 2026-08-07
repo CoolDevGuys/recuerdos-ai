@@ -116,6 +116,15 @@ fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::U
     if !query.categories().is_empty() && !query.categories().contains(memory.category()) {
         return false;
     }
+    // Subcategories are OR-ed: matching any one is enough.
+    if !query.subcategories().is_empty()
+        && !query
+            .subcategories()
+            .iter()
+            .any(|wanted| memory.subcategory() == Some(wanted.as_str()))
+    {
+        return false;
+    }
     // Tags are AND-ed: filters narrow.
     if !query
         .tags()
@@ -387,6 +396,35 @@ mod tests {
                 .last_accessed_at(),
             Some(now())
         );
+    }
+
+    #[test]
+    fn filters_by_subcategory_returns_only_matching() {
+        let fixture = Fixture::new();
+        let mut testing = new_memory("uses vitest for unit tests");
+        testing.subcategory = Some("testing".to_string());
+        fixture
+            .saver()
+            .execute(&fixture.alex, testing, "test")
+            .unwrap();
+
+        let mut linting = new_memory("uses eslint for code quality");
+        linting.subcategory = Some("linting".to_string());
+        fixture
+            .saver()
+            .execute(&fixture.alex, linting, "test")
+            .unwrap();
+
+        let results = fixture
+            .recaller()
+            .execute(
+                &fixture.alex,
+                &query("code").with_subcategories(vec!["testing".to_string()]),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].memory.subcategory(), Some("testing"));
     }
 
     #[test]

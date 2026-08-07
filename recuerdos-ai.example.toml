@@ -144,6 +144,19 @@ schedule = "daily"
 # it still gets the last word and is prompted to decline when unsure.
 similarity_threshold = 0.92
 
+[consolidation.budget]
+# Maximum LLM merge calls per consolidation run. Set to 0 or omit for
+# unlimited. When reached, the run stops early and reports
+# budget_exhausted = true so the operator sees why.
+max_llm_calls = 100
+# Maximum wall-clock seconds per consolidation run. Set to 0 or omit for
+# unlimited. Prevents a single run from monopolising the machine.
+max_duration_secs = 300
+# Maximum memories retired per consolidation run. Set to 0 or omit for
+# unlimited. A safety valve against a misbehaving similarity threshold
+# that would merge the whole corpus in one pass.
+max_memories = 5000
+
 [retrieval]
 hybrid = true
 default_limit = 8

@@ -63,6 +63,7 @@ pub async fn search_memories(
         request.limit.unwrap_or(memories.default_limit),
     )?
     .with_categories(categories)
+    .with_subcategories(request.subcategories)
     .with_tags(request.tags)
     .with_since(request.since);
     if request.include_superseded {
@@ -109,6 +110,7 @@ pub async fn update_memory(
     let edit = MemoryEdit {
         content: request.content,
         category,
+        subcategory: request.subcategory,
         tags: request.tags,
         expires_at: request.expires_at,
     };

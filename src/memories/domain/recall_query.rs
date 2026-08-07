@@ -14,6 +14,9 @@ pub const MAX_QUERY_LEN: usize = 1_000;
 pub struct RecallQuery {
     text: String,
     categories: Vec<Category>,
+    /// Optional finer sub-labels under a category. OR-ed: a memory
+    /// matching any one of them is included.
+    subcategories: Vec<String>,
     tags: Vec<String>,
     since: Option<DateTime<Utc>>,
     limit: usize,
@@ -38,6 +41,7 @@ impl RecallQuery {
         Ok(Self {
             text: text.to_string(),
             categories: Vec::new(),
+            subcategories: Vec::new(),
             tags: Vec::new(),
             since: None,
             // Clamped rather than rejected: a client asking for 200 wants
@@ -63,6 +67,16 @@ impl RecallQuery {
         self
     }
 
+    /// Subcategories are OR-ed: a memory matching any one is included.
+    pub fn with_subcategories(mut self, subcategories: Vec<String>) -> Self {
+        self.subcategories = subcategories
+            .into_iter()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
     pub fn with_since(mut self, since: Option<DateTime<Utc>>) -> Self {
         self.since = since;
         self
@@ -83,6 +97,10 @@ impl RecallQuery {
 
     pub fn tags(&self) -> &[String] {
         &self.tags
+    }
+
+    pub fn subcategories(&self) -> &[String] {
+        &self.subcategories
     }
 
     pub fn since(&self) -> Option<DateTime<Utc>> {

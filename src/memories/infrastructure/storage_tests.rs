@@ -75,6 +75,7 @@ fn memory_for(context: &UserContext, content: &str) -> Memory {
         NewMemory {
             content: content.to_string(),
             category: Category::PreferenceCoding,
+            subcategory: None,
             tags: vec!["typescript".to_string()],
             entities: vec![],
             confidence: 0.9,

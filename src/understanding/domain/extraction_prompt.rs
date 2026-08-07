@@ -169,6 +169,13 @@ pub fn schema(taxonomy: &Taxonomy) -> Value {
                             // ones that don't.
                             "enum": taxonomy.names(),
                         },
+                        "subcategory": {
+                            "type": "string",
+                            "description":
+                                "Optional finer sub-label under the category (e.g. 'testing' \
+                                 under 'preference.coding', 'family' under 'fact.person'). \
+                                 Lowercase, short, meaningful for filtering. Omit if not clear.",
+                        },
                         "tags": {
                             "type": "array",
                             "items": {"type": "string"},
