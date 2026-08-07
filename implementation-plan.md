@@ -11,8 +11,9 @@ procedure, examples where they apply, and a Definition of Done (DoD).
 > sections are kept as the **build record** — a faithful account of what was
 > designed and delivered, not a to-do list. Forward work lives in
 > [Phase 7 — Memory-science performance & capability upgrades](#phase-7); its
-> **Tasks 7.1 and 7.2 are now ✅ shipped**, and Task 7.3 (the graph layer) remains
-> deferred.
+> **Tasks 7.1 and 7.2 are now ✅ shipped**, and Task 7.3 (the graph layer) is
+> **planned and broken down** — its deferral condition is met, and Task 7.3.0 is the
+> eval that decides whether the rest of it gets built.
 >
 > **Why this file and [project-plan.md](project-plan.md) both exist.** They are not
 > merged on purpose: `project-plan.md` is the *product & architecture reference*
@@ -877,7 +878,7 @@ Docker image + install script.
 <a name="phase-7"></a>
 ## Phase 7 — Memory-science performance & capability upgrades
 
-**Branch:** `phase/7-memory-science` · **Status:** 🚧 IN PROGRESS — Tasks 7.1 & 7.2 ✅ shipped, Task 7.3 deferred
+**Branch:** `phase/7-memory-science` · **Status:** 🚧 IN PROGRESS — Tasks 7.1 & 7.2 ✅ shipped, Task 7.3 planned (breakdown below)
 **Shippable outcome (target):** consolidation that spends its LLM budget on the
 memories that actually need it, an optional finer label users can filter on, and a
 clear, de-risked path to the graph layer — without regressing the dedup guarantees
@@ -1013,13 +1014,13 @@ retrieval precision gained*, never in cosine math.
   `sqlite_reindexer.rs`, the understanding extraction/reconciliation/merge prompts,
   the HTTP DTOs/handlers, and the eval harness.
 
-### Task 7.3 — Graph layer: fold into Strategy B, don't reinvent it (L, deferred)
+### Task 7.3 — Graph layer (Strategy B): bi-temporal entity graph + graph-hop recall (L)
 
 - **Goal:** the entity/relation graph the framework plan's "method of loci" describes is
   **already the roadmap's Strategy B** (`project-plan.md §4, §15 "Phase 3 — Scale &
-  moat"`). This task is a pointer + guardrails, not a parallel design. It stays
-  **deferred** until Phase 7.1/7.2 land and an eval shows relational queries are the
-  next real gap.
+  moat"`). This section is the guardrails *and* the task breakdown — not a parallel
+  design. 7.1 and 7.2 have landed, so the deferral condition is met; **7.3.0 below is
+  the eval that decides whether the rest is built at all.**
 - **Guardrails for whoever builds it:**
   1. **Keep bi-temporality.** Strategy B's differentiation is `valid_from`/`invalid_at`
      facts that answer *"what DB did we use **before** the migration?"*. The framework
@@ -1036,9 +1037,282 @@ retrieval precision gained*, never in cosine math.
   4. **SQLite-first, measured.** Start with SQLite edge tables + app-side PPR; only
      reach for Neo4j/Memgraph if a hop-latency eval demands it (Strategy B already says
      so).
-- **DoD (when un-deferred):** graph-hop retrieval beats semantic-only on a
-  relational-query eval set by a *measured* margin, ingest stays inside its token
-  budget, and bi-temporal supersedence is covered by a time-travel test.
+- **DoD (the phase-level bar, decomposed into 7.3.0–7.3.6 below):** graph-hop retrieval
+  beats semantic-only on a relational-query eval set by a *measured* margin, ingest stays
+  inside its token budget, and bi-temporal supersedence is covered by a time-travel test.
+
+**Branch:** `phase/7.3-graph` · **Size:** ~8–12 days · **Migrations:** V8 (next free)
+
+#### Decisions taken before the breakdown (and why)
+
+These six are settled so the tasks below have unambiguous homes. Each one is a fork that
+would otherwise be re-litigated mid-build.
+
+1. **The graph lives inside the `memories` context — no new bounded context.**
+   `EntityGraph` is a *third retrieval index*, and its two siblings (`VectorIndex`,
+   `TextIndex`) are already consumer-owned traits in `memories/domain/` with adapters in
+   `memories/infrastructure/`. A peer `graph/` context would have exactly one consumer
+   (recall) and would force `memories/application` to import another context's
+   application layer for the hot read path. Relation *extraction* stays in
+   `understanding`, which is where entity extraction already lives.
+2. **Relations ride the extraction call that is already being made.** Guardrail 3 says
+   budget the extraction; the cheapest budget is zero. `CandidateExtractor` already makes
+   one structured call per ingest that returns `entities` — adding an optional
+   `relations` field to that same schema costs no additional round trip. A separate
+   extraction pass per memory is the design the framework plan implied and the one
+   `project-plan.md` warns "burns significantly more LLM tokens per ingest."
+3. **`memories.entities` (JSON) stays the source of truth; V8 adds a *derived* index.**
+   This is guardrail 2 made concrete. `memory_entities` is a projection of the JSON
+   column, rebuildable at any time with **zero** LLM calls — which is precisely what
+   makes the existing corpus backfillable (7.3.5) and what carrying `Entity` since
+   Phase 4 was for. The framework plan's normalized table replaced the field; this one
+   indexes it.
+4. **Graph hits enter ranking as a third RRF leg, guarded by an empty-leg identity
+   proof.** RRF generalizes to N lists for free (`sum 1/(k+rank)`), so the leg needs no
+   new constant and no retune of `RRF_K`/`MULTIPLIER_FLOOR` — whose calibration
+   `recall_ranker.rs`'s module docs warn is load-bearing. The safety property is that
+   **when a query produces no entity seeds the graph leg is empty and the ranking is
+   bit-identical to today's**, which makes "non-relational recall cannot regress" a test
+   rather than a hope.
+5. **Hop expansion before PPR.** Guardrail 4 names app-side PPR; this plan deliberately
+   starts one notch simpler with depth-bounded hop expansion. PPR is the answer to *which
+   of thousands of reachable nodes matter*, and at this scale (bounded by
+   `MAX_MEMORIES_PER_CATEGORY = 2000` and a 2-hop cap) that set is small enough to rank
+   by hop distance and edge count. PPR lands only if 7.3.6's eval shows hop expansion
+   returning too much.
+6. **Two clocks, never conflated.** `memories.created_at/updated_at/superseded_by` is
+   *transaction* time — when we learned it. `memory_relations.valid_from/invalid_at` is
+   *valid* time — when the fact was true. Strategy B's entire differentiation is the
+   second one; collapsing it into the first is how a bi-temporal graph quietly becomes a
+   commodity co-occurrence graph (exactly what guardrail 1 forbids).
+
+---
+
+#### Task 7.3.0 — Relational eval set + the go/no-go measurement (S)
+
+- **Goal:** a `relational` slice of `eval/cases.toml` and a recorded semantic-only score,
+  so the rest of 7.3 is justified — or cancelled — by a number instead of by the roadmap.
+  **This task ships and is evaluated on its own; nothing below starts until its number is
+  on the table.**
+- **Steps:**
+  1. Extend `SeedMemory` in `src/bootstrap/eval.rs` with `entities` (and `relations`,
+     parsed but unused until 7.3.2). Today's seeds carry only
+     `content/category/subcategory/tags`, so no eval case *can* exercise a graph.
+  2. Add ~10 corpus memories forming a chain worth hopping — the Fly.io → Hetzner
+     migration, who reviews auth, which service the query wrapper belongs to — entity-
+     linked rather than lexically overlapping.
+  3. Add 6–8 `kind = "relational"` cases whose answer needs a hop and whose wording
+     shares no useful tokens with the target: *"what did we run on before the current
+     host"*, *"who reviews changes to the thing Sam owns"*.
+  4. Run `recuerdos-ai eval`; commit the resulting `by_kind.relational` into
+     `eval/baseline.json`.
+- **DoD:**
+  - [ ] `by_kind.relational` recorded in the committed baseline.
+  - [ ] The existing 13 cases score exactly as before — seeds were added, none changed.
+  - [ ] **Go/no-go written into the PR description.** If relational recall@5 already
+        clears ~80, 7.3 goes back on the shelf and this slice stays as the tripwire that
+        tells us when it stops clearing. The rest of this task list is only justified by
+        a low number here.
+
+#### Task 7.3.1 — Graph schema + domain contract (M)
+
+- **Goal:** the storage and the contract, wired but inert — `[graph].enabled = false`,
+  recall byte-identical to today.
+- **Steps:**
+  1. `migrations/V8__entity_graph.sql`:
+     - `memory_entities(user_id, memory_id, entity_key, name, kind)` — the derived
+       projection of `memories.entities`. Unique on `(user_id, memory_id, entity_key)`,
+       indexed on `(user_id, entity_key)`.
+     - `memory_relations(id, user_id, memory_id, subject_key, predicate, object_key,
+       subject_name, object_name, valid_from, invalid_at, invalidated_by)`. `valid_from`
+       NOT NULL; `invalid_at IS NULL` means *currently true*. Indexed on
+       `(user_id, subject_key, invalid_at)` and `(user_id, object_key, invalid_at)`.
+     - Both `ON DELETE CASCADE` from `users`, matching V2.
+  2. `memories/domain/entity_key.rs` — the canonicalization value object: lowercase,
+     trim, collapse whitespace, strip trailing punctuation and possessives.
+     **The highest-risk piece in the whole task**: if `Fly.io`, `fly.io` and `Fly` don't
+     land on one key, every hop below is noise. Pure, framework-free, table-driven tests.
+     No alias table in this task — record it as the known limitation.
+  3. `memories/domain/entity_graph.rs` — the consumer-owned trait, beside
+     `vector_index.rs` and `text_index.rs`. Every method takes `&UserContext` (the
+     boundary script enforces this):
+     `record(context, memory_id, entities, relations, valid_from)`,
+     `remove(context, memory_id)`,
+     `neighbours(context, seeds, hops, as_of, limit) -> Vec<MemoryId>`,
+     `invalidate(context, edges, at, by)`.
+  4. `memories/infrastructure/sqlite_entity_graph.rs`. Graph writes join the **same
+     transaction** as the memory row and its vector — the rule Task 2.2 set, for the same
+     reason.
+  5. Wire in `bootstrap/memories_wiring.rs` behind `[graph].enabled`, default **false**.
+- **DoD:**
+  - [ ] Round-trip and 1-/2-hop tests against a tmpdir SQLite.
+  - [ ] `EntityKey` table-driven tests, ≥ 12 cases, including the `Fly.io` family.
+  - [ ] Cross-tenant test in `tests/identity_isolation.rs`: user B's hop never reaches
+        A's edges **even when both users store the identical entity name**.
+  - [ ] Orphan test: deleting a memory removes its entity rows and edges in one
+        transaction; an induced failure leaves neither behind.
+  - [ ] Flag off ⇒ recall results and scores unchanged (asserted, not assumed).
+
+#### Task 7.3.2 — Relations from the extraction call already being made (M)
+
+- **Goal:** every new ingest produces edges at **zero additional LLM calls**.
+- **Steps:**
+  1. Add an **optional** `relations: [{subject, predicate, object}]` to the extraction
+     schema (`understanding/domain/extraction_prompt.rs`) and a bullet beside the
+     existing `entities` one in `prompts/extraction.md` and `prompts/distillation.md`.
+     Optional in the strict sense: a model that omits it must still validate — the same
+     reasoning already recorded for tags and entities.
+  2. `RawRelation → Relation` normalization in `understanding/domain/candidate.rs`,
+     mirroring `normalise_entities`: drop when subject or object is empty, snake-case the
+     predicate, cap per candidate, and **drop relations whose endpoints aren't in the
+     candidate's own `entities`** — that anchoring is what keeps a hallucinated third
+     party out of the graph.
+  3. Carry `Candidate.relations` through `memory_ingestor` to the edge write.
+  4. Config `[graph]`: `enabled`, `extract_relations`, `max_relations_per_memory`,
+     `max_hops`, `hop_limit`, `backfill_budget` (7.3.5).
+- **Example:**
+  - Input: `"we're switching the whole backend to Hetzner, fly.io got too expensive"`
+  - Output (added to the existing candidate):
+    ```json
+    "relations": [{"subject":"Hetzner","predicate":"hosts","object":"backend"},
+                  {"subject":"backend","predicate":"migrated_from","object":"Fly.io"}]
+    ```
+- **DoD:**
+  - [ ] `ScriptedChatModel` tests: relations present, relations absent, dangling endpoint
+        dropped, predicate normalized, per-memory cap enforced.
+  - [ ] **Token cost measured, not assumed:** prompt + completion tokens over the eval
+        corpus, before vs after, recorded in the PR. If completion tokens rise > 20%,
+        `extract_relations` ships default-off and the number says why.
+  - [ ] Degraded/verbatim mode produces no relations and still saves.
+  - [ ] `tests/understanding_pipeline.rs` passes **unmodified** — extraction quality did
+        not move.
+
+#### Task 7.3.3 — Bi-temporality: valid time, and who invalidates whom (M)
+
+- **Goal:** the property that makes this Strategy B and not a co-occurrence graph —
+  *"what did we deploy on **before** the migration?"* answerable.
+- **Steps:**
+  1. Record decision 6 (the two clocks) in rustdoc on both `Memory` and the edge type.
+  2. `valid_from` defaults to the asserting memory's `created_at`. An LLM-supplied
+     explicit validity date is **out of scope** here — note it as the follow-up.
+  3. `memories/application/edge_invalidator.rs` — one use case, one `execute`. When
+     memory B supersedes memory A (Phase 4 reconciliation `UPDATE`/`DELETE`, Phase 5
+     merge), every edge A asserted whose `(subject_key, predicate)` B re-asserts with a
+     **different** `object_key` gets `invalid_at = B.valid_from`, `invalidated_by = B.id`.
+     Edges A asserted that B does not contradict stay valid — superseding a *memory* is
+     not blanket invalidation of everything it ever said, and treating it as such is the
+     easy way to erase history the audit trail promises to keep.
+  4. `as_of` on the read path: an edge is live at `T` when
+     `valid_from <= T AND (invalid_at IS NULL OR invalid_at > T)`.
+- **Example:**
+  - `mem_fly` asserts `backend —deploys_on→ Fly.io` (valid from 2026-01).
+  - `mem_hetzner` supersedes it, asserting `backend —deploys_on→ Hetzner` (valid from
+    2026-06). The Fly.io edge gets `invalid_at = 2026-06`, not deleted.
+  - `as_of = 2026-03` → Fly.io. Bare query → Hetzner.
+- **DoD:**
+  - [ ] **Time-travel test (load-bearing)**, driven by the `Clock` fake: the Fly.io edge
+        is live before the migration instant, invalid after, and an `as_of` read from
+        before it returns the Fly.io memory.
+  - [ ] A non-contradicting edge survives its memory being superseded.
+  - [ ] Invalidation is idempotent — re-running reconciliation never moves an existing
+        `invalid_at`.
+
+#### Task 7.3.4 — The graph-hop leg in recall (L)
+
+- **Goal:** graph evidence can lift the right memory into the top 5 — the only version of
+  this that moves 7.3.0's number.
+- **Steps:**
+  1. **Seeding costs no LLM call:** scan the query text for `memory_entities.entity_key`
+     matches for this user, using the same `EntityKey` canonicalization the writer used.
+     No seeds → empty leg → today's behaviour, exactly.
+  2. `EntityGraph::neighbours`: depth-bounded recursive CTE from the seeds, up to
+     `[graph].max_hops` (default 2), `as_of`-filtered, ordered by hop distance then edge
+     count, capped at `hop_limit`.
+  3. Generalize `RecallRanker::rank` from `(vector, keyword)` to N ranked lists;
+     `MatchDetail` gains `graph_rank: Option<usize>`. `RRF_K` and `MULTIPLIER_FLOOR` are
+     **not** touched: this task adds a leg, it does not retune the bands.
+  4. `MemoryRecaller::execute` runs the third leg alongside the other two, unions its ids
+     into `candidate_ids`, and degrades exactly as the keyword leg does — warn and
+     continue, because two thirds of a hybrid search still answers the question.
+  5. `RecallQuery.as_of`, surfaced on `POST /v1/memories/search` and MCP `memory_recall`;
+     `match.graph_rank` in the response DTO.
+- **DoD:**
+  - [ ] **Empty-leg identity test (load-bearing):** with no seeds, `rank` returns
+        identical ordering *and* identical scores to the two-leg call. This is what makes
+        "non-relational recall cannot regress" provable.
+  - [ ] The existing `recall_ranker` table-driven tests pass **unmodified**.
+  - [ ] Hop test: a memory that neither vector nor BM25 ranks at all, reachable only over
+        two relations, enters the top 5.
+  - [ ] Cross-tenant: the graph leg never seeds from, nor hops into, another user's rows.
+  - [ ] Perf: P95 recall stays < 50 ms at 100k memories/user with the leg **on**
+        (`scripts/bench-recall.sh`), numbers in the PR — the Phase 2 target holds or the
+        leg does not ship on by default.
+
+#### Task 7.3.5 — Backfill, budgeted (M)
+
+- **Goal:** an existing corpus gains a graph without a surprise provider bill.
+- **Steps:**
+  1. `recuerdos-ai graph backfill --entities` — rebuilds `memory_entities` from the
+     `entities` JSON already on every memory. **Zero LLM calls.** Every existing install
+     gets seeds and one-hop co-occurrence for free; this is the dividend for having
+     carried `Entity` since Phase 4.
+  2. `--relations` — re-extracts relations for memories that have none, as a background
+     job through the existing queue, reusing 7.1's `BudgetLimits` / `ConsolidationBudget`
+     verbatim (`[graph].backfill_budget`) and resuming from a watermark in the same
+     spirit as `ConsolidationStateStore`.
+  3. `--dry-run` reports memories, edges and model calls it *would* make, before anything
+     is spent.
+- **DoD:**
+  - [ ] Entity backfill over a seeded corpus makes zero provider calls — asserted with a
+        chat model that panics if invoked.
+  - [ ] Relation backfill stops cleanly at its budget and resumes where it stopped on the
+        next invocation.
+  - [ ] Dry-run mutates nothing (same assertion style as Phase 5's).
+
+#### Task 7.3.6 — Measure, document, decide (M)
+
+- **Goal:** the number that justifies the phase, and the docs that make it usable.
+- **Steps:** re-run `recuerdos-ai eval`; record the relational delta **and** that no other
+  `by_kind` moved; update `docs/api.md` (`as_of`, `graph_rank`), `docs/mcp.md`,
+  `docs/configuration.md` (`[graph]`), `docs/architecture.md` (third leg + the two
+  clocks); flip Strategy B's status in `project-plan.md` §4 and §15.
+- **DoD:**
+  - [ ] Relational recall@5 beats the 7.3.0 baseline by a **measured** margin, recorded in
+        the PR and in `eval/baseline.json`.
+  - [ ] Every other `by_kind` stays inside the existing `--max-drop 5` gate.
+  - [ ] `[graph].enabled` defaults to true **only if** both hold; otherwise it ships
+        default-off with the number stated plainly.
+  - [ ] Phase exit checklist → PR → tag `v0.2.0`.
+
+#### 7.3 sequencing & risk
+
+| Task | Effort | Risk | Blocks | Real payoff |
+|---|---|---|---|---|
+| 7.3.0 Relational eval + go/no-go | S | Low | everything | The number that says whether to build this at all |
+| 7.3.1 Schema + `EntityGraph` contract | M | Low–Med | 7.3.2–5 | Storage + the trait; inert behind a flag |
+| 7.3.2 Relations in the existing call | M | Med | 7.3.3, 7.3.4 | Edges at zero extra LLM calls per ingest |
+| 7.3.3 Bi-temporality | M | Med | 7.3.4 | The actual Strategy B differentiator |
+| 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | Graph evidence reaches the top 5 |
+| 7.3.5 Budgeted backfill | M | Low | — | Existing corpora get a graph, cheaply |
+| 7.3.6 Measure + docs | M | Low | — | The margin, in writing |
+
+**The four risks worth naming up front:**
+
+1. **Entity resolution is the sleeper.** `Fly.io` / `fly.io` / `Fly` / `flyio` must
+   canonicalize together or every hop is noise, and no test above fails loudly when they
+   don't — the eval just quietly doesn't improve. Mitigated by `EntityKey`'s table-driven
+   tests; the alias table is the escape hatch if 7.3.6 blames resolution.
+2. **The ranker is calibrated and the docs say so.** Contained by the empty-leg identity
+   test and by touching neither constant.
+3. **Extraction quality regression from a fatter schema.** Contained by the optional
+   field, the unmodified pipeline test suite, and the measured token delta.
+4. **Scope creep to Neo4j.** Out of scope by construction: SQLite tables and a 2-hop CTE
+   until a hop-latency eval says otherwise (guardrail 4).
+
+**What would make us stop:** 7.3.0 scoring high (the gap isn't real); the 7.3.2 token
+delta being large enough that ingest cost dominates; or 7.3.6 showing a relational gain
+that costs a regression elsewhere. Any of the three is a legitimate outcome, and the
+eval slice from 7.3.0 stays in the repo either way as the tripwire.
 
 ### Sequencing & risk
 
@@ -1046,7 +1320,7 @@ retrieval precision gained*, never in cosine math.
 |---|---|---|---|---|
 | 7.1 Budget + skip-unchanged | M | Low | ✅ Done | Fewer LLM merge calls; bounded run time — the honest version of the framework plan's Phase 1 |
 | 7.2 Optional sub-label | M | Low–Med | ✅ Done | Tighter clusters + a subcategory recall filter, exercised by the eval harness |
-| 7.3 Graph (Strategy B) | L | Med–High | ◻ Deferred | Relational recall — but it's `project-plan.md`'s moat item, deferred until an eval justifies it |
+| 7.3 Graph (Strategy B) | L | Med–High | 📋 Planned | Relational recall — `project-plan.md`'s moat item, now broken into 7.3.0–7.3.6 with 7.3.0 as the eval gate that justifies (or cancels) the rest |
 
 Do **not** carry over the framework plan's cumulative "125× / 3×" projections. Each
 task above ships behind the Phase 4.6 eval gate and is described by the number it
