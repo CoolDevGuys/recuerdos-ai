@@ -3,6 +3,7 @@
 
 pub mod http;
 pub mod mcp;
+pub mod sqlite_entity_graph;
 pub mod sqlite_memory_repository;
 pub mod sqlite_reindexer;
 pub mod sqlite_vector_index;

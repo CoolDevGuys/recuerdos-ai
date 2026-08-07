@@ -4,6 +4,8 @@
 
 pub mod category;
 pub mod embedder;
+pub mod entity_graph;
+pub mod entity_key;
 pub mod memory;
 pub mod memory_repository;
 pub mod recall_query;

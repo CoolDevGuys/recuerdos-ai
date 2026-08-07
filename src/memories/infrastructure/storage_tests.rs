@@ -4,12 +4,15 @@
 //! adapter's own file: the interesting assertions are about the two
 //! staying consistent with each other.
 
+use super::sqlite_entity_graph::SqliteEntityGraph;
 use super::sqlite_memory_repository::SqliteMemoryRepository;
 use super::sqlite_vector_index::SqliteVectorIndex;
 use super::tantivy_text_index::TantivyTextIndex;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::Category;
-use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
+use crate::memories::domain::entity_graph::{EntityGraph, Relation};
+use crate::memories::domain::entity_key::EntityKey;
+use crate::memories::domain::memory::{Entity, Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditOperation, MemoryRepository};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
@@ -25,8 +28,12 @@ struct Fixture {
     memories: SqliteMemoryRepository,
     vectors: SqliteVectorIndex,
     text: TantivyTextIndex,
+    graph: SqliteEntityGraph,
     alex: UserContext,
     sam: UserContext,
+    /// The shared connection, for the few graph tests that assert on raw
+    /// rows or install a trigger to induce a mid-transaction failure.
+    database: Arc<SqliteDatabase>,
     // Holds the text index's directory for the test's lifetime.
     _index_dir: tempfile::TempDir,
 }
@@ -41,8 +48,10 @@ fn fixture() -> Fixture {
         memories: SqliteMemoryRepository::new(Arc::clone(&database), "test-model", DIMENSIONS),
         vectors: SqliteVectorIndex::open(Arc::clone(&database), DIMENSIONS).unwrap(),
         text: TantivyTextIndex::open(index_dir.path().to_path_buf()).unwrap(),
+        graph: SqliteEntityGraph::new(Arc::clone(&database)),
         alex: authenticate(&identity, "alex"),
         sam: authenticate(&identity, "sam"),
+        database,
         _index_dir: index_dir,
     }
 }
@@ -1207,4 +1216,493 @@ fn rescoring_leaves_the_audit_trail_alone() {
             .len(),
         before
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// The entity graph (migration V8, Task 7.3.1). These live here beside the
+// vector and text index tests for the same reason those do: the graph is
+// a third index over the same store, and the interesting properties are
+// isolation and consistency, tested the same way.
+// ─────────────────────────────────────────────────────────────────────
+
+fn entity(name: &str, kind: &str) -> Entity {
+    Entity {
+        name: name.to_string(),
+        kind: kind.to_string(),
+    }
+}
+
+fn rel(subject: &str, predicate: &str, object: &str) -> Relation {
+    Relation {
+        subject: subject.to_string(),
+        predicate: predicate.to_string(),
+        object: object.to_string(),
+    }
+}
+
+fn seed(name: &str) -> EntityKey {
+    EntityKey::new(name)
+}
+
+fn count(fixture: &Fixture, table: &str, context: &UserContext, memory_id: MemoryId) -> i64 {
+    fixture
+        .database
+        .with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE user_id = ?1 AND memory_id = ?2"),
+                    rusqlite::params![context.user_id().to_string(), memory_id.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap())
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_memorys_entities_and_edges_round_trip_and_removing_it_takes_them_out() {
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[
+                entity("billing service", "service"),
+                entity("Meridian team", "team"),
+            ],
+            &[rel("billing service", "maintained_by", "Meridian team")],
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        2
+    );
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, memory_id),
+        1
+    );
+
+    fixture.graph.remove(&fixture.alex, memory_id).unwrap();
+
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        0,
+        "a forgotten memory left its entities behind"
+    );
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, memory_id),
+        0,
+        "a forgotten memory left its edges behind"
+    );
+}
+
+#[test]
+fn recording_replaces_rather_than_accumulates() {
+    // An edit re-records the memory; the projection must match the memory
+    // afterwards, not carry the union of both versions.
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[entity("Fly.io", "service")],
+            &[rel("backend", "deploys_on", "Fly.io")],
+            now(),
+        )
+        .unwrap();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[entity("Hetzner", "service")],
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        1
+    );
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, memory_id),
+        1
+    );
+
+    // And the surviving edge is the second one.
+    let found = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("hetzner")], 1, None, 10)
+        .unwrap();
+    assert!(found.contains(&memory_id));
+    let gone = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("fly.io")], 1, None, 10)
+        .unwrap();
+    assert!(gone.is_empty(), "the replaced edge is still reachable");
+}
+
+#[test]
+fn a_two_hop_neighbour_is_out_of_reach_at_one_hop() {
+    // billing service —maintained_by→ Meridian team ←leads— Nadia.
+    // Seeding the billing service reaches the ownership edge in one hop
+    // and Nadia only in two.
+    let fixture = fixture();
+    let owns = MemoryId::new();
+    let leads = MemoryId::new();
+
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            owns,
+            &[
+                entity("billing service", "service"),
+                entity("Meridian team", "team"),
+            ],
+            &[rel("billing service", "maintained_by", "Meridian team")],
+            now(),
+        )
+        .unwrap();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            leads,
+            &[entity("Nadia", "person"), entity("Meridian team", "team")],
+            &[rel("Nadia", "leads", "Meridian team")],
+            now(),
+        )
+        .unwrap();
+
+    let one_hop = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("billing service")], 1, None, 10)
+        .unwrap();
+    assert!(
+        one_hop.contains(&owns),
+        "the ownership edge is one hop away"
+    );
+    assert!(
+        !one_hop.contains(&leads),
+        "Nadia is two hops away and must not appear at one"
+    );
+
+    let two_hops = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("billing service")], 2, None, 10)
+        .unwrap();
+    assert!(two_hops.contains(&owns));
+    assert!(
+        two_hops.contains(&leads),
+        "Nadia should be reachable in two hops"
+    );
+}
+
+#[test]
+fn a_hop_never_crosses_users_even_with_the_same_entity_name() {
+    // Both users store an entity called "shared service". A hop for one
+    // must never reach the other's edges — the graph's isolation is a
+    // property of the WHERE clause, not of the entity names being distinct.
+    let fixture = fixture();
+    let alex_memory = MemoryId::new();
+    let sam_memory = MemoryId::new();
+
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            alex_memory,
+            &[
+                entity("shared service", "service"),
+                entity("alex thing", "thing"),
+            ],
+            &[rel("shared service", "relates_to", "alex thing")],
+            now(),
+        )
+        .unwrap();
+    fixture
+        .graph
+        .record(
+            &fixture.sam,
+            sam_memory,
+            &[
+                entity("shared service", "service"),
+                entity("sam thing", "thing"),
+            ],
+            &[rel("shared service", "relates_to", "sam thing")],
+            now(),
+        )
+        .unwrap();
+
+    let alex_hits = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("shared service")], 2, None, 10)
+        .unwrap();
+    assert!(alex_hits.contains(&alex_memory));
+    assert!(
+        !alex_hits.contains(&sam_memory),
+        "alex's hop reached sam's edge"
+    );
+
+    let sam_hits = fixture
+        .graph
+        .neighbours(&fixture.sam, &[seed("shared service")], 2, None, 10)
+        .unwrap();
+    assert!(sam_hits.contains(&sam_memory));
+    assert!(!sam_hits.contains(&alex_memory));
+
+    // And a remove is scoped too: alex cannot delete sam's rows by naming
+    // his memory id.
+    fixture.graph.remove(&fixture.alex, sam_memory).unwrap();
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.sam, sam_memory),
+        1,
+        "alex removed sam's edge"
+    );
+}
+
+#[test]
+fn an_empty_or_unknown_seed_reaches_nothing() {
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[
+                entity("billing service", "service"),
+                entity("Meridian team", "team"),
+            ],
+            &[rel("billing service", "maintained_by", "Meridian team")],
+            now(),
+        )
+        .unwrap();
+
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[], 2, None, 10)
+            .unwrap()
+            .is_empty(),
+        "no seeds must mean no hop — this is what keeps a query naming no \
+         known entity from perturbing recall"
+    );
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("nothing here")], 2, None, 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_failed_edge_write_rolls_back_the_entities_written_before_it() {
+    // record() inserts a memory's entities and then its edges in one
+    // transaction. Inducing the edge insert to fail must undo the entity
+    // rows too, or a half-written projection would point at the memory.
+    let fixture = fixture();
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER boom BEFORE INSERT ON memory_relations
+                     BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    let memory_id = MemoryId::new();
+    let result = fixture.graph.record(
+        &fixture.alex,
+        memory_id,
+        &[entity("Hetzner", "service")],
+        &[rel("backend", "deploys_on", "Hetzner")],
+        now(),
+    );
+
+    assert!(result.is_err(), "the aborted edge write should surface");
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        0,
+        "the entity rows written before the failing edge were not rolled back"
+    );
+}
+
+#[test]
+fn an_edge_is_reachable_only_within_its_validity_interval() {
+    // valid_from is when the fact became true; a read as_of an earlier
+    // point must not see it. This is the bi-temporal read Task 7.3.3
+    // builds on.
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    let born = now();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[entity("backend", "component"), entity("Fly.io", "service")],
+            &[rel("backend", "deploys_on", "Fly.io")],
+            born,
+        )
+        .unwrap();
+
+    let before = born - chrono::Duration::days(1);
+    let after = born + chrono::Duration::days(1);
+
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, Some(before), 10)
+            .unwrap()
+            .is_empty(),
+        "the edge was visible before it became true"
+    );
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, Some(after), 10)
+            .unwrap()
+            .contains(&memory_id)
+    );
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, None, 10)
+            .unwrap()
+            .contains(&memory_id),
+        "with no as_of the current (still-open) edge should be reachable"
+    );
+}
+
+#[test]
+fn invalidation_closes_a_contradicted_edge_but_history_still_reads() {
+    // backend deploys on Fly.io (from `born`), then a migration memory
+    // re-asserts it as Hetzner. The Fly.io edge is closed as of the
+    // migration, not deleted: a read from before still sees it.
+    let fixture = fixture();
+    let fly_memory = MemoryId::new();
+    let hetzner_memory = MemoryId::new();
+    let born = now();
+    let migration = born + chrono::Duration::days(30);
+
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            fly_memory,
+            &[entity("backend", "component"), entity("Fly.io", "service")],
+            &[rel("backend", "deploys_on", "Fly.io")],
+            born,
+        )
+        .unwrap();
+
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            migration,
+            hetzner_memory,
+        )
+        .unwrap();
+
+    // Current view: the Fly.io edge is gone.
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, None, 10)
+            .unwrap()
+            .is_empty(),
+        "the contradicted edge is still live in the current view"
+    );
+    // Historical view, between born and the migration: it is still there.
+    let midpoint = born + chrono::Duration::days(15);
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, Some(midpoint), 10)
+            .unwrap()
+            .contains(&fly_memory),
+        "history was rewritten rather than preserved"
+    );
+}
+
+#[test]
+fn invalidation_spares_a_reaffirmed_edge_and_is_idempotent() {
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    let by = MemoryId::new();
+    let born = now();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[entity("backend", "component"), entity("Hetzner", "service")],
+            &[rel("backend", "deploys_on", "Hetzner")],
+            born,
+        )
+        .unwrap();
+
+    // Re-asserting the SAME object is not a contradiction — the edge stays.
+    let at = born + chrono::Duration::days(1);
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            at,
+            by,
+        )
+        .unwrap();
+    // Running it again must not move anything either.
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            at,
+            by,
+        )
+        .unwrap();
+
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, None, 10)
+            .unwrap()
+            .contains(&memory_id),
+        "a re-affirmed edge was wrongly closed"
+    );
+}
+
+#[test]
+fn the_default_build_has_no_graph_and_enabling_it_wires_one() {
+    // The inert-by-default guarantee, at the wiring seam: recall never
+    // consults a graph that isn't there, so a default build behaves
+    // exactly as it did before Task 7.3.
+    use crate::bootstrap::config::AppConfig;
+
+    let off = AppConfig::default();
+    assert!(!off.graph.enabled, "the graph must default to off");
+
+    let mut on = AppConfig::default();
+    on.graph.enabled = true;
+    assert!(on.graph.enabled);
 }
