@@ -1088,7 +1088,7 @@ would otherwise be re-litigated mid-build.
 
 ---
 
-#### Task 7.3.0 — Relational eval set + the go/no-go measurement (S)
+#### Task 7.3.0 — Relational eval set + the go/no-go measurement (S) ✅ DONE
 
 - **Goal:** a `relational` slice of `eval/cases.toml` and a recorded semantic-only score,
   so the rest of 7.3 is justified — or cancelled — by a number instead of by the roadmap.
@@ -1107,14 +1107,52 @@ would otherwise be re-litigated mid-build.
   4. Run `recuerdos-ai eval`; commit the resulting `by_kind.relational` into
      `eval/baseline.json`.
 - **DoD:**
-  - [ ] `by_kind.relational` recorded in the committed baseline.
-  - [ ] The existing 13 cases score exactly as before — seeds were added, none changed.
-  - [ ] **Go/no-go written into the PR description.** If relational recall@5 already
-        clears ~80, 7.3 goes back on the shelf and this slice stays as the tripwire that
-        tells us when it stops clearing. The rest of this task list is only justified by
-        a low number here.
+  - [x] `by_kind.relational` recorded in the committed baseline. **71.4%** (5 of 7
+        cases already answered by semantic-only recall).
+  - [x] The existing cases score exactly as before — verified by a before/after run on
+        the pre-7.3.0 corpus: every existing kind is identical (`needle` 66.7%, all
+        others 100%).
+  - [x] **Go/no-go recorded (below).** 71.4% is under the ~80 shelf-it line, so it is a
+        (marginal) **GO** — but the number is inflated by relational cases the small
+        corpus lets semantic recall solve anyway. The real graph gap is the two clean
+        two-hop, vocabulary-disjoint cases that miss.
 
-#### Task 7.3.1 — Graph schema + domain contract (M)
+- **As built (2026-08-07):**
+  - **The measurement.** `recall@5` overall 87.5% across 24 cases; `relational` 71.4%.
+    The two failing relational cases are the genuine two-hop ones whose target shares no
+    vocabulary with the query — *"who should I ask about a billing service decision"* →
+    `Nadia is the tech lead of the Meridian team` (billing service → Meridian team →
+    Nadia), and the Lisbon-office sibling. The other five "relational" cases pass under
+    semantic-only recall because at a 33-memory corpus the target is usually already in
+    the top 5. **Read the 71.4% as "the gap is real but narrow at personal scale, and
+    concentrated in true multi-hop, disjoint-vocabulary queries"** — not as a green light
+    on its own. A larger/harder relational corpus would sharpen the signal before
+    committing to 7.3.4.
+  - **`SeedMemory` now carries `entities` and `relations`** (`src/bootstrap/eval.rs`);
+    entities flow onto the seeded `Memory` (retrieval ignores them today — tantivy
+    indexes only content/tags/category and the embedding is over content, so seeding them
+    cannot move a score), relations are parsed but unread until 7.3.2. The corpus-parse
+    test now also asserts every relation endpoint is a declared entity of its memory —
+    the anchoring rule 7.3.2 will enforce in the pipeline, applied here to the
+    hand-written seeds so a `Fly.io`/`Flyio` typo fails `cargo test`, not the eval.
+  - **Corpus:** +11 entity-linked memories in four chains (billing/Meridian/Nadia/
+    Lisbon/ledger-db, mobile-app/notifications/Theo, checkout/Stripe/PCI,
+    analytics-pipeline/Kafka→Kinesis/Priya) and +7 `kind = "relational"` cases in
+    `eval/cases.toml`.
+  - **One production change was required to hold "existing cases unchanged", and it is
+    not cosmetic:** adding the corpus pushed the vague `tag filter: typescript` case
+    (query `"conventions"`, a weak match for its target) out of the post-fetch candidate
+    window, dropping it 100%→0%. This is the over-fetch limitation
+    `memory_recaller.rs` documents, triggered by the corpus crossing `candidate_depth`.
+    Fixed at the source: `RecallQuery::candidate_depth` floor raised 20→40 (`* 4`→`* 8`)
+    in `src/memories/domain/recall_query.rs`. Widening the window only adds lower-ranked
+    candidates to ranking — it can never displace a top result — so every existing
+    unfiltered case is byte-unchanged and filtered recall strictly improves; the
+    before/after run confirms it. The scalable fix (filters pushed into both indexes)
+    stays future work; this floor is the honest interim at personal scale.
+  - `just check` (fmt, clippy `-D warnings`, boundary script, full suite) is green.
+
+#### Task 7.3.1 — Graph schema + domain contract (M) ✅ DONE
 
 - **Goal:** the storage and the contract, wired but inert — `[graph].enabled = false`,
   recall byte-identical to today.
@@ -1145,13 +1183,68 @@ would otherwise be re-litigated mid-build.
      reason.
   5. Wire in `bootstrap/memories_wiring.rs` behind `[graph].enabled`, default **false**.
 - **DoD:**
-  - [ ] Round-trip and 1-/2-hop tests against a tmpdir SQLite.
-  - [ ] `EntityKey` table-driven tests, ≥ 12 cases, including the `Fly.io` family.
-  - [ ] Cross-tenant test in `tests/identity_isolation.rs`: user B's hop never reaches
-        A's edges **even when both users store the identical entity name**.
-  - [ ] Orphan test: deleting a memory removes its entity rows and edges in one
-        transaction; an induced failure leaves neither behind.
-  - [ ] Flag off ⇒ recall results and scores unchanged (asserted, not assumed).
+  - [x] Round-trip and 1-/2-hop tests against SQLite
+        (`a_memorys_entities_and_edges_round_trip...`,
+        `a_two_hop_neighbour_is_out_of_reach_at_one_hop`).
+  - [x] `EntityKey` table-driven tests, 12 cases plus three more, including the `Fly.io`
+        family and a case pinning that `Fly`/`flyio`/`fly.io` stay separate (the known
+        alias-table limitation).
+  - [x] Cross-tenant test — **relocated to `storage_tests.rs`, not
+        `tests/identity_isolation.rs`** (see as-built): user B's hop never reaches A's
+        edges even when both store the identical entity name, and `remove` is scoped too.
+  - [x] Orphan test: `remove` clears both tables; a temp-trigger–induced failure on the
+        edge insert rolls back the entity rows written before it
+        (`a_failed_edge_write_rolls_back_the_entities_written_before_it`).
+  - [x] Flag off ⇒ recall unchanged: default build has no graph
+        (`the_default_build_has_no_graph_and_enabling_it_wires_one`), recall never
+        references it, and the 7.3.0 eval baseline is untouched.
+
+- **As built (2026-08-07):**
+  - **Migration `V8__entity_graph.sql`** adds `memory_entities` (PK
+    `(user_id, memory_id, entity_key)`, index `(user_id, entity_key)`) and the bi-temporal
+    `memory_relations` (indexed `(user_id, subject_key, invalid_at)` and the object mirror),
+    both `ON DELETE CASCADE` from `users`. **No FK to `memories`** — a memory is
+    soft-deleted so a cascade would never fire; the rows are dropped explicitly by
+    `EntityGraph::remove`, the same reasoning `memory_audit` records.
+  - **`EntityKey`** (`memories/domain/entity_key.rs`) normalizes case, whitespace, a
+    trailing possessive (`'s`/curly) and trailing sentence punctuation, while keeping an
+    internal dot (`fly.io`) intact. It deliberately does **not** unify `Fly`/`flyio` with
+    `fly.io` — that needs the alias table held as the escape hatch — and a test pins that
+    so a future alias step is a deliberate change, not an accident.
+  - **`EntityGraph` trait** (`memories/domain/entity_graph.rs`, beside `vector_index.rs`)
+    with `record`/`remove`/`neighbours`/`invalidate`, each taking `&UserContext`. The
+    concrete `SqliteEntityGraph` traverses **app-side, one hop at a time** rather than a
+    recursive CTE: correct and readable at a 2-hop, personal-scale corpus, and 7.3.4 is
+    where the CTE earns its cost on the hot path. `invalidate` (a 7.3.3 driver) and the
+    `as_of` bi-temporal read are implemented and tested now so 7.3.3 is just the use case
+    that calls them.
+  - **Two deviations from the written steps, both deliberate:**
+    - **The "same transaction as the memory row" (step 4) is not literal, because the
+      codebase's write path is not literal either.** `DirectMemorySaver` already writes the
+      row, the vector and the text index as *separate* `with_connection` calls with
+      compensating rollback — there is no single memory-row-plus-vector transaction to join.
+      So `record`/`remove` are each atomic **within themselves** (entities + edges in one
+      transaction), and the write-path integration — where the saver/ingestor calls
+      `record` and compensates like it does for the vector — lands in **7.3.2** alongside
+      the relations it will carry. In 7.3.1 the store is constructed but not yet called
+      outside tests.
+    - **The cross-tenant test lives in `storage_tests.rs`, not `tests/identity_isolation.rs`.**
+      The latter is a black-box HTTP suite (`TestApp`, `reqwest`) and cannot forge a
+      `UserContext` or reach an inert store with no HTTP surface. The vector index's
+      isolation test lives in `storage_tests.rs` for exactly this reason; the graph's joins
+      it. A black-box case joins `identity_isolation.rs` in 7.3.4, when recall exposes the
+      hop over HTTP.
+  - **Because the store is inert (its callers are 7.3.2/7.3.4), the crate build sees the
+    subsystem as dead code.** Rather than pass `&[]` through a half-wired saver — which
+    would still leave `neighbours`/`invalidate` dead — the three new graph files carry a
+    documented module-level `#![allow(dead_code)]` that comes off as each caller lands.
+    The `Memories.graph` field is `Option<Arc<dyn EntityGraph>>`, `Some` only when
+    `[graph].enabled` (default off), `#[allow(dead_code)]` until recall reads it.
+  - **Config:** `[graph]` (`enabled` default false, `max_hops` 2, `hop_limit` 50), with
+    validation that rejects a zero hop budget only when enabled; documented in
+    `recuerdos-ai.example.toml`.
+  - `just check` (fmt, clippy `-D warnings`, boundary script, full suite — 9 new graph
+    tests) is green.
 
 #### Task 7.3.2 — Relations from the extraction call already being made (M)
 
@@ -1288,8 +1381,8 @@ would otherwise be re-litigated mid-build.
 
 | Task | Effort | Risk | Blocks | Real payoff |
 |---|---|---|---|---|
-| 7.3.0 Relational eval + go/no-go | S | Low | everything | The number that says whether to build this at all |
-| 7.3.1 Schema + `EntityGraph` contract | M | Low–Med | 7.3.2–5 | Storage + the trait; inert behind a flag |
+| 7.3.0 Relational eval + go/no-go | S | Low | everything | ✅ Done — relational 71.4% (marginal GO; gap concentrated in true 2-hop cases) |
+| 7.3.1 Schema + `EntityGraph` contract | M | Low–Med | 7.3.2–5 | ✅ Done — V8 tables, `EntityKey`, `EntityGraph`, `SqliteEntityGraph`; inert behind `[graph].enabled=false` |
 | 7.3.2 Relations in the existing call | M | Med | 7.3.3, 7.3.4 | Edges at zero extra LLM calls per ingest |
 | 7.3.3 Bi-temporality | M | Med | 7.3.4 | The actual Strategy B differentiator |
 | 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | Graph evidence reaches the top 5 |
