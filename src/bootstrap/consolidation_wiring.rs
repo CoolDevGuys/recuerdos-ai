@@ -10,7 +10,9 @@ use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::understanding_wiring::Understanding;
 use crate::bootstrap::wiring::Identity;
-use crate::consolidation::application::consolidation_runner::ConsolidationRunner;
+use crate::consolidation::application::consolidation_runner::{
+    BudgetLimits, ConsolidationRunner, ConsolidationSettings,
+};
 use crate::consolidation::application::memory_maintainer::MemoryMaintainer;
 use crate::consolidation::application::memory_merger::MemoryMerger;
 use crate::consolidation::application::profile_digest_writer::ProfileDigestWriter;
@@ -82,14 +84,19 @@ impl Consolidation {
             )),
             merger,
             Arc::clone(&identity.clock),
-            config.consolidation.similarity_threshold as f32,
-            some_if_nonzero(config.consolidation.budget.max_llm_calls),
-            some_if_nonzero(config.consolidation.budget.max_duration_secs),
-            some_if_nonzero(config.consolidation.budget.max_memories),
-            Some(
-                Arc::new(SqliteConsolidationStateStore::new(Arc::clone(&database)))
-                    as Arc<dyn ConsolidationStateStore>,
-            ),
+            ConsolidationSettings {
+                threshold: config.consolidation.similarity_threshold as f32,
+                budget: BudgetLimits {
+                    max_llm_calls: some_if_nonzero(config.consolidation.budget.max_llm_calls),
+                    max_duration_secs: some_if_nonzero(
+                        config.consolidation.budget.max_duration_secs,
+                    ),
+                    max_memories: some_if_nonzero(config.consolidation.budget.max_memories),
+                },
+                state_store: Some(Arc::new(SqliteConsolidationStateStore::new(Arc::clone(
+                    &database,
+                ))) as Arc<dyn ConsolidationStateStore>),
+            },
         ));
 
         Ok(Self {

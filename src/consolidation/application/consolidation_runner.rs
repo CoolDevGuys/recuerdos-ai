@@ -86,16 +86,32 @@ pub struct ConsolidationRunner {
     merger: Option<Arc<MemoryMerger>>,
     clock: Arc<dyn Clock>,
     threshold: f32,
-    /// Maximum LLM merge calls per run. `None` means unlimited.
-    max_llm_calls: Option<usize>,
-    /// Maximum wall-clock seconds per run. `None` means unlimited.
-    max_duration_secs: Option<u64>,
-    /// Maximum memories retired per run. `None` means unlimited.
-    max_memories: Option<usize>,
+    /// Per-run limits. Every field `None` means "no limit".
+    budget: BudgetLimits,
     /// Watermark store for the skip-unchanged heuristic. `None` disables
     /// skipping — every group is examined every run, the pre-7.1
     /// behaviour.
     state_store: Option<Arc<dyn ConsolidationStateStore>>,
+}
+
+/// The per-run budget limits, from `[consolidation].budget`. A `None` on
+/// any axis means "unlimited" there.
+#[derive(Clone, Copy, Default)]
+pub struct BudgetLimits {
+    pub max_llm_calls: Option<usize>,
+    pub max_duration_secs: Option<u64>,
+    pub max_memories: Option<usize>,
+}
+
+/// Everything that tunes a run, as opposed to the collaborators it drives:
+/// the similarity threshold, the budget, and the optional skip-watermark
+/// store. Bundled so the constructor takes settings as one argument rather
+/// than four positional knobs.
+#[derive(Clone)]
+pub struct ConsolidationSettings {
+    pub threshold: f32,
+    pub budget: BudgetLimits,
+    pub state_store: Option<Arc<dyn ConsolidationStateStore>>,
 }
 
 /// A `(category, subcategory)` group that was examined this run, and the
@@ -126,15 +142,11 @@ struct ConsolidationBudget {
 }
 
 impl ConsolidationBudget {
-    fn new(
-        max_llm_calls: Option<usize>,
-        max_duration_secs: Option<u64>,
-        max_memories: Option<usize>,
-    ) -> Self {
+    fn new(limits: BudgetLimits) -> Self {
         Self {
-            max_llm_calls,
-            max_duration_secs,
-            max_memories,
+            max_llm_calls: limits.max_llm_calls,
+            max_duration_secs: limits.max_duration_secs,
+            max_memories: limits.max_memories,
             llm_calls_made: 0,
             memories_retired: 0,
             start: Instant::now(),
@@ -201,7 +213,6 @@ impl ConsolidationRunner {
     /// it. Passing both would let a caller hand over two different user
     /// tables — one to walk, another to authenticate against — which is
     /// not a configuration that means anything.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         users: Arc<dyn UserRepository>,
         memories: Arc<dyn MemoryRepository>,
@@ -209,11 +220,7 @@ impl ConsolidationRunner {
         maintainer: Arc<MemoryMaintainer>,
         merger: Option<Arc<MemoryMerger>>,
         clock: Arc<dyn Clock>,
-        threshold: f32,
-        max_llm_calls: Option<usize>,
-        max_duration_secs: Option<u64>,
-        max_memories: Option<usize>,
-        state_store: Option<Arc<dyn ConsolidationStateStore>>,
+        settings: ConsolidationSettings,
     ) -> Self {
         Self {
             resolver: Arc::new(BackgroundUserResolver::new(Arc::clone(&users))),
@@ -223,11 +230,9 @@ impl ConsolidationRunner {
             maintainer,
             merger,
             clock,
-            threshold,
-            max_llm_calls,
-            max_duration_secs,
-            max_memories,
-            state_store,
+            threshold: settings.threshold,
+            budget: settings.budget,
+            state_store: settings.state_store,
         }
     }
 
@@ -244,11 +249,7 @@ impl ConsolidationRunner {
             ..ConsolidationReport::default()
         };
 
-        let mut budget = ConsolidationBudget::new(
-            self.max_llm_calls,
-            self.max_duration_secs,
-            self.max_memories,
-        );
+        let mut budget = ConsolidationBudget::new(self.budget);
 
         for user in all {
             if budget.is_exhausted() {
@@ -306,14 +307,14 @@ impl ConsolidationRunner {
 
         let this = self.clone();
         let owned = context.clone();
-        let (examined, clusters, categories_skipped, processed) =
+        let (examined, clusters, groups_skipped, processed) =
             blocking(move || this.plan(&owned)).await?;
 
         let mut report = ConsolidationReport {
             dry_run,
             memories_examined: examined,
             clusters_found: clusters.len(),
-            categories_skipped,
+            groups_skipped,
             expired: maintenance.expired,
             rescored: maintenance.rescored,
             ..ConsolidationReport::default()
@@ -447,7 +448,7 @@ impl ConsolidationRunner {
 
         let examined = active.len();
         let mut clusters = Vec::new();
-        let mut categories_skipped = 0usize;
+        let mut groups_skipped = 0usize;
         let mut processed: Vec<ProcessedGroup> = Vec::new();
 
         let mut groups = by_category_and_subcategory(active);
@@ -470,7 +471,7 @@ impl ConsolidationRunner {
             // Skip-unchanged heuristic: if nothing in this group has
             // changed since it was last consolidated, skip it entirely.
             if self.should_skip(context, &category, subcategory.as_deref(), current_max)? {
-                categories_skipped += 1;
+                groups_skipped += 1;
                 continue;
             }
 
@@ -500,7 +501,7 @@ impl ConsolidationRunner {
             clusters.extend(self.cluster(group)?);
         }
 
-        Ok((examined, clusters, categories_skipped, processed))
+        Ok((examined, clusters, groups_skipped, processed))
     }
 
     /// Returns true if this `(category, subcategory)` group should be
@@ -697,11 +698,11 @@ mod tests {
                 )),
                 Some(merger),
                 fixed_clock(),
-                threshold,
-                None,
-                None,
-                None,
-                None,
+                ConsolidationSettings {
+                    threshold,
+                    budget: BudgetLimits::default(),
+                    state_store: None,
+                },
             ),
             model,
         )
@@ -733,11 +734,11 @@ mod tests {
                 )),
                 Some(merger),
                 fixed_clock(),
-                threshold,
-                None,
-                None,
-                None,
-                Some(state),
+                ConsolidationSettings {
+                    threshold,
+                    budget: BudgetLimits::default(),
+                    state_store: Some(state),
+                },
             ),
             model,
         )
@@ -1098,11 +1099,14 @@ mod tests {
                 Arc::new(Taxonomy::new(vec![])),
             ))),
             fixed_clock(),
-            STRICT,
-            Some(1),
-            None,
-            None,
-            None,
+            ConsolidationSettings {
+                threshold: STRICT,
+                budget: BudgetLimits {
+                    max_llm_calls: Some(1),
+                    ..BudgetLimits::default()
+                },
+                state_store: None,
+            },
         );
 
         let report = tight_runner.execute(false).await.unwrap();
@@ -1135,10 +1139,7 @@ mod tests {
         );
         let report = runner.execute(false).await.unwrap();
 
-        assert_eq!(
-            report.categories_skipped, 0,
-            "nothing to skip on a first run"
-        );
+        assert_eq!(report.groups_skipped, 0, "nothing to skip on a first run");
         assert_eq!(report.merged, 1);
         assert_eq!(report.retired, 5);
         assert_eq!(
@@ -1167,7 +1168,7 @@ mod tests {
         );
         let first_report = first.execute(false).await.unwrap();
         assert_eq!(
-            first_report.categories_skipped, 0,
+            first_report.groups_skipped, 0,
             "the first run has no watermark to skip against"
         );
         assert_eq!(
@@ -1185,7 +1186,7 @@ mod tests {
         let second_report = second.execute(false).await.unwrap();
 
         assert_eq!(
-            second_report.categories_skipped, 1,
+            second_report.groups_skipped, 1,
             "the unchanged group should be skipped the second time"
         );
         assert_eq!(
@@ -1239,7 +1240,7 @@ mod tests {
         let report = runner.execute(false).await.unwrap();
 
         assert_eq!(
-            report.categories_skipped, 0,
+            report.groups_skipped, 0,
             "a changed group must be re-examined, not skipped"
         );
     }
@@ -1281,7 +1282,7 @@ mod tests {
         let retry_report = retry.execute(false).await.unwrap();
 
         assert_eq!(
-            retry_report.categories_skipped, 0,
+            retry_report.groups_skipped, 0,
             "a group whose merge failed must not be skipped"
         );
         assert_eq!(

@@ -25,7 +25,7 @@
 -- defeats the skip.
 
 CREATE TABLE consolidation_state (
-    user_id TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     category TEXT NOT NULL,
     subcategory TEXT NOT NULL DEFAULT '',
     -- The maximum updated_at among the group's active memories at the

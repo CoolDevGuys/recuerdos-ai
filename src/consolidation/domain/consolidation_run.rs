@@ -33,8 +33,9 @@ pub struct ConsolidationReport {
     pub expired: usize,
     /// Memories whose decay score was recomputed.
     pub rescored: usize,
-    /// Categories skipped because nothing changed since the last run.
-    pub categories_skipped: usize,
+    /// `(category, subcategory)` groups skipped because nothing in them
+    /// changed since the last run.
+    pub groups_skipped: usize,
     /// True when the run stopped early because a budget limit was reached.
     pub budget_exhausted: bool,
     /// Human-readable reason when the budget was exhausted.
@@ -64,11 +65,8 @@ impl ConsolidationReport {
             String::new()
         };
 
-        let skip_note = if self.categories_skipped > 0 {
-            format!(
-                ", {} category(ies) skipped (unchanged)",
-                self.categories_skipped
-            )
+        let skip_note = if self.groups_skipped > 0 {
+            format!(", {} group(s) skipped (unchanged)", self.groups_skipped)
         } else {
             String::new()
         };
@@ -96,7 +94,7 @@ impl ConsolidationReport {
         self.kept_separate += other.kept_separate;
         self.expired += other.expired;
         self.rescored += other.rescored;
-        self.categories_skipped += other.categories_skipped;
+        self.groups_skipped += other.groups_skipped;
         self.budget_exhausted |= other.budget_exhausted;
         if let Some(reason) = other.budget_reason {
             self.budget_reason.get_or_insert(reason);
@@ -190,17 +188,17 @@ mod tests {
     }
 
     #[test]
-    fn categories_skipped_is_visible_in_the_summary() {
+    fn groups_skipped_is_visible_in_the_summary() {
         let report = ConsolidationReport {
             users: 1,
-            categories_skipped: 3,
+            groups_skipped: 3,
             ..ConsolidationReport::default()
         };
 
         let summary = report.summary();
         assert!(
-            summary.contains("3 category(ies) skipped"),
-            "summary should mention skipped categories: {summary}"
+            summary.contains("3 group(s) skipped"),
+            "summary should mention skipped groups: {summary}"
         );
     }
 

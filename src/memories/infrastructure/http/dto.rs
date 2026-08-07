@@ -59,6 +59,8 @@ impl SaveMemoryRequest {
 pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     pub category: Option<String>,
+    /// `null` clears the subcategory; omitting the field leaves it alone.
+    #[serde(default, with = "serde_with_double_option")]
     pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     /// `null` clears the expiry; omitting the field leaves it alone.
@@ -235,6 +237,25 @@ mod tests {
 
         let cleared: UpdateMemoryRequest = serde_json::from_str(r#"{"expires_at":null}"#).unwrap();
         assert_eq!(cleared.expires_at, Some(None), "null means clear it");
+    }
+
+    #[test]
+    fn a_patch_distinguishes_absent_from_null_subcategory() {
+        // Same three-way distinction the domain's Option<Option<String>>
+        // relies on: omit to leave alone, null to clear, a value to set.
+        let absent: UpdateMemoryRequest = serde_json::from_str(r#"{"content":"x"}"#).unwrap();
+        assert_eq!(absent.subcategory, None, "absent means leave alone");
+
+        let cleared: UpdateMemoryRequest = serde_json::from_str(r#"{"subcategory":null}"#).unwrap();
+        assert_eq!(cleared.subcategory, Some(None), "null means clear it");
+
+        let set: UpdateMemoryRequest =
+            serde_json::from_str(r#"{"subcategory":"testing"}"#).unwrap();
+        assert_eq!(
+            set.subcategory,
+            Some(Some("testing".to_string())),
+            "a value sets it"
+        );
     }
 
     #[test]
