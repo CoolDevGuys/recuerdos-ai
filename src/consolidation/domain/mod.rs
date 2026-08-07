@@ -3,6 +3,7 @@
 
 pub mod cluster_builder;
 pub mod consolidation_run;
+pub mod consolidation_state;
 pub mod decay;
 pub mod digest_prompt;
 pub mod distillation;

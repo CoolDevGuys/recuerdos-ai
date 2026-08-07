@@ -202,6 +202,7 @@ mod tests {
             NewMemory {
                 content: content.to_string(),
                 category,
+                subcategory: None,
                 tags: tags.iter().map(|tag| tag.to_string()).collect(),
                 entities: vec![],
                 confidence: 1.0,

@@ -63,6 +63,7 @@ impl IngestPipeline for VerbatimIngestor {
         let new = NewMemory {
             content: payload.content.clone(),
             category,
+            subcategory: None,
             tags: payload.tags.clone(),
             entities: Vec::new(),
             // Verbatim: the user said it, we did not infer it.

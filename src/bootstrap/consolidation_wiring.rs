@@ -10,12 +10,16 @@ use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::understanding_wiring::Understanding;
 use crate::bootstrap::wiring::Identity;
-use crate::consolidation::application::consolidation_runner::ConsolidationRunner;
+use crate::consolidation::application::consolidation_runner::{
+    BudgetLimits, ConsolidationRunner, ConsolidationSettings,
+};
 use crate::consolidation::application::memory_maintainer::MemoryMaintainer;
 use crate::consolidation::application::memory_merger::MemoryMerger;
 use crate::consolidation::application::profile_digest_writer::ProfileDigestWriter;
 use crate::consolidation::application::session_distiller::SessionDistiller;
+use crate::consolidation::domain::consolidation_state::ConsolidationStateStore;
 use crate::consolidation::domain::profile_digest::ProfileDigestStore;
+use crate::consolidation::infrastructure::sqlite_consolidation_state_store::SqliteConsolidationStateStore;
 use crate::consolidation::infrastructure::sqlite_profile_digest_store::SqliteProfileDigestStore;
 use crate::shared::error::Result;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
@@ -24,6 +28,12 @@ use crate::understanding::application::memory_reconciler::MemoryReconciler;
 use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
 use crate::understanding::domain::ingest_pipeline::IngestPipeline;
 use std::sync::Arc;
+
+/// Convert a config value to `Some` if non-zero, `None` otherwise. A zero
+/// in the config means "unlimited", which the runner expresses as `None`.
+fn some_if_nonzero<T: Default + Copy + PartialEq>(v: T) -> Option<T> {
+    if v == T::default() { None } else { Some(v) }
+}
 
 pub struct Consolidation {
     pub session_distiller: Arc<SessionDistiller>,
@@ -74,7 +84,19 @@ impl Consolidation {
             )),
             merger,
             Arc::clone(&identity.clock),
-            config.consolidation.similarity_threshold as f32,
+            ConsolidationSettings {
+                threshold: config.consolidation.similarity_threshold as f32,
+                budget: BudgetLimits {
+                    max_llm_calls: some_if_nonzero(config.consolidation.budget.max_llm_calls),
+                    max_duration_secs: some_if_nonzero(
+                        config.consolidation.budget.max_duration_secs,
+                    ),
+                    max_memories: some_if_nonzero(config.consolidation.budget.max_memories),
+                },
+                state_store: Some(Arc::new(SqliteConsolidationStateStore::new(Arc::clone(
+                    &database,
+                ))) as Arc<dyn ConsolidationStateStore>),
+            },
         ));
 
         Ok(Self {

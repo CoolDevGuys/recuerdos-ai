@@ -136,6 +136,7 @@ mod tests {
             NewMemory {
                 content: content.to_string(),
                 category: Category::PreferenceCoding,
+                subcategory: None,
                 tags: vec![],
                 entities: vec![],
                 confidence: 1.0,

@@ -184,10 +184,32 @@ pub struct TaxonomyConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct ConsolidationBudgetConfig {
+    /// Maximum LLM merge calls per consolidation run.
+    pub max_llm_calls: usize,
+    /// Maximum wall-clock seconds per consolidation run.
+    pub max_duration_secs: u64,
+    /// Maximum memories retired per consolidation run.
+    pub max_memories: usize,
+}
+
+impl Default for ConsolidationBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_llm_calls: 100,
+            max_duration_secs: 300,
+            max_memories: 5000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConsolidationConfig {
     pub enabled: bool,
     pub schedule: String,
     pub similarity_threshold: f64,
+    pub budget: ConsolidationBudgetConfig,
 }
 
 impl Default for ConsolidationConfig {
@@ -196,6 +218,7 @@ impl Default for ConsolidationConfig {
             enabled: true,
             schedule: "daily".to_string(),
             similarity_threshold: 0.92,
+            budget: ConsolidationBudgetConfig::default(),
         }
     }
 }

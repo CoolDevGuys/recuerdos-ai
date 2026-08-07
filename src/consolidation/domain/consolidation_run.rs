@@ -33,6 +33,13 @@ pub struct ConsolidationReport {
     pub expired: usize,
     /// Memories whose decay score was recomputed.
     pub rescored: usize,
+    /// `(category, subcategory)` groups skipped because nothing in them
+    /// changed since the last run.
+    pub groups_skipped: usize,
+    /// True when the run stopped early because a budget limit was reached.
+    pub budget_exhausted: bool,
+    /// Human-readable reason when the budget was exhausted.
+    pub budget_reason: Option<String>,
     /// Populated only on a dry run.
     pub previews: Vec<ClusterPreview>,
 }
@@ -48,16 +55,34 @@ impl ConsolidationReport {
             );
         }
 
+        let budget_note = if self.budget_exhausted {
+            let reason = self
+                .budget_reason
+                .as_deref()
+                .unwrap_or("budget limit reached");
+            format!("; stopped early ({reason})")
+        } else {
+            String::new()
+        };
+
+        let skip_note = if self.groups_skipped > 0 {
+            format!(", {} group(s) skipped (unchanged)", self.groups_skipped)
+        } else {
+            String::new()
+        };
+
         format!(
             "consolidated {} user(s): {} expired, {} rescored, {} cluster(s) found, \
-             {} merged ({} memories retired), {} left alone",
+             {} merged ({} memories retired), {} left alone{}{}",
             self.users,
             self.expired,
             self.rescored,
             self.clusters_found,
             self.merged,
             self.retired,
-            self.kept_separate
+            self.kept_separate,
+            skip_note,
+            budget_note
         )
     }
 
@@ -69,6 +94,11 @@ impl ConsolidationReport {
         self.kept_separate += other.kept_separate;
         self.expired += other.expired;
         self.rescored += other.rescored;
+        self.groups_skipped += other.groups_skipped;
+        self.budget_exhausted |= other.budget_exhausted;
+        if let Some(reason) = other.budget_reason {
+            self.budget_reason.get_or_insert(reason);
+        }
         self.previews.extend(other.previews);
     }
 }
@@ -133,5 +163,58 @@ mod tests {
         assert_eq!(total.merged, 3);
         assert_eq!(total.retired, 5);
         assert_eq!(total.memories_examined, 10);
+    }
+
+    #[test]
+    fn budget_exhaustion_is_visible_in_the_summary() {
+        let report = ConsolidationReport {
+            users: 1,
+            merged: 1,
+            retired: 3,
+            budget_exhausted: true,
+            budget_reason: Some("max_llm_calls reached".to_string()),
+            ..ConsolidationReport::default()
+        };
+
+        let summary = report.summary();
+        assert!(
+            summary.contains("stopped early"),
+            "summary should mention early stop: {summary}"
+        );
+        assert!(
+            summary.contains("max_llm_calls reached"),
+            "summary should include the reason: {summary}"
+        );
+    }
+
+    #[test]
+    fn groups_skipped_is_visible_in_the_summary() {
+        let report = ConsolidationReport {
+            users: 1,
+            groups_skipped: 3,
+            ..ConsolidationReport::default()
+        };
+
+        let summary = report.summary();
+        assert!(
+            summary.contains("3 group(s) skipped"),
+            "summary should mention skipped groups: {summary}"
+        );
+    }
+
+    #[test]
+    fn absorbing_propagates_budget_exhausted_from_any_user() {
+        let mut total = ConsolidationReport::default();
+        total.absorb(ConsolidationReport {
+            budget_exhausted: true,
+            budget_reason: Some("max_duration_secs reached".to_string()),
+            ..ConsolidationReport::default()
+        });
+
+        assert!(total.budget_exhausted);
+        assert_eq!(
+            total.budget_reason.as_deref(),
+            Some("max_duration_secs reached")
+        );
     }
 }

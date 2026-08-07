@@ -100,6 +100,54 @@ category = "preference.coding"
 tags = ["testing", "typescript"]
 
 # ─────────────────────────────────────────────────────────────────────
+# Subcategory memories. Same category, different sub-labels.
+# A query that targets one sub-label should return its memories ahead
+# of siblings in the same category.
+# ─────────────────────────────────────────────────────────────────────
+
+[[memory]]
+content = "User prefers pnpm over npm and yarn for package management"
+category = "preference.coding"
+subcategory = "tooling"
+tags = ["tooling", "node"]
+
+[[memory]]
+content = "User prefers cargo-edit for Rust dependency management"
+category = "preference.coding"
+subcategory = "tooling"
+tags = ["tooling", "rust"]
+
+[[memory]]
+content = "User forbids barrel files and index.ts re-exports"
+category = "preference.coding"
+subcategory = "structure"
+tags = ["typescript", "imports"]
+
+[[memory]]
+content = "User requires one export per file in TypeScript projects"
+category = "preference.coding"
+subcategory = "structure"
+tags = ["typescript"]
+
+[[memory]]
+content = "User requires table-driven tests in Go, one table per behaviour"
+category = "preference.coding"
+subcategory = "testing"
+tags = ["go", "testing"]
+
+[[memory]]
+content = "User prefers Vitest over Jest for anything new"
+category = "preference.coding"
+subcategory = "testing"
+tags = ["testing", "typescript"]
+
+[[memory]]
+content = "User always writes integration tests with testcontainers"
+category = "preference.coding"
+subcategory = "testing"
+tags = ["testing", "docker"]
+
+# ─────────────────────────────────────────────────────────────────────
 # The cases.
 #
 # `expect` names memories by their exact content. `kind` groups results in
@@ -215,4 +263,58 @@ query = "what testing tools does the user like"
 expect = [
     "User requires table-driven tests in Go, one table per behaviour",
     "User prefers Vitest over Jest for anything new",
+]
+
+# ─────────────────────────────────────────────────────────────────────
+# Subcategory filter cases.
+#
+# These verify that scoping a recall to a sub-label returns the right
+# memories and excludes siblings in the same category.
+# ─────────────────────────────────────────────────────────────────────
+
+[[case]]
+name = "subcategory filter: tooling only"
+kind = "subcategory-filter"
+query = "package manager"
+categories = ["preference.coding"]
+subcategories = ["tooling"]
+expect = [
+    "User prefers pnpm over npm and yarn for package management",
+    "User prefers cargo-edit for Rust dependency management",
+]
+
+[[case]]
+name = "subcategory filter: structure only"
+kind = "subcategory-filter"
+query = "exports"
+categories = ["preference.coding"]
+subcategories = ["structure"]
+expect = [
+    "User forbids barrel files and index.ts re-exports",
+    "User requires one export per file in TypeScript projects",
+]
+
+[[case]]
+name = "subcategory filter: testing only"
+kind = "subcategory-filter"
+query = "test"
+categories = ["preference.coding"]
+subcategories = ["testing"]
+expect = [
+    "User requires table-driven tests in Go, one table per behaviour",
+    "User prefers Vitest over Jest for anything new",
+    "User always writes integration tests with testcontainers",
+]
+
+[[case]]
+name = "subcategory filter: excludes structure when querying tooling"
+kind = "subcategory-filter"
+# The key test: a broad query that would match structure memories
+# should NOT return them when scoped to the "tooling" subcategory.
+query = "how should I organise my project"
+categories = ["preference.coding"]
+subcategories = ["tooling"]
+expect = [
+    "User prefers pnpm over npm and yarn for package management",
+    "User prefers cargo-edit for Rust dependency management",
 ]

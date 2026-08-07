@@ -1,10 +1,21 @@
 # Recuerdos AI — Long-Term Memory Service for AI Agents
 
-**Project plan · v0.1 · 2026-07-18**
+**Project plan · v0.2 · updated 2026-08-04**
 
 A fast, self-hostable long-term memory service for AI agents and coding assistants.
 One memory backend, consumed by every agent you use — Claude Code, opencode, Hermes
 Agent, LangChain agents, custom bots — via **REST API** or **MCP**.
+
+> **Status (2026-08-04): the core product is built and released** (`v0.1.0` RC,
+> `v0.1.1`). The full engine — hybrid search, understanding pipeline, consolidation,
+> decay, MCP + REST, Python SDK — ships today. In the roadmap of §15 that means
+> **Phase 0 (POC) and Phase 1 (Understanding depth) are done, Phase 2 (OSS launch) is
+> largely done**, and **Phase 3 (Scale & moat — Strategy B graph, alternate backends)
+> is the open frontier.** The task-level build record lives in
+> [implementation-plan.md](implementation-plan.md) (its Phases 0–6, all shipped); the
+> next concrete performance/capability work is queued there as **Phase 7**. This
+> document stays the *product & architecture reference* — kept separate from
+> `implementation-plan.md` on purpose (see that file's header for the rationale).
 
 ---
 
@@ -168,6 +179,12 @@ deliberate upgrade path to Strategy B.
 pgvector) are alternative trait implementations for the SaaS/scale phase, and
 Strategy B's graph layer is an additive v2 feature (the schema below already
 reserves entity/relation tables and supersedence links so no migration pain later).
+
+> **Status:** Strategy A is ✅ **shipped** (`v0.1.x`). Strategy B (graph) and
+> Strategy C (external backends) remain unbuilt — Strategy B is queued as
+> [implementation-plan.md Phase 7.3](implementation-plan.md#phase-7), which stresses
+> keeping the **bi-temporal** facts that are the whole point of it and building on the
+> `Entity` value object already carried on every `Memory` (see `src/memories/domain/memory.rs`).
 
 ---
 
@@ -552,25 +569,37 @@ Honest list — also belongs in the future README:
 
 ## 15. Roadmap & possible upgrades
 
-**Phase 0 — POC (target ~3–4 weekends of work)**
+> **Note on numbering.** This is the *product* roadmap (Phases 0–4).
+> [implementation-plan.md](implementation-plan.md) uses a finer *build* numbering
+> (Phases 0–6, all shipped, + a planned Phase 7). The two are intentionally
+> different granularities; the status tags below reconcile them.
+
+**Phase 0 — POC (target ~3–4 weekends of work) — ✅ DONE**
 Daemon + embedded store + local embeddings + hybrid search + API keys + REST +
 MCP stdio + basic extraction (Anthropic) + TOML config + export + Claude Code
 integration recipe. *Exit criterion: you use it daily from Claude Code AND one
-other client, and it's noticeably useful.*
+other client, and it's noticeably useful.* — met; dogfooded daily since build Phase 3.
 
-**Phase 1 — Understanding depth**
+**Phase 1 — Understanding depth — ✅ DONE**
 Reconcile (ADD/UPDATE/DELETE), consolidation job, `memory://profile` digest,
 session distillation hooks, opencode + Hermes recipes, retrieval eval harness.
+*(Shipped across build Phases 4–5.)*
 
-**Phase 2 — OSS launch**
+**Phase 2 — OSS launch — ◻ LARGELY DONE**
 Docs site, Homebrew/installer, Docker image, LangChain retriever, benchmark
 blog post (LongMemEval subset), README with the isolation test story.
+*Done: installer (`install.sh`), Docker/GHCR image, LangChain `BaseRetriever`,
+`docs/performance.md` benchmarks, README isolation story. Remaining: the
+LongMemEval-subset benchmark write-up and any public "launch" push.*
 
-**Phase 3 — Scale & moat**
+**Phase 3 — Scale & moat — ◻ OPEN (next frontier)**
 Postgres/Qdrant backends, temporal graph layer (Strategy B: bi-temporal facts,
 entity graph, graph-hop retrieval), Redis cache, multi-node workers.
+*Not started. The graph layer is scoped as
+[implementation-plan.md Phase 7.3](implementation-plan.md#phase-7); the
+performance groundwork (consolidation budget, sub-labels) as Phase 7.1–7.2.*
 
-**Phase 4 — SaaS (conditional on traction)**
+**Phase 4 — SaaS (conditional on traction) — ◻ NOT STARTED**
 Hosted control plane, orgs/teams (shared project memory + private personal
 memory), SSO, per-tenant encryption, usage-based billing, dashboard UI
 (memory browser/editor — surprisingly, the feature non-technical users pay for).
@@ -600,14 +629,18 @@ sync between personal devices.
 
 ## 17. Open questions
 
-1. Default remote extraction model: Haiku-class (cheap, good enough?) vs
-   Sonnet-class (better labels, 5–10× cost) — decide with the eval harness.
-2. Should `memory://profile` be one digest or per-domain digests
-   (coding vs personal)? Leaning per-domain, selected by client type but memories are not limited to only one domain, they can be interdomain.
-3. Python SDK at POC time or Phase 2? (LangChain users can't consume Rust
-   directly; a 200-line `httpx` wrapper may be worth shipping early.) - Ship a python wrapper that can potentially grow in the future.
-4. Telemetry for OSS builds: none vs opt-in anonymous — affects roadmap data
-   but risks trust. Leaning none.
+1. **[OPEN]** Default remote extraction model: Haiku-class (cheap, good enough?) vs
+   Sonnet-class (better labels, 5–10× cost) — decide with the eval harness (now built,
+   `recuerdos-ai eval` + `eval/baseline.json`).
+2. **[RESOLVED]** Should `memory://profile` be one digest or per-domain digests
+   (coding vs personal)? Shipped as a per-domain LLM digest (`ProfileDigestWriter`,
+   build Phase 5), with the caveat that memories can be interdomain, so a memory may
+   feed more than one domain's digest.
+3. **[RESOLVED]** Python SDK at POC time or Phase 2? Shipped a thin `httpx`/pydantic
+   wrapper (`pip install recuerdos-ai`) with a LangChain `BaseRetriever` extra —
+   deliberately small, room to grow.
+4. **[OPEN, leaning none]** Telemetry for OSS builds: none vs opt-in anonymous —
+   affects roadmap data but risks trust.
 
 ---
 

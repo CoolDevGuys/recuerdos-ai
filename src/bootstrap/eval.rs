@@ -53,6 +53,8 @@ struct SeedMemory {
     content: String,
     category: String,
     #[serde(default)]
+    subcategory: Option<String>,
+    #[serde(default)]
     tags: Vec<String>,
 }
 
@@ -66,6 +68,8 @@ struct Case {
     categories: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    subcategories: Vec<String>,
 }
 
 /// What one case scored.
@@ -158,6 +162,7 @@ fn seed(
             NewMemory {
                 content: seed.content.clone(),
                 category: Category::parse(&seed.category)?,
+                subcategory: seed.subcategory.clone(),
                 tags: seed.tags.clone(),
                 entities: Vec::new(),
                 confidence: 1.0,
@@ -183,7 +188,8 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
 
     let query = RecallQuery::new(&case.query, K)?
         .with_categories(categories)
-        .with_tags(case.tags.clone());
+        .with_tags(case.tags.clone())
+        .with_subcategories(case.subcategories.clone());
 
     let hits = memories.recaller.execute(context, &query)?;
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();

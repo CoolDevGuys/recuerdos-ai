@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 pub const MAX_CONTENT_LEN: usize = 4_000;
 pub const MAX_TAGS: usize = 32;
 pub const MAX_TAG_LEN: usize = 64;
+pub const MAX_SUBCATEGORY_LEN: usize = 64;
 
 /// Where a memory came from — which client, which session.
 ///
@@ -45,6 +46,10 @@ pub struct Memory {
     user_id: UserId,
     content: String,
     category: Category,
+    /// Optional finer sub-label under the category
+    /// (`preference.coding / testing`, `fact.person / family`).
+    /// Free-form, open-ended, never required.
+    subcategory: Option<String>,
     tags: Vec<String>,
     entities: Vec<Entity>,
     confidence: f32,
@@ -71,6 +76,7 @@ pub struct Memory {
 pub struct NewMemory {
     pub content: String,
     pub category: Category,
+    pub subcategory: Option<String>,
     pub tags: Vec<String>,
     pub entities: Vec<Entity>,
     pub confidence: f32,
@@ -103,6 +109,7 @@ impl Memory {
             user_id,
             content: content.to_string(),
             category: new.category,
+            subcategory: normalize_subcategory(new.subcategory)?,
             tags: normalize_tags(new.tags)?,
             entities: new.entities,
             confidence: clamp_confidence(new.confidence),
@@ -125,6 +132,7 @@ impl Memory {
         user_id: UserId,
         content: String,
         category: Category,
+        subcategory: Option<String>,
         tags: Vec<String>,
         entities: Vec<Entity>,
         confidence: f32,
@@ -142,6 +150,7 @@ impl Memory {
             user_id,
             content,
             category,
+            subcategory,
             tags,
             entities,
             confidence,
@@ -174,6 +183,10 @@ impl Memory {
 
     pub fn category(&self) -> &Category {
         &self.category
+    }
+
+    pub fn subcategory(&self) -> Option<&str> {
+        self.subcategory.as_deref()
     }
 
     pub fn tags(&self) -> &[String] {
@@ -253,6 +266,9 @@ impl Memory {
         if let Some(category) = edit.category {
             self.category = category;
         }
+        if let Some(subcategory) = edit.subcategory {
+            self.subcategory = normalize_subcategory(subcategory)?;
+        }
         if let Some(tags) = edit.tags {
             self.tags = normalize_tags(tags)?;
         }
@@ -316,6 +332,7 @@ impl Memory {
 pub struct MemoryEdit {
     pub content: Option<String>,
     pub category: Option<Category>,
+    pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub expires_at: Option<Option<DateTime<Utc>>>,
 }
@@ -326,6 +343,25 @@ fn clamp_confidence(confidence: f32) -> f32 {
         return 0.0;
     }
     confidence.clamp(0.0, 1.0)
+}
+
+/// Normalizes a subcategory: lowercase, trim, empty → None.
+fn normalize_subcategory(subcategory: Option<String>) -> Result<Option<String>> {
+    match subcategory {
+        Some(s) => {
+            let s = s.trim().to_ascii_lowercase();
+            if s.is_empty() {
+                Ok(None)
+            } else if s.chars().count() > MAX_SUBCATEGORY_LEN {
+                Err(RaError::Validation(format!(
+                    "subcategory is longer than {MAX_SUBCATEGORY_LEN} characters"
+                )))
+            } else {
+                Ok(Some(s))
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 /// Lowercases, trims, drops blanks and de-duplicates while preserving
@@ -368,6 +404,7 @@ mod tests {
         NewMemory {
             content: content.to_string(),
             category: Category::PreferenceCoding,
+            subcategory: None,
             tags: vec![],
             entities: vec![],
             confidence: 0.9,
@@ -560,5 +597,60 @@ mod tests {
         let accessed = memory.mark_accessed(later);
 
         assert_eq!(accessed.last_accessed_at(), Some(later));
+    }
+
+    #[test]
+    fn subcategory_is_normalized_on_create() {
+        let mut new = new_memory("x");
+        new.subcategory = Some("  Testing  ".to_string());
+        let memory = Memory::create(UserId::new(), new, now()).unwrap();
+
+        assert_eq!(memory.subcategory(), Some("testing"));
+    }
+
+    #[test]
+    fn subcategory_empty_becomes_none() {
+        let mut new = new_memory("x");
+        new.subcategory = Some("   ".to_string());
+        let memory = Memory::create(UserId::new(), new, now()).unwrap();
+
+        assert_eq!(memory.subcategory(), None);
+    }
+
+    #[test]
+    fn subcategory_overlong_is_rejected() {
+        let mut new = new_memory("x");
+        new.subcategory = Some("a".repeat(MAX_SUBCATEGORY_LEN + 1));
+        assert!(Memory::create(UserId::new(), new, now()).is_err());
+    }
+
+    #[test]
+    fn editing_can_set_and_clear_subcategory() {
+        let memory = create("original");
+
+        let edited = memory
+            .clone()
+            .edit(
+                MemoryEdit {
+                    subcategory: Some(Some("testing".to_string())),
+                    ..MemoryEdit::default()
+                },
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(edited.subcategory(), Some("testing"));
+
+        let cleared = edited
+            .edit(
+                MemoryEdit {
+                    subcategory: Some(None),
+                    ..MemoryEdit::default()
+                },
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(cleared.subcategory(), None);
     }
 }

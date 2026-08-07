@@ -110,6 +110,15 @@ impl MemoryMerger {
             .map(Memory::confidence)
             .fold(0.0f32, f32::max);
 
+        // Every member of a cluster shares a subcategory — the runner
+        // groups by (category, subcategory) before clustering — so the
+        // merged memory keeps it rather than dropping to the bare
+        // category, which would erase the sub-label and drop the memory
+        // out of subcategory-scoped recall.
+        let subcategory = cluster
+            .iter()
+            .find_map(|memory| memory.subcategory().map(str::to_string));
+
         // The replacement is written before anything is retired. If the
         // save fails, the cluster is untouched and the next run tries
         // again; the reverse order would leave the memories superseded by
@@ -119,6 +128,7 @@ impl MemoryMerger {
             NewMemory {
                 content,
                 category,
+                subcategory,
                 tags,
                 // Entities are re-derivable from the merged content by a
                 // later extraction pass, and picking a union of the
@@ -266,6 +276,42 @@ mod tests {
                 .expect("a superseded memory is retained");
             assert_eq!(stored.superseded_by(), Some(replacement));
         }
+    }
+
+    #[tokio::test]
+    async fn a_merged_memory_keeps_the_clusters_subcategory() {
+        // Clustering happens within a (category, subcategory) group, so a
+        // merge must not silently drop the sub-label to `None` — that
+        // would erase the memory from subcategory-scoped recall and undo
+        // the finer labelling over time.
+        let fixture = Fixture::new();
+        let cluster: Vec<Memory> = ["Prefers pnpm", "User uses pnpm", "pnpm is the one here"]
+            .into_iter()
+            .map(|content| {
+                let mut new = new_memory(content);
+                new.subcategory = Some("tooling".to_string());
+                fixture.saver().execute(&fixture.alex, new, "test").unwrap()
+            })
+            .collect();
+
+        let (merger, _) = merger(&fixture, ScriptedChatModel::new().queue(merged_reply()));
+        let outcome = merger.execute(&fixture.alex, &cluster).await.unwrap();
+
+        let replacement = match outcome {
+            MergeOutcome::Merged { replacement, .. } => replacement,
+            other => panic!("expected a merge, got {other:?}"),
+        };
+
+        let merged = fixture
+            .memories
+            .find(&fixture.alex, replacement)
+            .unwrap()
+            .expect("the merged memory exists");
+        assert_eq!(
+            merged.subcategory(),
+            Some("tooling"),
+            "the merge dropped the cluster's subcategory"
+        );
     }
 
     #[tokio::test]
