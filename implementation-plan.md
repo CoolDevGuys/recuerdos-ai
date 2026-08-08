@@ -1243,7 +1243,18 @@ would otherwise be re-litigated mid-build.
   - **Config:** `[graph]` (`enabled` default false, `max_hops` 2, `hop_limit` 50), with
     validation that rejects a zero hop budget only when enabled; documented in
     `recuerdos-ai.example.toml`.
-  - `just check` (fmt, clippy `-D warnings`, boundary script, full suite — 9 new graph
+  - **Applied from the PR review:** (1) added `idx_memory_relations_memory
+    (user_id, memory_id)` so `record`/`remove`'s delete-by-memory doesn't scan a user's
+    whole edge set (`memory_entities` already had it from its PK prefix); (2) `neighbours`
+    now returns a **deterministic** order — the walk sorts its seed frontier and `expand`
+    carries `ORDER BY memory_id, id`, since those ids become recall ranks in 7.3.4 and
+    must not flake (pinned by `neighbours_come_back_in_a_stable_order`); (3) a `None`
+    `as_of` now resolves to "now" so the current view also excludes a not-yet-valid edge,
+    unifying `expand` to one liveness filter; (4) a `TODO(7.3.3)` marks that `record`'s
+    replace resurrects an invalidated edge, so 7.3.3 preserves closed intervals rather
+    than blindly replacing; (5) a `NOTE(7.3.4)` on the frontier `IN`-list where the CTE
+    rewrite removes the growing-list/param-cap concern.
+  - `just check` (fmt, clippy `-D warnings`, boundary script, full suite — 10 new graph
     tests) is green.
 
 #### Task 7.3.2 — Relations from the extraction call already being made (M)

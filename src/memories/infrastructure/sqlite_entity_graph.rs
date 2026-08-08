@@ -72,34 +72,38 @@ impl SqliteEntityGraph {
         connection: &Connection,
         context: &UserContext,
         frontier: &[String],
-        as_of: Option<&str>,
+        as_of: &str,
         visited: &mut HashSet<String>,
     ) -> Result<(Vec<MemoryId>, Vec<String>)> {
+        // NOTE(7.3.4): the frontier is bounded by personal scale — two
+        // hops over a corpus capped at MAX_MEMORIES_PER_CATEGORY — so this
+        // IN-list stays well under SQLite's parameter cap. A hub entity at
+        // higher scale is what the recursive-CTE rewrite in Task 7.3.4 is
+        // for; it removes the per-hop round trip and the growing list.
         let placeholders = std::iter::repeat_n("?", frontier.len())
             .collect::<Vec<_>>()
             .join(",");
-        // An edge is live at the read point: born, and not yet closed —
-        // or closed only after it. With no `as_of` the current graph is
-        // "everything still open".
-        let liveness = if as_of.is_some() {
-            "valid_from <= ? AND (invalid_at IS NULL OR invalid_at > ?)"
-        } else {
-            "invalid_at IS NULL"
-        };
+        // An edge is live at the read point: born by then, and either
+        // still open or closed only afterwards. `neighbours` resolves a
+        // `None` as_of to "now" before calling, so there is one filter,
+        // and a not-yet-valid edge is never counted as current.
+        //
+        // `ORDER BY` makes the walk deterministic: the returned ids become
+        // ranks in recall (Task 7.3.4), so two identical calls must agree,
+        // or recall and the eval would flake.
         let sql = format!(
             "SELECT memory_id, subject_key, object_key FROM memory_relations
              WHERE user_id = ? AND (subject_key IN ({placeholders}) OR object_key IN ({placeholders}))
-               AND {liveness}"
+               AND valid_from <= ? AND (invalid_at IS NULL OR invalid_at > ?)
+             ORDER BY memory_id, id"
         );
 
         let mut params: Vec<String> = Vec::with_capacity(frontier.len() * 2 + 3);
         params.push(context.user_id().to_string());
         params.extend(frontier.iter().cloned()); // subject_key IN (...)
         params.extend(frontier.iter().cloned()); // object_key IN (...)
-        if let Some(at) = as_of {
-            params.push(at.to_string());
-            params.push(at.to_string());
-        }
+        params.push(as_of.to_string());
+        params.push(as_of.to_string());
 
         let mut statement = connection
             .prepare(&sql)
@@ -158,6 +162,15 @@ impl EntityGraph for SqliteEntityGraph {
 
             // Replace rather than append: recording is how an edit or a
             // re-ingest keeps the projection matching the memory.
+            //
+            // TODO(7.3.3): this replace also deletes edges that another
+            // memory has already invalidated, so re-recording a memory
+            // resurrects a superseded edge as live and resets its
+            // `valid_from`. Harmless while nothing calls `record` outside
+            // tests; once invalidation is wired (Task 7.3.3), preserve
+            // closed intervals here instead of blindly replacing — a fact
+            // superseded on Tuesday must not come back because its memory
+            // was edited on Wednesday.
             Self::delete_memory_rows(&transaction, context, memory_id)?;
 
             let user = context.user_id().to_string();
@@ -253,9 +266,18 @@ impl EntityGraph for SqliteEntityGraph {
         if visited.is_empty() {
             return Ok(Vec::new());
         }
+        // Sorted, not just collected from the set: a `HashSet`'s iteration
+        // order varies between instances, and the frontier order seeds the
+        // deterministic walk (see `expand`'s `ORDER BY`).
         let mut frontier: Vec<String> = visited.iter().cloned().collect();
+        frontier.sort();
 
-        let as_of = as_of.map(|at| at.to_rfc3339());
+        // A `None` as_of means "the graph as it stands now"; resolving it
+        // to a concrete instant here gives `expand` a single liveness
+        // filter and excludes any not-yet-valid edge from the current view.
+        let as_of = as_of
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
         let mut ordered: Vec<MemoryId> = Vec::new();
         let mut seen: HashSet<MemoryId> = HashSet::new();
 
@@ -266,13 +288,8 @@ impl EntityGraph for SqliteEntityGraph {
                 if frontier.is_empty() {
                     break;
                 }
-                let (memories, next) = Self::expand(
-                    connection,
-                    context,
-                    &frontier,
-                    as_of.as_deref(),
-                    &mut visited,
-                )?;
+                let (memories, next) =
+                    Self::expand(connection, context, &frontier, &as_of, &mut visited)?;
                 for id in memories {
                     if seen.insert(id) {
                         ordered.push(id);

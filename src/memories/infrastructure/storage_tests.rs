@@ -1409,6 +1409,49 @@ fn a_two_hop_neighbour_is_out_of_reach_at_one_hop() {
 }
 
 #[test]
+fn neighbours_come_back_in_a_stable_order() {
+    // Task 7.3.4 turns this list into recall ranks, so two identical calls
+    // must return the same ids in the same order — otherwise recall (and
+    // the eval that guards it) would flake. The walk seeds its frontier
+    // from a HashSet, so without an explicit ordering the result order
+    // would vary between calls.
+    let fixture = fixture();
+    let mut ids = Vec::new();
+    for index in 0..4 {
+        let memory_id = MemoryId::new();
+        ids.push(memory_id);
+        fixture
+            .graph
+            .record(
+                &fixture.alex,
+                memory_id,
+                &[
+                    entity("hub", "thing"),
+                    entity(&format!("leaf {index}"), "thing"),
+                ],
+                &[rel("hub", "links", &format!("leaf {index}"))],
+                now(),
+            )
+            .unwrap();
+    }
+
+    let first = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("hub")], 1, None, 50)
+        .unwrap();
+    let second = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("hub")], 1, None, 50)
+        .unwrap();
+
+    assert_eq!(first, second, "identical calls returned different orders");
+    // And the order is the documented one — by memory id — not incidental.
+    let mut expected = ids;
+    expected.sort_by_key(|id| id.to_string());
+    assert_eq!(first, expected);
+}
+
+#[test]
 fn a_hop_never_crosses_users_even_with_the_same_entity_name() {
     // Both users store an entity called "shared service". A hop for one
     // must never reach the other's edges — the graph's isolation is a

@@ -67,3 +67,10 @@ CREATE TABLE memory_relations (
 -- keep the liveness filter cheap.
 CREATE INDEX idx_memory_relations_subject ON memory_relations (user_id, subject_key, invalid_at);
 CREATE INDEX idx_memory_relations_object ON memory_relations (user_id, object_key, invalid_at);
+
+-- Replacing a memory's projection (on re-record) and dropping it (on
+-- remove) both delete by (user_id, memory_id). `memory_entities` gets that
+-- lookup free from its primary key, but this table's PK is on `id`, so
+-- without its own index every such delete would scan the user's whole edge
+-- set — and a record runs on every save.
+CREATE INDEX idx_memory_relations_memory ON memory_relations (user_id, memory_id);
