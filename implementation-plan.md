@@ -1257,7 +1257,7 @@ would otherwise be re-litigated mid-build.
   - `just check` (fmt, clippy `-D warnings`, boundary script, full suite — 10 new graph
     tests) is green.
 
-#### Task 7.3.2 — Relations from the extraction call already being made (M)
+#### Task 7.3.2 — Relations from the extraction call already being made (M) ✅ DONE
 
 - **Goal:** every new ingest produces edges at **zero additional LLM calls**.
 - **Steps:**
@@ -1282,16 +1282,59 @@ would otherwise be re-litigated mid-build.
                   {"subject":"backend","predicate":"migrated_from","object":"Fly.io"}]
     ```
 - **DoD:**
-  - [ ] `ScriptedChatModel` tests: relations present, relations absent, dangling endpoint
-        dropped, predicate normalized, per-memory cap enforced.
-  - [ ] **Token cost measured, not assumed:** prompt + completion tokens over the eval
-        corpus, before vs after, recorded in the PR. If completion tokens rise > 20%,
-        `extract_relations` ships default-off and the number says why.
-  - [ ] Degraded/verbatim mode produces no relations and still saves.
-  - [ ] `tests/understanding_pipeline.rs` passes **unmodified** — extraction quality did
-        not move.
+  - [x] Normalization tests: relations present + snake-cased, absent, dangling endpoint
+        dropped, anchored by canonical key, self-edge/blank dropped, per-candidate cap
+        (all in `candidate.rs`); schema-gating test (`relations_are_in_the_schema_only_when_asked_for`);
+        end-to-end edge write via a spy graph (`a_stored_candidates_entities_and_relations_reach_the_graph`).
+  - [~] **Token cost — reframed as opt-in, since it cannot be measured offline** (no live
+        provider in the container). The gate makes it moot for the default: relations are
+        requested only when `graph.enabled && graph.extract_relations`, and `graph.enabled`
+        is **false** by default, so the extraction schema and its token cost are
+        byte-identical to before the graph for everyone who has not turned the graph on.
+        A graph-enabled user pays a small prompt delta (one array property) plus completion
+        bounded by `MAX_RELATIONS = 16`, and `extract_relations = false` is the escape
+        hatch. Shipped `extract_relations` default is `true` (within an enabled graph),
+        revisitable once a real-provider run measures the completion delta.
+  - [x] Degraded/verbatim mode produces no relations and still saves — `VerbatimIngestor`
+        holds no graph and extracts nothing, so it is structurally unable to write edges.
+  - [x] `tests/understanding_pipeline.rs` passes **unmodified** — with the graph off by
+        default the whole extraction path is byte-for-byte unchanged.
 
-#### Task 7.3.3 — Bi-temporality: valid time, and who invalidates whom (M)
+- **As built (2026-08-07):**
+  - **`Candidate` now carries `relations: Vec<Relation>`** (reusing the graph's
+    `memories::domain::entity_graph::Relation`, as it already reuses `Entity`), populated
+    by `normalise_relations` in `understanding/domain/candidate.rs`. The **anchoring** is
+    the safety property: a relation survives only when *both* endpoints canonicalise
+    (via the same `EntityKey` the graph files them under) to entities the candidate also
+    declared — so a model cannot wire a memory to a third party it merely name-dropped.
+    Predicates are snake-cased (`"Deploys On"` → `deploys_on`), self-edges and blanks are
+    dropped, and the count is capped at `MAX_RELATIONS` (a domain const, like `MAX_TAGS` —
+    a config knob for it would force config into pure domain normalization, so it is
+    deliberately not `max_relations_per_memory` in `[graph]`).
+  - **The schema asks for relations only when wanted.** `schema()`/`extraction_request()`
+    take an `include_relations` bool = `config.graph.extract_relations()`
+    (`enabled && extract_relations`). Off by default ⇒ the request is unchanged ⇒ zero
+    token cost and `understanding_pipeline` unmodified. The prompt files carry a
+    `relations` bullet marked "only when the schema lists it".
+  - **The edge write lives in `MemoryReconciler::store`** — the single funnel every stored
+    candidate passes through (both the no-neighbours ADD and the reconciled apply). After
+    the saver returns the `Memory`, it calls `graph.record(entities, relations, created_at)`
+    **best-effort** (warn, don't fail) exactly like the text index, because the graph is
+    derivable by backfill (7.3.5). `valid_from` is the memory's `created_at` — the point
+    the relations became true (7.3.3). The reconciler gained an
+    `Option<Arc<dyn EntityGraph>>` from `memories.graph`; `None` (default) = pre-graph
+    behaviour.
+  - **Wiring** threads `config.graph.extract_relations()` into `CandidateExtractor::new`
+    /`for_sessions` and `memories.graph.clone()` into `MemoryReconciler::new`, in both
+    `understanding_wiring` and `consolidation_wiring` (session distillation writes edges
+    too). Config adds `[graph].extract_relations` (default true).
+  - **Dead-code allow removed from `entity_key.rs`** — `EntityKey` is now live through the
+    candidate's anchoring. `entity_graph.rs`/`sqlite_entity_graph.rs` keep theirs:
+    `record`/`Relation` are live now, but `remove`/`neighbours`/`invalidate`/`expand` wait
+    for 7.3.3/7.3.4.
+  - `just check` is green.
+
+#### Task 7.3.3 — Bi-temporality: valid time, and who invalidates whom (M) ✅ DONE
 
 - **Goal:** the property that makes this Strategy B and not a co-occurrence graph —
   *"what did we deploy on **before** the migration?"* answerable.
@@ -1314,12 +1357,52 @@ would otherwise be re-litigated mid-build.
     2026-06). The Fly.io edge gets `invalid_at = 2026-06`, not deleted.
   - `as_of = 2026-03` → Fly.io. Bare query → Hetzner.
 - **DoD:**
-  - [ ] **Time-travel test (load-bearing)**, driven by the `Clock` fake: the Fly.io edge
-        is live before the migration instant, invalid after, and an `as_of` read from
-        before it returns the Fly.io memory.
-  - [ ] A non-contradicting edge survives its memory being superseded.
-  - [ ] Invalidation is idempotent — re-running reconciliation never moves an existing
-        `invalid_at`.
+  - [x] **Time-travel test (load-bearing):** `invalidation_closes_a_contradicted_edge_but_history_still_reads`
+        — the Fly.io edge is live before the migration instant, invalid after, and an
+        `as_of` read from before it returns the Fly.io memory (deterministic fixed
+        timestamps stand in for the `Clock` fake, which the store does not take).
+  - [x] A non-contradicting edge survives its memory being superseded
+        (`invalidation_leaves_an_edge_with_a_different_predicate_alone`).
+  - [x] Invalidation is idempotent — re-running never moves an existing `invalid_at`
+        (`invalidation_spares_a_reaffirmed_edge_and_is_idempotent`).
+
+- **As built (2026-08-07):**
+  - **Most of the machinery already existed** — `invalidate`, the `as_of` read filter, and
+    `valid_from = created_at` were built in 7.3.1/7.3.2 and unit-tested at the store level.
+    7.3.3 is the **wiring** that fires invalidation on the ingest path, plus two
+    correctness refinements and the resurrection fix promised in the 7.3.1 review.
+  - **Invalidation fires from `MemoryReconciler::store`, on every stored candidate that
+    asserts relations** — not only on a reconciliation `UPDATE`. Storing "backend deploys
+    on Hetzner" hands its relations to `graph.invalidate(at = created_at, by = id)`, which
+    closes any live "backend deploys on *something else*" edge. This is a **deliberate
+    deviation** from the plan's "when B supersedes A" trigger: the *current truth of an
+    edge is singular* regardless of whether the model judged the two **memories**
+    duplicates, so tying edge-invalidation to the memory-level supersede decision would
+    miss a contradiction reconciliation's 5-neighbour window never surfaced. Best-effort,
+    like the record beside it.
+  - **No `edge_invalidator.rs` use case was created** — a second deliberate deviation. The
+    "which edges does this contradict" logic lives entirely in the adapter's SQL (same
+    subject+predicate, different object, still open); a use case wrapping a single
+    `graph.invalidate` call would be empty ceremony, so the reconciler drives it directly,
+    exactly as it already drives `graph.record`.
+  - **A memory never invalidates its own edges** — `invalidate`'s SQL gained `memory_id <>
+    by`. Without it, a memory that (wrongly) asserts two objects for one subject+predicate
+    would retire one of its own edges the instant it was written
+    (`invalidation_never_closes_the_asserting_memorys_own_edges`).
+  - **The 7.3.1-review `TODO(7.3.3)` is resolved:** `record` now replaces only a memory's
+    *still-open* edges, leaving any a later memory already closed as history. So editing a
+    memory can no longer resurrect a superseded fact or reset its `valid_from`
+    (`re_recording_a_memory_preserves_an_edge_another_memory_closed`). Entities, which
+    carry no time, are still replaced wholesale.
+  - **Two-clocks rustdoc** added to `Memory` (transaction time) and `Relation`/the stored
+    edge (valid time), pointing at decision 6.
+  - **Out of scope, noted as follow-ups:** an LLM-supplied *explicit* validity date (the
+    plan defers it); and cleaning a **retracted** memory's edges on `DELETE` (the forgetter
+    isn't wired to `graph.remove` yet — low impact, because recall's `find_many` already
+    drops deleted memories, so a stale edge can only ever point at a memory recall won't
+    return). Both belong with 7.3.4/7.3.5.
+  - `just check` is green (668 tests; clippy `-D warnings` clean — `invalidate` is now live,
+    so only `remove`/`neighbours`/`expand` remain behind the graph modules' `allow`).
 
 #### Task 7.3.4 — The graph-hop leg in recall (L)
 
@@ -1394,8 +1477,8 @@ would otherwise be re-litigated mid-build.
 |---|---|---|---|---|
 | 7.3.0 Relational eval + go/no-go | S | Low | everything | ✅ Done — relational 71.4% (marginal GO; gap concentrated in true 2-hop cases) |
 | 7.3.1 Schema + `EntityGraph` contract | M | Low–Med | 7.3.2–5 | ✅ Done — V8 tables, `EntityKey`, `EntityGraph`, `SqliteEntityGraph`; inert behind `[graph].enabled=false` |
-| 7.3.2 Relations in the existing call | M | Med | 7.3.3, 7.3.4 | Edges at zero extra LLM calls per ingest |
-| 7.3.3 Bi-temporality | M | Med | 7.3.4 | The actual Strategy B differentiator |
+| 7.3.2 Relations in the existing call | M | Med | 7.3.3, 7.3.4 | ✅ Done — relations extracted+anchored, recorded in `MemoryReconciler::store`; opt-in, default config unchanged |
+| 7.3.3 Bi-temporality | M | Med | 7.3.4 | ✅ Done — invalidation wired into `store`; re-record preserves closed edges; time-travel + idempotency covered |
 | 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | Graph evidence reaches the top 5 |
 | 7.3.5 Budgeted backfill | M | Low | — | Existing corpora get a graph, cheaply |
 | 7.3.6 Measure + docs | M | Low | — | The margin, in writing |

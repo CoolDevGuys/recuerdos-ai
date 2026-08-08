@@ -8,8 +8,11 @@
 //! [`Memory`]: crate::memories::domain::memory::Memory
 
 use crate::memories::domain::category::Category;
+use crate::memories::domain::entity_graph::Relation;
+use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::{Entity, MAX_CONTENT_LEN};
 use serde::Deserialize;
+use std::collections::HashSet;
 
 /// Applied when the model omits a confidence.
 ///
@@ -17,6 +20,12 @@ use serde::Deserialize;
 /// inference, and rating inferences as certainly-true would let them
 /// outrank things the user said outright.
 pub const DEFAULT_CONFIDENCE: f32 = 0.8;
+
+/// The most relations kept from one candidate. A single atomic memory that
+/// asserts more than this is either not atomic or the model is inventing
+/// edges; either way the extra ones are noise. A domain invariant, like
+/// [`MAX_TAGS`](crate::memories::domain::memory::MAX_TAGS), not config.
+pub const MAX_RELATIONS: usize = 16;
 
 /// A candidate as it arrives from the model, before validation.
 ///
@@ -36,6 +45,8 @@ pub struct RawCandidate {
     #[serde(default)]
     pub entities: Vec<RawEntity>,
     #[serde(default)]
+    pub relations: Vec<RawRelation>,
+    #[serde(default)]
     pub confidence: Option<f32>,
 }
 
@@ -50,6 +61,18 @@ pub struct RawEntity {
     pub kind: String,
 }
 
+/// A `subject —predicate→ object` edge as the model writes it, before
+/// anchoring and normalisation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawRelation {
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub predicate: String,
+    #[serde(default)]
+    pub object: String,
+}
+
 /// A candidate that has been validated and normalised.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
@@ -58,6 +81,11 @@ pub struct Candidate {
     pub subcategory: Option<String>,
     pub tags: Vec<String>,
     pub entities: Vec<Entity>,
+    /// Edges between this candidate's entities, anchored so both endpoints
+    /// are declared entities of the same candidate. Empty unless the graph
+    /// asked for relations (`[graph].extract_relations`); the write path
+    /// records them alongside the memory's entities.
+    pub relations: Vec<Relation>,
     pub confidence: f32,
 }
 
@@ -101,12 +129,16 @@ impl RawCandidate {
             return Err(Rejection::TooLong { characters });
         }
 
+        let entities = normalise_entities(self.entities);
+        let relations = normalise_relations(self.relations, &entities);
+
         Ok(Candidate {
             content: content.to_string(),
             category,
             subcategory: normalise_subcategory(self.subcategory),
             tags: normalise_tags(self.tags),
-            entities: normalise_entities(self.entities),
+            relations,
+            entities,
             confidence: self
                 .confidence
                 .unwrap_or(DEFAULT_CONFIDENCE)
@@ -163,6 +195,78 @@ fn normalise_entities(entities: Vec<RawEntity>) -> Vec<Entity> {
             })
         })
         .collect()
+}
+
+/// Anchors and normalises the relations the model proposed.
+///
+/// The anchoring is the safety property: a relation is kept only when both
+/// of its endpoints are entities the candidate *also* declared (compared by
+/// the same [`EntityKey`] the graph files them under, so `Fly.io` anchors
+/// to a `fly.io` entity). That is what keeps a model from wiring a memory
+/// to a third party it merely mentioned in passing, or hallucinating an
+/// edge to something that was never there.
+///
+/// Beyond that: the predicate is snake-cased so `deploys_on` and
+/// `"deploys on"` are one edge; endpoints that collapse to nothing, or to
+/// each other (a self-edge), are dropped; and the count is capped, because
+/// an atomic memory with a dozen relations is the model padding.
+fn normalise_relations(relations: Vec<RawRelation>, entities: &[Entity]) -> Vec<Relation> {
+    let declared: HashSet<String> = entities
+        .iter()
+        .map(|entity| EntityKey::new(&entity.name).as_str().to_string())
+        .filter(|key| !key.is_empty())
+        .collect();
+
+    let mut kept = Vec::new();
+    for relation in relations {
+        let subject = relation.subject.trim();
+        let object = relation.object.trim();
+        let predicate = snake_case(&relation.predicate);
+        if subject.is_empty() || object.is_empty() || predicate.is_empty() {
+            continue;
+        }
+
+        let subject_key = EntityKey::new(subject);
+        let object_key = EntityKey::new(object);
+        // Both endpoints must be declared entities, and a relation to
+        // itself is not a hop.
+        if !declared.contains(subject_key.as_str())
+            || !declared.contains(object_key.as_str())
+            || subject_key == object_key
+        {
+            continue;
+        }
+
+        kept.push(Relation {
+            subject: subject.to_string(),
+            predicate,
+            object: object.to_string(),
+        });
+        if kept.len() >= MAX_RELATIONS {
+            break;
+        }
+    }
+    kept
+}
+
+/// `"deploys on"`, `"Deploys-On"`, `"deploys_on"` → `deploys_on`. Runs of
+/// non-alphanumeric characters become a single underscore, and the result
+/// is lowercased and trimmed of leading/trailing underscores.
+fn snake_case(raw: &str) -> String {
+    let mut out = String::new();
+    let mut pending_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() {
+            if pending_underscore && !out.is_empty() {
+                out.push('_');
+            }
+            pending_underscore = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_underscore = true;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -317,5 +421,113 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidate.subcategory, None);
+    }
+
+    #[test]
+    fn a_relation_between_declared_entities_is_kept_with_a_snake_cased_predicate() {
+        let candidate = raw(json!({
+            "content": "the backend moved to Hetzner",
+            "entities": [
+                {"name": "backend", "kind": "component"},
+                {"name": "Hetzner", "kind": "service"},
+            ],
+            "relations": [{"subject": "backend", "predicate": "Deploys On", "object": "Hetzner"}],
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert_eq!(
+            candidate.relations,
+            [Relation {
+                subject: "backend".to_string(),
+                predicate: "deploys_on".to_string(),
+                object: "Hetzner".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_relation_to_an_entity_the_candidate_never_declared_is_dropped() {
+        // The anchoring rule: "Fly.io" is not among the entities, so an
+        // edge to it is the model wiring in a third party that was only
+        // mentioned in passing — noise the graph must not carry.
+        let candidate = raw(json!({
+            "content": "x",
+            "entities": [{"name": "backend", "kind": "component"}],
+            "relations": [{"subject": "backend", "predicate": "migrated_from", "object": "Fly.io"}],
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert!(candidate.relations.is_empty());
+    }
+
+    #[test]
+    fn an_endpoint_anchors_by_canonical_key_not_exact_spelling() {
+        // Entity "Fly.io" and relation object "fly.io." are one node, so
+        // the edge survives — the anchoring uses the same key the graph does.
+        let candidate = raw(json!({
+            "content": "x",
+            "entities": [
+                {"name": "backend", "kind": "component"},
+                {"name": "Fly.io", "kind": "service"},
+            ],
+            "relations": [{"subject": "backend", "predicate": "migrated_from", "object": "fly.io."}],
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert_eq!(candidate.relations.len(), 1);
+    }
+
+    #[test]
+    fn a_self_edge_or_a_blank_endpoint_is_dropped() {
+        let candidate = raw(json!({
+            "content": "x",
+            "entities": [{"name": "backend", "kind": "component"}],
+            "relations": [
+                {"subject": "backend", "predicate": "is", "object": "backend"},
+                {"subject": "backend", "predicate": "", "object": ""},
+            ],
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert!(candidate.relations.is_empty());
+    }
+
+    #[test]
+    fn relations_are_capped_per_candidate() {
+        // A dozen-plus edges off one atomic memory is padding; keep a bound.
+        let mut entities = vec![json!({"name": "hub", "kind": "thing"})];
+        let mut relations = Vec::new();
+        for index in 0..(MAX_RELATIONS + 5) {
+            entities.push(json!({"name": format!("leaf{index}"), "kind": "thing"}));
+            relations.push(
+                json!({"subject": "hub", "predicate": "links", "object": format!("leaf{index}")}),
+            );
+        }
+
+        let candidate = raw(json!({
+            "content": "x",
+            "entities": entities,
+            "relations": relations,
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert_eq!(candidate.relations.len(), MAX_RELATIONS);
+    }
+
+    #[test]
+    fn a_candidate_with_no_relations_field_has_none() {
+        let candidate = raw(json!({
+            "content": "x",
+            "entities": [{"name": "backend", "kind": "component"}],
+        }))
+        .validate(Category::FactProject)
+        .unwrap();
+
+        assert!(candidate.relations.is_empty());
     }
 }

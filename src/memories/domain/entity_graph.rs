@@ -34,6 +34,15 @@ use chrono::{DateTime, Utc};
 /// has to remember to. The same shape drives invalidation
 /// ([`EntityGraph::invalidate`]): a superseding memory's re-assertions are
 /// just relations.
+///
+/// A `Relation` carries no time — it is the *assertion*. The stored edge
+/// gains two: it becomes valid at the asserting memory's `created_at` and
+/// stays valid until some later memory contradicts it, at which point its
+/// `invalid_at` closes. That *valid* time is a different clock from the
+/// memory's *transaction* time (`Memory::created_at`, "when we learned
+/// it") — the distinction is what lets a query ask what was true *before*
+/// a change, and it is Strategy B's whole point (implementation-plan.md
+/// Task 7.3, decision 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relation {
     pub subject: String,

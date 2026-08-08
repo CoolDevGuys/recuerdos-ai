@@ -50,6 +50,10 @@ Each memory must stand alone, out of context, months later.
   `infrastructure`). Omit rather than pad.
 - `entities` — named things the memory refers to, each with a `kind`
   such as `service`, `tool`, `person`, `project`, `language`.
+- `relations` (only when the schema lists it) — directed edges between the
+  entities above, as `subject`, `predicate`, `object` (e.g. `backend` →
+  `deploys_on` → `Hetzner`). Both endpoints must be names you also put in
+  `entities`; drop any edge you cannot anchor to two of them. Empty is fine.
 - `confidence` — 0 to 1. Use high values for things the user stated
   plainly, lower for things you inferred. If you would not defend it,
   do not include the memory at all.

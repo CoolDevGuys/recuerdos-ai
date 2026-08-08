@@ -69,17 +69,23 @@ impl Lens {
 }
 
 /// Builds the extraction request for one piece of raw content.
+///
+/// `relations` decides whether the schema asks for edges between a
+/// candidate's entities (Task 7.3.2). Off unless the graph is on and wants
+/// them, so the default configuration's request is byte-for-byte what it
+/// was before the graph existed.
 pub fn extraction_request(
     taxonomy: &Taxonomy,
     lens: Lens,
     content: &str,
     hints: &SourceHints,
+    relations: bool,
 ) -> StructuredRequest {
     StructuredRequest::new(
         system_prompt(taxonomy, lens),
         user_message(lens, content, hints),
         SCHEMA_NAME,
-        schema(taxonomy),
+        schema(taxonomy, relations),
     )
 }
 
@@ -145,7 +151,78 @@ pub fn user_message(lens: Lens, content: &str, hints: &SourceHints) -> String {
 /// bare array because both Anthropic tool inputs and OpenAI's
 /// `json_schema` require an object at the root. One shape that works
 /// everywhere beats three provider-specific ones.
-pub fn schema(taxonomy: &Taxonomy) -> Value {
+pub fn schema(taxonomy: &Taxonomy, relations: bool) -> Value {
+    let mut item_properties = json!({
+        "content": {
+            "type": "string",
+            "description":
+                "One atomic memory, written to stand alone out of context.",
+        },
+        "category": {
+            "type": "string",
+            "enum": taxonomy.names(),
+        },
+        "subcategory": {
+            "type": "string",
+            "description":
+                "Optional finer sub-label under the category (e.g. 'testing' \
+                 under 'preference.coding', 'family' under 'fact.person'). \
+                 Lowercase, short, meaningful for filtering. Omit if not clear.",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "A few lowercase keywords for filtering.",
+        },
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "description":
+                            "service, tool, person, project, language, …",
+                    },
+                },
+                "required": ["name", "kind"],
+            },
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description":
+                "High when the user stated it plainly, lower when inferred.",
+        },
+    });
+
+    if relations {
+        // Only present when the graph wants edges, so a graph-off
+        // deployment never spends completion tokens describing them.
+        item_properties["relations"] = json!({
+            "type": "array",
+            "description":
+                "Directed relations between this memory's own entities, as \
+                 subject–predicate–object. Both endpoints MUST be names that \
+                 appear in `entities` above; omit an edge you cannot anchor to two \
+                 of them. Empty is fine.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "An entity name from `entities`."},
+                    "predicate": {
+                        "type": "string",
+                        "description": "The relationship, e.g. deploys_on, owns, migrated_from.",
+                    },
+                    "object": {"type": "string", "description": "An entity name from `entities`."},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        });
+    }
+
     json!({
         "type": "object",
         "properties": {
@@ -156,54 +233,7 @@ pub fn schema(taxonomy: &Taxonomy) -> Value {
                      that is the common case and a correct answer.",
                 "items": {
                     "type": "object",
-                    "properties": {
-                        "content": {
-                            "type": "string",
-                            "description":
-                                "One atomic memory, written to stand alone out of context.",
-                        },
-                        "category": {
-                            "type": "string",
-                            // The enum constrains providers that enforce
-                            // schemas. `Taxonomy::resolve` handles the
-                            // ones that don't.
-                            "enum": taxonomy.names(),
-                        },
-                        "subcategory": {
-                            "type": "string",
-                            "description":
-                                "Optional finer sub-label under the category (e.g. 'testing' \
-                                 under 'preference.coding', 'family' under 'fact.person'). \
-                                 Lowercase, short, meaningful for filtering. Omit if not clear.",
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "A few lowercase keywords for filtering.",
-                        },
-                        "entities": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "kind": {
-                                        "type": "string",
-                                        "description":
-                                            "service, tool, person, project, language, …",
-                                    },
-                                },
-                                "required": ["name", "kind"],
-                            },
-                        },
-                        "confidence": {
-                            "type": "number",
-                            "minimum": 0,
-                            "maximum": 1,
-                            "description":
-                                "High when the user stated it plainly, lower when inferred.",
-                        },
-                    },
+                    "properties": item_properties,
                     "required": ["content", "category"],
                 },
             }
@@ -327,10 +357,11 @@ mod tests {
                 &taxonomy(),
                 Lens::Session,
                 "a session",
-                &SourceHints::default()
+                &SourceHints::default(),
+                false,
             )
             .schema,
-            schema(&taxonomy()),
+            schema(&taxonomy(), false),
         );
     }
 
@@ -358,14 +389,14 @@ mod tests {
 
     #[test]
     fn the_schema_root_is_an_object_because_both_providers_require_one() {
-        let schema = schema(&taxonomy());
+        let schema = schema(&taxonomy(), false);
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["required"][0], "candidates");
     }
 
     #[test]
     fn the_schema_enumerates_every_category_including_extras() {
-        let schema = schema(&taxonomy());
+        let schema = schema(&taxonomy(), false);
         let enumerated =
             schema["properties"]["candidates"]["items"]["properties"]["category"]["enum"]
                 .as_array()
@@ -381,9 +412,35 @@ mod tests {
     fn only_content_and_category_are_required_of_a_candidate() {
         // Requiring tags or entities would make a model that has none to
         // offer invent them.
-        let schema = schema(&taxonomy());
+        let schema = schema(&taxonomy(), false);
         let required = &schema["properties"]["candidates"]["items"]["required"];
         assert_eq!(required, &json!(["content", "category"]));
+    }
+
+    #[test]
+    fn relations_are_in_the_schema_only_when_asked_for() {
+        // The default (graph off) must not spend completion tokens on a
+        // field it will never record — the schema is unchanged from before
+        // the graph existed. Asking for them adds exactly the one property.
+        let item = |relations| {
+            schema(&taxonomy(), relations)["properties"]["candidates"]["items"]["properties"]
+                .clone()
+        };
+
+        assert!(
+            item(false).get("relations").is_none(),
+            "relations leaked into the default schema"
+        );
+
+        let with_relations = item(true);
+        assert!(with_relations.get("relations").is_some());
+        assert_eq!(
+            with_relations["relations"]["items"]["required"],
+            json!(["subject", "predicate", "object"]),
+        );
+        // Nothing else moved.
+        assert!(with_relations.get("entities").is_some());
+        assert!(with_relations.get("content").is_some());
     }
 
     #[test]
@@ -393,6 +450,7 @@ mod tests {
             Lens::Submission,
             "I prefer pnpm",
             &SourceHints::default(),
+            false,
         );
 
         assert!(request.system.contains("preference.coding"));

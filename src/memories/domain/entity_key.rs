@@ -26,11 +26,6 @@
 //! Keeping this function pure spelling-normalisation means it can never
 //! silently merge two genuinely different entities.
 
-// Built and tested under Task 7.3.1, but not consumed by the crate until
-// its callers land — the write path in 7.3.2, recall seeding in 7.3.4 —
-// so a non-test build sees these as unused until then. Removed once wired.
-#![allow(dead_code)]
-
 /// A canonicalised entity name. Two names that should be one graph node
 /// produce equal keys; the constructor is the only way to make one, so a
 /// raw string can never be mistaken for a key.

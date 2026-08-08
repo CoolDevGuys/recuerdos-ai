@@ -145,6 +145,7 @@ impl Understanding {
                 Arc::new(CandidateExtractor::new(
                     Arc::clone(model),
                     Arc::clone(&taxonomy),
+                    config.graph.extract_relations(),
                 )),
                 Arc::new(MemoryReconciler::new(
                     Arc::clone(&memories.recaller),
@@ -152,6 +153,7 @@ impl Understanding {
                     Arc::clone(&memories.forgetter),
                     Arc::clone(&memories.repository),
                     Arc::clone(model),
+                    memories.graph.clone(),
                     config.understanding.reconcile,
                 )),
             )),

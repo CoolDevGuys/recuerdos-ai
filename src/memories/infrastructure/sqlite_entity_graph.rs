@@ -160,21 +160,30 @@ impl EntityGraph for SqliteEntityGraph {
                 .unchecked_transaction()
                 .map_err(|e| map_sqlite_error(e, "could not begin a graph record"))?;
 
-            // Replace rather than append: recording is how an edit or a
-            // re-ingest keeps the projection matching the memory.
-            //
-            // TODO(7.3.3): this replace also deletes edges that another
-            // memory has already invalidated, so re-recording a memory
-            // resurrects a superseded edge as live and resets its
-            // `valid_from`. Harmless while nothing calls `record` outside
-            // tests; once invalidation is wired (Task 7.3.3), preserve
-            // closed intervals here instead of blindly replacing — a fact
-            // superseded on Tuesday must not come back because its memory
-            // was edited on Wednesday.
-            Self::delete_memory_rows(&transaction, context, memory_id)?;
-
             let user = context.user_id().to_string();
             let memory = memory_id.to_string();
+
+            // Replace rather than append: recording is how an edit or a
+            // re-ingest keeps the projection matching the memory. Entities
+            // carry no time, so they are replaced wholesale — but a
+            // *closed* edge is history (Task 7.3.3): a fact superseded on
+            // Tuesday must not come back to life because its memory was
+            // edited on Wednesday. So only the still-open edges are
+            // replaced; the ones some other memory already invalidated are
+            // left exactly as they were.
+            transaction
+                .execute(
+                    "DELETE FROM memory_entities WHERE user_id = ?1 AND memory_id = ?2",
+                    rusqlite::params![user, memory],
+                )
+                .map_err(|e| map_sqlite_error(e, "entity delete conflict"))?;
+            transaction
+                .execute(
+                    "DELETE FROM memory_relations
+                     WHERE user_id = ?1 AND memory_id = ?2 AND invalid_at IS NULL",
+                    rusqlite::params![user, memory],
+                )
+                .map_err(|e| map_sqlite_error(e, "relation delete conflict"))?;
 
             let mut seen_keys = HashSet::new();
             for entity in entities {
@@ -331,12 +340,18 @@ impl EntityGraph for SqliteEntityGraph {
                 // subject and predicate, a different object, and not
                 // already closed. Re-affirming the same object touches
                 // nothing, which is what makes a re-run idempotent.
+                //
+                // `memory_id <> by` keeps a memory from invalidating its own
+                // edges: a memory that asserts two objects for one
+                // subject+predicate is internally contradictory, but that is
+                // the model's business, not grounds for the edge to retire
+                // itself the instant it is written.
                 transaction
                     .execute(
                         "UPDATE memory_relations
                          SET invalid_at = ?1, invalidated_by = ?2
                          WHERE user_id = ?3 AND subject_key = ?4 AND predicate = ?5
-                           AND object_key <> ?6 AND invalid_at IS NULL",
+                           AND object_key <> ?6 AND invalid_at IS NULL AND memory_id <> ?7",
                         rusqlite::params![
                             at,
                             by,
@@ -344,6 +359,7 @@ impl EntityGraph for SqliteEntityGraph {
                             subject.as_str(),
                             predicate,
                             object.as_str(),
+                            by,
                         ],
                     )
                     .map_err(|e| map_sqlite_error(e, "invalidation conflict"))?;

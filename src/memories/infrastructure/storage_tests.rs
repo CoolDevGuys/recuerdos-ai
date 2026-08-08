@@ -1736,6 +1736,188 @@ fn invalidation_spares_a_reaffirmed_edge_and_is_idempotent() {
 }
 
 #[test]
+fn invalidation_never_closes_the_asserting_memorys_own_edges() {
+    // A memory that names two objects for one subject+predicate is
+    // internally contradictory, but the edge it just wrote must not retire
+    // itself the instant it lands. Invalidation attributed to a memory
+    // skips that memory's own rows.
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[
+                entity("backend", "component"),
+                entity("Hetzner", "service"),
+                entity("Fly.io", "service"),
+            ],
+            &[
+                rel("backend", "deploys_on", "Hetzner"),
+                rel("backend", "deploys_on", "Fly.io"),
+            ],
+            now(),
+        )
+        .unwrap();
+
+    // The memory supersedes itself in effect — invalidate attributed to it.
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now() + chrono::Duration::days(1),
+            memory_id,
+        )
+        .unwrap();
+
+    // Both of its own edges are still live.
+    let hits = fixture
+        .graph
+        .neighbours(&fixture.alex, &[seed("backend")], 1, None, 10)
+        .unwrap();
+    assert!(hits.contains(&memory_id));
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, memory_id),
+        2,
+        "a memory invalidated one of its own edges"
+    );
+}
+
+#[test]
+fn invalidation_leaves_an_edge_with_a_different_predicate_alone() {
+    // Superseding a memory is not blanket invalidation of everything it
+    // ever said: only the contradicted edge (same subject+predicate,
+    // different object) closes. A fact on another predicate stays live.
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[
+                entity("backend", "component"),
+                entity("Fly.io", "service"),
+                entity("Rust", "language"),
+            ],
+            &[
+                rel("backend", "deploys_on", "Fly.io"),
+                rel("backend", "written_in", "Rust"),
+            ],
+            now(),
+        )
+        .unwrap();
+
+    // A later memory changes only where the backend deploys.
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now() + chrono::Duration::days(1),
+            MemoryId::new(),
+        )
+        .unwrap();
+
+    // deploys_on→Fly.io is closed; written_in→Rust is untouched, so a
+    // current hop from "Rust" still reaches the memory.
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("Rust")], 1, None, 10)
+            .unwrap()
+            .contains(&memory_id),
+        "an unrelated edge was closed when its memory was superseded"
+    );
+    assert!(
+        !fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("fly.io")], 1, None, 10)
+            .unwrap()
+            .contains(&memory_id),
+        "the contradicted edge should be closed"
+    );
+}
+
+#[test]
+fn re_recording_a_memory_preserves_an_edge_another_memory_closed() {
+    // The resurrection guard (Task 7.3.3): once memory B has retired one of
+    // A's edges, editing A must not bring that edge back to life. A
+    // re-record replaces only A's still-open edges.
+    let fixture = fixture();
+    let a = MemoryId::new();
+    let b = MemoryId::new();
+    let born = now();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            a,
+            &[entity("backend", "component"), entity("Fly.io", "service")],
+            &[rel("backend", "deploys_on", "Fly.io")],
+            born,
+        )
+        .unwrap();
+
+    // B contradicts and closes A's edge.
+    let migration = born + chrono::Duration::days(30);
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("backend", "deploys_on", "Hetzner")],
+            migration,
+            b,
+        )
+        .unwrap();
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, a),
+        1,
+        "A should still have its (now closed) edge"
+    );
+
+    // A is edited and re-recorded with a different, unrelated edge.
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            a,
+            &[entity("backend", "component"), entity("Rust", "language")],
+            &[rel("backend", "written_in", "Rust")],
+            born + chrono::Duration::days(40),
+        )
+        .unwrap();
+
+    // The closed Fly.io edge survives as history alongside the new one; a
+    // read from before the migration still returns A.
+    assert_eq!(
+        count(&fixture, "memory_relations", &fixture.alex, a),
+        2,
+        "the closed edge was resurrected or dropped instead of preserved"
+    );
+    let midpoint = born + chrono::Duration::days(15);
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("backend")], 1, Some(midpoint), 10)
+            .unwrap()
+            .contains(&a),
+        "history was lost when the memory was edited"
+    );
+    // And the Fly.io edge is not live now.
+    assert!(
+        !fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("fly.io")], 1, None, 10)
+            .unwrap()
+            .contains(&a),
+        "the superseded edge came back to life on re-record"
+    );
+}
+
+#[test]
 fn the_default_build_has_no_graph_and_enabling_it_wires_one() {
     // The inert-by-default guarantee, at the wiring seam: recall never
     // consults a graph that isn't there, so a default build behaves
