@@ -162,6 +162,20 @@ hybrid = true
 default_limit = 8
 recency_half_life_days = 90
 
+[graph]
+# The entity/relation graph (Strategy B). Off by default: the tables and
+# hop traversal exist, but ingest writes no edges and recall does not hop
+# until this is on. Enabling it is additive and never changes what plain
+# semantic/keyword recall returns; it adds a third "connected to" leg on
+# top. Still being rolled out (implementation-plan.md Task 7.3).
+enabled = false
+# How many edges one recall hop may traverse from its seeds. Two reaches
+# "the person who leads the team that owns X".
+max_hops = 2
+# The most graph-found memories a hop contributes before fusion trims them
+# against the vector and keyword legs.
+hop_limit = 50
+
 [auth]
 # api-key | none. "none" is an explicit single-user opt-out: every request
 # is treated as the built-in `default` user. Logged loudly at startup.

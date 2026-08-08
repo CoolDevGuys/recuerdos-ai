@@ -24,7 +24,7 @@ use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::Category;
-use crate::memories::domain::memory::{MemorySource, NewMemory};
+use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
@@ -56,6 +56,37 @@ struct SeedMemory {
     subcategory: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
+    /// Named things the memory refers to. Stored on the memory today and
+    /// unused by retrieval — the graph leg that hops over them arrives in
+    /// Task 7.3.4. Seeding them now is what lets a `relational` case have
+    /// a graph to walk once that lands, without re-writing the corpus.
+    #[serde(default)]
+    entities: Vec<SeedEntity>,
+    /// Directed relations between this memory's entities
+    /// (`subject —predicate→ object`). Parsed now so the eval corpus
+    /// already carries the graph; the extraction pipeline starts emitting
+    /// them in Task 7.3.2 and recall starts walking them in 7.3.4. Unused
+    /// until then.
+    #[serde(default)]
+    #[allow(dead_code)]
+    relations: Vec<SeedRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeedEntity {
+    name: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// A `subject —predicate→ object` edge asserted by a seed memory. Held for
+/// Task 7.3.2 onward; nothing reads it yet.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SeedRelation {
+    subject: String,
+    predicate: String,
+    object: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,7 +195,14 @@ fn seed(
                 category: Category::parse(&seed.category)?,
                 subcategory: seed.subcategory.clone(),
                 tags: seed.tags.clone(),
-                entities: Vec::new(),
+                entities: seed
+                    .entities
+                    .iter()
+                    .map(|e| Entity {
+                        name: e.name.clone(),
+                        kind: e.kind.clone(),
+                    })
+                    .collect(),
                 confidence: 1.0,
                 source: MemorySource {
                     client: Some("eval".to_string()),
@@ -471,6 +509,25 @@ mod tests {
         for memory in &set.memories {
             Category::parse(&memory.category)
                 .unwrap_or_else(|e| panic!("{:?}: {e}", memory.content));
+        }
+
+        // Every relation endpoint must be a declared entity of the same
+        // memory. This is the anchoring rule Task 7.3.2 enforces in the
+        // pipeline; asserting it over the hand-written corpus catches a
+        // typo (`Fly.io` vs `Flyio`) that would otherwise silently leave a
+        // relational case with no graph to walk.
+        for memory in &set.memories {
+            let names: Vec<&str> = memory.entities.iter().map(|e| e.name.as_str()).collect();
+            for relation in &memory.relations {
+                for endpoint in [&relation.subject, &relation.object] {
+                    assert!(
+                        names.contains(&endpoint.as_str()),
+                        "memory {:?} asserts a relation over {endpoint:?}, which is not one of \
+                         its declared entities {names:?}",
+                        memory.content
+                    );
+                }
+            }
         }
     }
 }

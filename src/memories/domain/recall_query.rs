@@ -120,8 +120,23 @@ impl RecallQuery {
     /// Wider than `limit` on purpose: fusion and post-filtering both
     /// discard candidates, so asking each leg for exactly `limit` would
     /// return fewer than asked for whenever the legs disagree.
+    ///
+    /// The floor is what matters for a *filtered* recall. A
+    /// category/tag/subcategory filter is applied only after both legs
+    /// answer (see [`MemoryRecaller`](crate::memories::application)), so a
+    /// selective filter can discard nearly the whole window — and a memory
+    /// that matches the filter but is only a weak match for the query text
+    /// never survives to be filtered if it fell outside the window. At a
+    /// floor of 20, a corpus larger than 20 in the queried scope could
+    /// silently drop such a memory; a limit-5 query over a routine
+    /// single-category working set already exceeds that. Widening only the
+    /// window can add lower-ranked candidates, never displace a top one, so
+    /// it costs a few extra row fetches and strictly helps filtered recall.
+    /// The real fix — pushing filters into both indexes — is the scalable
+    /// version; this floor is the cheap one that keeps filtered recall
+    /// honest at personal scale.
     pub fn candidate_depth(&self) -> usize {
-        (self.limit * 4).clamp(20, 200)
+        (self.limit * 8).clamp(40, 200)
     }
 }
 
@@ -171,7 +186,11 @@ mod tests {
 
     #[test]
     fn candidate_depth_exceeds_the_limit_but_stays_bounded() {
-        assert!(RecallQuery::new("x", 1).unwrap().candidate_depth() >= 20);
+        // The floor is what rescues a filtered recall over a corpus larger
+        // than the window, so a small limit still over-fetches generously.
+        assert!(RecallQuery::new("x", 1).unwrap().candidate_depth() >= 40);
+        // Between floor and ceiling the multiplier governs.
+        assert_eq!(RecallQuery::new("x", 10).unwrap().candidate_depth(), 80);
         assert_eq!(RecallQuery::new("x", 50).unwrap().candidate_depth(), 200);
     }
 }

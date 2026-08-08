@@ -26,6 +26,7 @@ pub struct AppConfig {
     pub understanding: UnderstandingConfig,
     pub consolidation: ConsolidationConfig,
     pub retrieval: RetrievalConfig,
+    pub graph: GraphConfig,
     pub auth: AuthConfig,
 }
 
@@ -241,6 +242,35 @@ impl Default for RetrievalConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// The entity/relation graph (Strategy B, implementation-plan.md Task
+    /// 7.3). Off by default: the tables and traversal exist, but recall
+    /// does not consult them and ingest does not write edges until this is
+    /// on. Enabling it is additive — it starts recording and (from Task
+    /// 7.3.4) hopping — and never changes what plain semantic/keyword
+    /// recall returns.
+    pub enabled: bool,
+    /// How many edges a single recall hop may traverse from its seeds.
+    /// Two reaches "the person who leads the team that owns X" without
+    /// letting a query wander the whole graph.
+    pub max_hops: usize,
+    /// The most graph-found memories a hop contributes to a recall, before
+    /// fusion trims them against the vector and keyword legs.
+    pub hop_limit: usize,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_hops: 2,
+            hop_limit: 50,
+        }
+    }
+}
+
 const AUTH_MODES: &[&str] = &["api-key", "none"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -375,6 +405,21 @@ impl AppConfig {
         }
         if self.retrieval.recency_half_life_days == 0 {
             issues.push("[retrieval].recency_half_life_days is 0".to_string());
+        }
+
+        // Only when the graph is on: a zero here would silently make the
+        // hop leg a no-op, which looks exactly like a graph that found
+        // nothing.
+        if self.graph.enabled {
+            if self.graph.max_hops == 0 {
+                issues
+                    .push("[graph].max_hops is 0 — no hop would ever traverse an edge".to_string());
+            }
+            if self.graph.hop_limit == 0 {
+                issues.push(
+                    "[graph].hop_limit is 0 — the graph leg would return nothing".to_string(),
+                );
+            }
         }
 
         if !AUTH_MODES.contains(&self.auth.mode.as_str()) {

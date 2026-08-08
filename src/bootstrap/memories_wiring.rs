@@ -9,10 +9,12 @@ use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::domain::embedder::Embedder;
+use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_ranker::RecallRanker;
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
+use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
 use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
@@ -45,6 +47,13 @@ pub struct Memories {
     /// other rather than against a query and so needs the vectors
     /// directly — see `consolidation::application::consolidation_runner`.
     pub embedder: Arc<dyn Embedder>,
+    /// The entity/relation graph, present only when `[graph].enabled`
+    /// (implementation-plan.md Task 7.3). `None` is the default and the
+    /// pre-graph behaviour: nothing writes edges, recall does not hop, and
+    /// results are identical to a build without this field. Wired but not
+    /// yet consumed — the write path joins in Task 7.3.2, recall in 7.3.4.
+    #[allow(dead_code)]
+    pub graph: Option<Arc<dyn EntityGraph>>,
     /// Config echoes the handlers need when parsing requests.
     pub extra_categories: Vec<String>,
     pub default_limit: usize,
@@ -100,6 +109,14 @@ impl Memories {
         let text: Arc<dyn TextIndex> = Arc::new(TantivyTextIndex::open(
             config.data_dir().join(TEXT_INDEX_DIR),
         )?);
+        // Built only when enabled. Off (the default) leaves it `None`, so
+        // no edge is ever written and recall is byte-identical to a build
+        // without the graph — the "inert until asked for" guarantee.
+        let graph: Option<Arc<dyn EntityGraph>> = if config.graph.enabled {
+            Some(Arc::new(SqliteEntityGraph::new(Arc::clone(&database))))
+        } else {
+            None
+        };
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 
         Ok(Self {
@@ -138,6 +155,7 @@ impl Memories {
             )),
             repository,
             embedder,
+            graph,
             extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,
         })

@@ -148,6 +148,158 @@ subcategory = "testing"
 tags = ["testing", "docker"]
 
 # ─────────────────────────────────────────────────────────────────────
+# Relational corpus (Task 7.3.0).
+#
+# These memories exist to be *hopped*, not paraphrased. Each carries
+# `entities` and `relations` — inert today (retrieval ignores them), the
+# raw material the graph leg walks once Task 7.3.4 lands. They form small
+# chains where the answer to a question lives in a memory that never names
+# the question's subject: "who leads the billing team" is answerable only
+# by walking billing service → Meridian team → Nadia.
+#
+# The `relational` cases below query these chains. Under today's
+# semantic-only recall most should MISS, because the target shares no
+# useful vocabulary with the query and no single memory holds the whole
+# answer. That miss rate, recorded in the baseline, is the number that
+# justifies (or cancels) the rest of Task 7.3 — see its go/no-go DoD.
+# ─────────────────────────────────────────────────────────────────────
+
+# Chain A — billing service / Meridian team / Nadia / Lisbon / ledger-db.
+[[memory]]
+content = "The billing service is maintained by the Meridian team"
+category = "fact.project"
+tags = ["ownership"]
+entities = [
+    { name = "billing service", kind = "service" },
+    { name = "Meridian team", kind = "team" },
+]
+relations = [
+    { subject = "billing service", predicate = "maintained_by", object = "Meridian team" },
+]
+
+[[memory]]
+content = "Nadia is the tech lead of the Meridian team"
+category = "fact.person"
+tags = ["team"]
+entities = [
+    { name = "Nadia", kind = "person" },
+    { name = "Meridian team", kind = "team" },
+]
+relations = [{ subject = "Nadia", predicate = "leads", object = "Meridian team" }]
+
+[[memory]]
+content = "The Meridian team works out of the Lisbon office"
+category = "fact.project"
+tags = ["team"]
+entities = [
+    { name = "Meridian team", kind = "team" },
+    { name = "Lisbon office", kind = "location" },
+]
+relations = [
+    { subject = "Meridian team", predicate = "located_in", object = "Lisbon office" },
+]
+
+[[memory]]
+content = "The billing service stores its data in a Postgres database called ledger-db"
+category = "fact.project"
+tags = ["storage"]
+entities = [
+    { name = "billing service", kind = "service" },
+    { name = "ledger-db", kind = "database" },
+    { name = "Postgres", kind = "technology" },
+]
+relations = [
+    { subject = "billing service", predicate = "stores_data_in", object = "ledger-db" },
+]
+
+# Chain B — mobile app / notifications service / Theo.
+[[memory]]
+content = "The mobile app relies on the notifications service to deliver push messages"
+category = "fact.project"
+tags = ["dependency"]
+entities = [
+    { name = "mobile app", kind = "component" },
+    { name = "notifications service", kind = "service" },
+]
+relations = [
+    { subject = "mobile app", predicate = "depends_on", object = "notifications service" },
+]
+
+[[memory]]
+content = "Theo owns the on-call rotation for the notifications service"
+category = "fact.person"
+tags = ["oncall"]
+entities = [
+    { name = "Theo", kind = "person" },
+    { name = "notifications service", kind = "service" },
+]
+relations = [
+    { subject = "Theo", predicate = "on_call_for", object = "notifications service" },
+]
+
+# Chain C — checkout flow / Stripe / PCI compliance.
+[[memory]]
+content = "The checkout flow processes card payments through Stripe"
+category = "fact.project"
+tags = ["payments"]
+entities = [
+    { name = "checkout flow", kind = "component" },
+    { name = "Stripe", kind = "service" },
+]
+relations = [
+    { subject = "checkout flow", predicate = "integrates", object = "Stripe" },
+]
+
+[[memory]]
+content = "Any code path that touches Stripe must pass a PCI compliance review"
+category = "fact.project"
+tags = ["compliance"]
+entities = [
+    { name = "Stripe", kind = "service" },
+    { name = "PCI compliance review", kind = "process" },
+]
+relations = [
+    { subject = "Stripe", predicate = "requires", object = "PCI compliance review" },
+]
+
+# Chain D — analytics pipeline / Kafka → Kinesis / Priya (a temporal chain).
+[[memory]]
+content = "The analytics pipeline currently streams events through Kinesis"
+category = "fact.project"
+tags = ["analytics"]
+entities = [
+    { name = "analytics pipeline", kind = "component" },
+    { name = "Kinesis", kind = "service" },
+]
+relations = [
+    { subject = "analytics pipeline", predicate = "runs_on", object = "Kinesis" },
+]
+
+[[memory]]
+content = "Before the switch, the analytics pipeline was built on Kafka"
+category = "fact.project"
+tags = ["analytics"]
+entities = [
+    { name = "analytics pipeline", kind = "component" },
+    { name = "Kafka", kind = "service" },
+]
+relations = [
+    { subject = "analytics pipeline", predicate = "migrated_from", object = "Kafka" },
+]
+
+[[memory]]
+content = "Priya designed the analytics pipeline and knows its schema best"
+category = "fact.person"
+tags = ["team"]
+entities = [
+    { name = "Priya", kind = "person" },
+    { name = "analytics pipeline", kind = "component" },
+]
+relations = [
+    { subject = "Priya", predicate = "designed", object = "analytics pipeline" },
+]
+
+# ─────────────────────────────────────────────────────────────────────
 # The cases.
 #
 # `expect` names memories by their exact content. `kind` groups results in
@@ -318,3 +470,71 @@ expect = [
     "User prefers pnpm over npm and yarn for package management",
     "User prefers cargo-edit for Rust dependency management",
 ]
+
+# ─────────────────────────────────────────────────────────────────────
+# Relational cases (Task 7.3.0).
+#
+# The answer to each lives in a memory that never names the query's
+# subject; reaching it means walking a relation the graph leg will provide
+# in Task 7.3.4. Today, with semantic-only recall, these are expected to
+# score low — that is the point. The committed `by_kind.relational` is the
+# go/no-go number: if it is already high, the graph gap is not real yet
+# and Task 7.3 stays deferred.
+# ─────────────────────────────────────────────────────────────────────
+
+[[case]]
+name = "relational: who owns a decision about a service"
+kind = "relational"
+# billing service → Meridian team → Nadia. The target says nothing about
+# "billing", so semantic recall has no anchor; only the hop connects them.
+query = "who should I ask about a billing service decision"
+expect = ["Nadia is the tech lead of the Meridian team"]
+
+[[case]]
+name = "relational: where a service's team sits"
+kind = "relational"
+# billing service → Meridian team → Lisbon office.
+query = "which city should I travel to in order to meet the billing service maintainers in person"
+expect = ["The Meridian team works out of the Lisbon office"]
+
+[[case]]
+name = "relational: on-call for an app's dependency"
+kind = "relational"
+# mobile app → notifications service → Theo. The push-message wording
+# points a semantic search at the mobile-app memory (the pivot), not at
+# the on-call owner the question actually wants.
+query = "who gets paged when the mobile app stops sending push messages"
+expect = ["Theo owns the on-call rotation for the notifications service"]
+
+[[case]]
+name = "relational: compliance sign-off for a flow"
+kind = "relational"
+# checkout flow → Stripe → PCI compliance review.
+query = "what sign-off does a change to the checkout flow need"
+expect = ["Any code path that touches Stripe must pass a PCI compliance review"]
+
+[[case]]
+name = "relational: expert on a retired system"
+kind = "relational"
+# retired message queue (Kafka) → analytics pipeline → Priya. Two hops,
+# and the target names neither Kafka nor "queue".
+query = "who would understand the old analytics message queue we retired"
+expect = ["Priya designed the analytics pipeline and knows its schema best"]
+
+[[case]]
+name = "relational: database behind a team's service"
+kind = "relational"
+# Meridian team → billing service → ledger-db. The target never mentions
+# Meridian, so the team name in the query cannot match it directly.
+query = "what Postgres database does the Meridian team's main service write to"
+expect = ["The billing service stores its data in a Postgres database called ledger-db"]
+
+[[case]]
+name = "relational: what a pipeline ran on before"
+kind = "relational"
+# A temporal question. Semantic-only can often answer this one, since the
+# target names the pipeline outright — it is the honest probe for when
+# graph/bi-temporal reasoning (Task 7.3.3) starts to matter versus when
+# plain recall already suffices.
+query = "what messaging system did our analytics run on previously"
+expect = ["Before the switch, the analytics pipeline was built on Kafka"]
