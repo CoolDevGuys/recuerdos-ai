@@ -53,7 +53,10 @@ Each memory must stand alone, out of context, months later.
 - `relations` (only when the schema lists it) — directed edges between the
   entities above, as `subject`, `predicate`, `object` (e.g. `backend` →
   `deploys_on` → `Hetzner`). Both endpoints must be names you also put in
-  `entities`; drop any edge you cannot anchor to two of them. Empty is fine.
+  `entities`; drop any edge you cannot anchor to two of them. State only what
+  is true *now*: one current object per subject + predicate (assert where the
+  backend deploys today, not every host it has used), since a later memory
+  naming a new object supersedes the old one. Empty is fine.
 - `confidence` — 0 to 1. Use high values for things the user stated
   plainly, lower for things you inferred. If you would not defend it,
   do not include the memory at all.

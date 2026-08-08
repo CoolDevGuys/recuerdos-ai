@@ -1736,6 +1736,81 @@ fn invalidation_spares_a_reaffirmed_edge_and_is_idempotent() {
 }
 
 #[test]
+fn a_second_object_for_one_subject_predicate_retires_the_first_by_design() {
+    // Invalidation treats a subject+predicate as holding one *current*
+    // object, so a second assertion closes the first — even for a predicate
+    // that is naturally multi-valued (`works_with`). That is right for
+    // functional predicates (`deploys_on`) and a deliberate limitation for
+    // the rest; the model is steered away from multi-valued edges in the
+    // prompt. This test exists so the behaviour is a decision, not a
+    // surprise: if it ever needs to change, change it here on purpose.
+    let fixture = fixture();
+    let first = MemoryId::new();
+    let second = MemoryId::new();
+    let born = now();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            first,
+            &[entity("alex", "person"), entity("sam", "person")],
+            &[rel("alex", "works_with", "sam")],
+            born,
+        )
+        .unwrap();
+
+    // A later memory names a different collaborator for the same predicate.
+    let later = born + chrono::Duration::days(1);
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            second,
+            &[entity("alex", "person"), entity("jordan", "person")],
+            &[rel("alex", "works_with", "jordan")],
+            later,
+        )
+        .unwrap();
+    fixture
+        .graph
+        .invalidate(
+            &fixture.alex,
+            &[rel("alex", "works_with", "jordan")],
+            later,
+            second,
+        )
+        .unwrap();
+
+    // Current view: only the newest object survives.
+    assert!(
+        !fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("sam")], 1, None, 10)
+            .unwrap()
+            .contains(&first),
+        "the first object stayed live — single-valued invalidation regressed"
+    );
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("jordan")], 1, None, 10)
+            .unwrap()
+            .contains(&second),
+        "the newest object should be live in the current view"
+    );
+    // History is preserved: before the second assertion, the first is live.
+    let midpoint = born + chrono::Duration::hours(1);
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("sam")], 1, Some(midpoint), 10)
+            .unwrap()
+            .contains(&first),
+        "the retired edge was deleted rather than closed"
+    );
+}
+
+#[test]
 fn invalidation_never_closes_the_asserting_memorys_own_edges() {
     // A memory that names two objects for one subject+predicate is
     // internally contradictory, but the edge it just wrote must not retire

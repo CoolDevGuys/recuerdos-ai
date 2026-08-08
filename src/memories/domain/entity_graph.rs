@@ -50,6 +50,37 @@ pub struct Relation {
     pub object: String,
 }
 
+/// The canonical form of a predicate — the join key invalidation matches on.
+///
+/// `"deploys on"`, `"Deploys-On"`, `"deploys_on"` all become `deploys_on`:
+/// runs of non-alphanumeric characters collapse to a single underscore, the
+/// result is lowercased, and leading/trailing underscores are trimmed.
+///
+/// It lives here, beside [`Relation`] and mirroring [`EntityKey`] for
+/// endpoints, so that *every* side agrees on it: the candidate path
+/// normalises a predicate once on the way in, and the store re-normalises
+/// defensively on both `record` and `invalidate`. Because it is idempotent
+/// (`normalise_predicate("deploys_on") == "deploys_on"`), passing an
+/// already-canonical predicate through again is a no-op — which is exactly
+/// what keeps a writer that files `deploys_on` and an invalidator that looks
+/// up `"deploys on"` from ever missing each other.
+pub fn normalise_predicate(raw: &str) -> String {
+    let mut out = String::new();
+    let mut pending_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() {
+            if pending_underscore && !out.is_empty() {
+                out.push('_');
+            }
+            pending_underscore = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_underscore = true;
+        }
+    }
+    out
+}
+
 pub trait EntityGraph: Send + Sync {
     /// Records a memory's entities and relations, replacing any it had
     /// before — recording is idempotent, so a re-ingest or an edit leaves

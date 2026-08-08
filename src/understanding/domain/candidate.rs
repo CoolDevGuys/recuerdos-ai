@@ -8,7 +8,7 @@
 //! [`Memory`]: crate::memories::domain::memory::Memory
 
 use crate::memories::domain::category::Category;
-use crate::memories::domain::entity_graph::Relation;
+use crate::memories::domain::entity_graph::{normalise_predicate, Relation};
 use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::{Entity, MAX_CONTENT_LEN};
 use serde::Deserialize;
@@ -206,10 +206,11 @@ fn normalise_entities(entities: Vec<RawEntity>) -> Vec<Entity> {
 /// to a third party it merely mentioned in passing, or hallucinating an
 /// edge to something that was never there.
 ///
-/// Beyond that: the predicate is snake-cased so `deploys_on` and
-/// `"deploys on"` are one edge; endpoints that collapse to nothing, or to
-/// each other (a self-edge), are dropped; and the count is capped, because
-/// an atomic memory with a dozen relations is the model padding.
+/// Beyond that: the predicate is canonicalised (via the same
+/// [`normalise_predicate`] the store uses) so `deploys_on` and `"deploys on"`
+/// are one edge; endpoints that collapse to nothing, or to each other (a
+/// self-edge), are dropped; and the count is capped, because an atomic memory
+/// with a dozen relations is the model padding.
 fn normalise_relations(relations: Vec<RawRelation>, entities: &[Entity]) -> Vec<Relation> {
     let declared: HashSet<String> = entities
         .iter()
@@ -221,7 +222,7 @@ fn normalise_relations(relations: Vec<RawRelation>, entities: &[Entity]) -> Vec<
     for relation in relations {
         let subject = relation.subject.trim();
         let object = relation.object.trim();
-        let predicate = snake_case(&relation.predicate);
+        let predicate = normalise_predicate(&relation.predicate);
         if subject.is_empty() || object.is_empty() || predicate.is_empty() {
             continue;
         }
@@ -247,26 +248,6 @@ fn normalise_relations(relations: Vec<RawRelation>, entities: &[Entity]) -> Vec<
         }
     }
     kept
-}
-
-/// `"deploys on"`, `"Deploys-On"`, `"deploys_on"` → `deploys_on`. Runs of
-/// non-alphanumeric characters become a single underscore, and the result
-/// is lowercased and trimmed of leading/trailing underscores.
-fn snake_case(raw: &str) -> String {
-    let mut out = String::new();
-    let mut pending_underscore = false;
-    for ch in raw.chars() {
-        if ch.is_alphanumeric() {
-            if pending_underscore && !out.is_empty() {
-                out.push('_');
-            }
-            pending_underscore = false;
-            out.extend(ch.to_lowercase());
-        } else {
-            pending_underscore = true;
-        }
-    }
-    out
 }
 
 #[cfg(test)]

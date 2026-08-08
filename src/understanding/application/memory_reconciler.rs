@@ -302,6 +302,13 @@ impl MemoryReconciler {
         // 7.3.5), so a failed edge write must warn, never lose the memory.
         // `valid_from` is the memory's own creation time — the point these
         // relations became true (Task 7.3.3).
+        //
+        // `record` and `invalidate` are two separate transactions, so this
+        // is not atomic: a store can commit the new edge and then fail to
+        // close the one it contradicts, leaving both live for a window. That
+        // is the same best-effort bargain — the inconsistency is transient
+        // and a backfill (Task 7.3.5) reconciles it — not an invariant the
+        // caller can lean on.
         if let Some(graph) = &self.graph {
             if let Err(error) = graph.record(
                 context,

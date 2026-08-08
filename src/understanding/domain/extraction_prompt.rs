@@ -160,6 +160,8 @@ pub fn schema(taxonomy: &Taxonomy, relations: bool) -> Value {
         },
         "category": {
             "type": "string",
+            // The enum constrains providers that enforce schemas.
+            // `Taxonomy::resolve` handles the ones that don't.
             "enum": taxonomy.names(),
         },
         "subcategory": {
@@ -207,7 +209,10 @@ pub fn schema(taxonomy: &Taxonomy, relations: bool) -> Value {
                 "Directed relations between this memory's own entities, as \
                  subject–predicate–object. Both endpoints MUST be names that \
                  appear in `entities` above; omit an edge you cannot anchor to two \
-                 of them. Empty is fine.",
+                 of them. State only what is true *now*: a subject and predicate \
+                 have one current object (`backend deploys_on Hetzner`, not every \
+                 host it ever used), because a later memory naming a new object \
+                 supersedes the old one. Empty is fine.",
             "items": {
                 "type": "object",
                 "properties": {

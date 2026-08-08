@@ -1397,10 +1397,23 @@ would otherwise be re-litigated mid-build.
   - **Two-clocks rustdoc** added to `Memory` (transaction time) and `Relation`/the stored
     edge (valid time), pointing at decision 6.
   - **Out of scope, noted as follow-ups:** an LLM-supplied *explicit* validity date (the
-    plan defers it); and cleaning a **retracted** memory's edges on `DELETE` (the forgetter
+    plan defers it); cleaning a **retracted** memory's edges on `DELETE` (the forgetter
     isn't wired to `graph.remove` yet — low impact, because recall's `find_many` already
     drops deleted memories, so a stale edge can only ever point at a memory recall won't
-    return). Both belong with 7.3.4/7.3.5.
+    return); and the same class one step over — a **superseded** (not deleted) memory whose
+    edge the superseding one did *not* contradict (a rephrase on a different predicate)
+    keeps a live edge pointing at a memory recall won't surface. All three are "stale edge,
+    harmless until the graph-hop leg reads it" and belong with 7.3.4/7.3.5.
+  - **Single-valued by design:** invalidation closes every live edge with the same
+    subject + predicate and a different object, on *every* store — so a subject + predicate
+    is treated as holding one current object. That is right for functional predicates
+    (`deploys_on`, `migrated_from`) and wrong for multi-valued ones (`works_with`, `uses`):
+    a second `works_with` retires the first, which survives only as history and drops out
+    of the current-time view. Accepted deliberately (the extraction/distillation prompts now
+    steer the model to assert only the current object per subject + predicate) and pinned by
+    `a_second_object_for_one_subject_predicate_retires_the_first_by_design` so the assumption
+    is a decision, not an accident. If a relational eval later blames it, the escape hatch is
+    a functional-predicate allowlist gating the `invalidate` call.
   - `just check` is green (668 tests; clippy `-D warnings` clean — `invalidate` is now live,
     so only `remove`/`neighbours`/`expand` remain behind the graph modules' `allow`).
 

@@ -22,7 +22,7 @@
 #![allow(dead_code)]
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::entity_graph::{EntityGraph, Relation};
+use crate::memories::domain::entity_graph::{normalise_predicate, EntityGraph, Relation};
 use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::Entity;
 use crate::shared::error::{RaError, Result};
@@ -206,7 +206,11 @@ impl EntityGraph for SqliteEntityGraph {
             for relation in relations {
                 let subject = EntityKey::new(&relation.subject);
                 let object = EntityKey::new(&relation.object);
-                let predicate = relation.predicate.trim();
+                // Canonicalise here too, not just trim: the candidate path
+                // already normalises, but a direct caller (a backfill, a
+                // test) must file the edge under the same predicate the
+                // invalidator will look it up by, or the two silently miss.
+                let predicate = normalise_predicate(&relation.predicate);
                 // A relation needs two distinct, real endpoints and a
                 // predicate; a self-edge or a blank end is noise, not a hop.
                 if subject.is_empty()
@@ -332,7 +336,9 @@ impl EntityGraph for SqliteEntityGraph {
             for relation in superseding {
                 let subject = EntityKey::new(&relation.subject);
                 let object = EntityKey::new(&relation.object);
-                let predicate = relation.predicate.trim();
+                // The same canonical form `record` filed the edge under, so
+                // an assertion and the edge it contradicts always match.
+                let predicate = normalise_predicate(&relation.predicate);
                 if subject.is_empty() || object.is_empty() || predicate.is_empty() {
                     continue;
                 }
