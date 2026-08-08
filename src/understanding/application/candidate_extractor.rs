@@ -22,15 +22,24 @@ pub struct CandidateExtractor {
     model: Arc<dyn ChatModel>,
     taxonomy: Arc<Taxonomy>,
     lens: Lens,
+    /// Whether to ask the model for relations between a candidate's
+    /// entities (Task 7.3.2). Off unless the graph is on and wants them, so
+    /// the schema — and the completion cost — is unchanged by default.
+    extract_relations: bool,
 }
 
 impl CandidateExtractor {
     /// Extracts from content a caller submitted to be remembered.
-    pub fn new(model: Arc<dyn ChatModel>, taxonomy: Arc<Taxonomy>) -> Self {
+    pub fn new(
+        model: Arc<dyn ChatModel>,
+        taxonomy: Arc<Taxonomy>,
+        extract_relations: bool,
+    ) -> Self {
         Self {
             model,
             taxonomy,
             lens: Lens::Submission,
+            extract_relations,
         }
     }
 
@@ -39,11 +48,16 @@ impl CandidateExtractor {
     /// identical, which is the point: distillation reuses the whole
     /// validation, normalisation and reconciliation path rather than
     /// growing a parallel one.
-    pub fn for_sessions(model: Arc<dyn ChatModel>, taxonomy: Arc<Taxonomy>) -> Self {
+    pub fn for_sessions(
+        model: Arc<dyn ChatModel>,
+        taxonomy: Arc<Taxonomy>,
+        extract_relations: bool,
+    ) -> Self {
         Self {
             model,
             taxonomy,
             lens: Lens::Session,
+            extract_relations,
         }
     }
 
@@ -60,7 +74,13 @@ impl CandidateExtractor {
             ));
         }
 
-        let request = extraction_request(&self.taxonomy, self.lens, content, hints);
+        let request = extraction_request(
+            &self.taxonomy,
+            self.lens,
+            content,
+            hints,
+            self.extract_relations,
+        );
         let answer = self.model.complete_structured(&request).await?;
 
         Ok(self.harvest(answer, hints))
@@ -169,6 +189,7 @@ mod tests {
             CandidateExtractor::new(
                 Arc::clone(&model) as Arc<dyn ChatModel>,
                 Arc::new(Taxonomy::new(extras)),
+                false,
             ),
             model,
         )

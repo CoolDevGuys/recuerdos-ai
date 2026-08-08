@@ -122,6 +122,7 @@ mod tests {
             Arc::new(CandidateExtractor::for_sessions(
                 Arc::clone(&shared),
                 Arc::new(Taxonomy::new(vec![])),
+                false,
             )),
             Arc::new(MemoryReconciler::new(
                 Arc::new(fixture.recaller()),
@@ -129,6 +130,7 @@ mod tests {
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
                 shared,
+                None,
                 true,
             )),
         );

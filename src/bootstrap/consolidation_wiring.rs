@@ -139,6 +139,7 @@ fn session_pipeline(
             Arc::new(CandidateExtractor::for_sessions(
                 Arc::clone(model),
                 Arc::clone(&understanding.taxonomy),
+                config.graph.extract_relations(),
             )),
             Arc::new(MemoryReconciler::new(
                 Arc::clone(&memories.recaller),
@@ -146,6 +147,7 @@ fn session_pipeline(
                 Arc::clone(&memories.forgetter),
                 Arc::clone(&memories.repository),
                 Arc::clone(model),
+                memories.graph.clone(),
                 config.understanding.reconcile,
             )),
         )),

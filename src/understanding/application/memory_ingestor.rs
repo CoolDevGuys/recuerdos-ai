@@ -103,6 +103,7 @@ mod tests {
             Arc::new(CandidateExtractor::new(
                 Arc::clone(&model),
                 Arc::new(Taxonomy::new(vec![])),
+                false,
             )),
             Arc::new(MemoryReconciler::new(
                 Arc::new(fixture.recaller()),
@@ -110,6 +111,7 @@ mod tests {
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
                 model,
+                None,
                 true,
             )),
         )
@@ -202,6 +204,7 @@ mod tests {
             Arc::new(CandidateExtractor::new(
                 Arc::clone(&model) as Arc<dyn ChatModel>,
                 Arc::new(Taxonomy::new(vec![])),
+                false,
             )),
             Arc::new(MemoryReconciler::new(
                 Arc::new(fixture.recaller()),
@@ -209,6 +212,7 @@ mod tests {
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
                 Arc::clone(&model) as Arc<dyn ChatModel>,
+                None,
                 true,
             )),
         );

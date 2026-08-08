@@ -252,6 +252,12 @@ pub struct GraphConfig {
     /// 7.3.4) hopping — and never changes what plain semantic/keyword
     /// recall returns.
     pub enabled: bool,
+    /// Whether extraction asks the model for `relations` between a memory's
+    /// entities (Task 7.3.2). Only takes effect when `enabled` — a graph
+    /// that is off records no edges regardless. A graph-enabled deployment
+    /// can turn this off to keep the cheaper entity/co-occurrence graph
+    /// without paying the extra completion tokens a relations field costs.
+    pub extract_relations: bool,
     /// How many edges a single recall hop may traverse from its seeds.
     /// Two reaches "the person who leads the team that owns X" without
     /// letting a query wander the whole graph.
@@ -261,10 +267,21 @@ pub struct GraphConfig {
     pub hop_limit: usize,
 }
 
+impl GraphConfig {
+    /// Whether extraction should request relations: only when the graph is
+    /// on *and* relation extraction is wanted. With the graph off (the
+    /// default) the schema is unchanged and extraction costs exactly what
+    /// it did before the graph existed.
+    pub fn extract_relations(&self) -> bool {
+        self.enabled && self.extract_relations
+    }
+}
+
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            extract_relations: true,
             max_hops: 2,
             hop_limit: 50,
         }

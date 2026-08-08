@@ -232,6 +232,7 @@ mod tests {
             subcategory: None,
             tags: vec![],
             entities: vec![],
+            relations: vec![],
             confidence: 0.9,
         }
     }

@@ -26,6 +26,7 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
 use crate::memories::application::memory_recaller::MemoryRecaller;
+use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
@@ -54,6 +55,11 @@ pub struct MemoryReconciler {
     forgetter: Arc<MemoryForgetter>,
     memories: Arc<dyn MemoryRepository>,
     model: Arc<dyn ChatModel>,
+    /// The entity/relation graph, present only when `[graph].enabled`
+    /// (Task 7.3.2). When set, a stored candidate's entities and relations
+    /// are projected into it; when `None`, the pipeline behaves exactly as
+    /// it did before the graph existed.
+    graph: Option<Arc<dyn EntityGraph>>,
     /// `[understanding].reconcile = false` — extract, but never supersede
     /// or delete. For a deployment that wants labelling without letting a
     /// model remove anything.
@@ -78,12 +84,14 @@ impl ReconcileOutcome {
 }
 
 impl MemoryReconciler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         recaller: Arc<MemoryRecaller>,
         saver: Arc<DirectMemorySaver>,
         forgetter: Arc<MemoryForgetter>,
         memories: Arc<dyn MemoryRepository>,
         model: Arc<dyn ChatModel>,
+        graph: Option<Arc<dyn EntityGraph>>,
         enabled: bool,
     ) -> Self {
         Self {
@@ -92,6 +100,7 @@ impl MemoryReconciler {
             forgetter,
             memories,
             model,
+            graph,
             enabled,
         }
     }
@@ -269,25 +278,78 @@ impl MemoryReconciler {
     }
 
     fn store(&self, context: &UserContext, candidate: &Candidate, actor: &str) -> Result<MemoryId> {
-        self.saver
-            .execute(
-                context,
-                NewMemory {
-                    content: candidate.content.clone(),
-                    category: candidate.category.clone(),
-                    subcategory: candidate.subcategory.clone(),
-                    tags: candidate.tags.clone(),
-                    entities: candidate.entities.clone(),
-                    confidence: candidate.confidence,
-                    source: MemorySource {
-                        client: Some(actor.to_string()),
-                        session_id: None,
-                    },
-                    expires_at: None,
+        let memory = self.saver.execute(
+            context,
+            NewMemory {
+                content: candidate.content.clone(),
+                category: candidate.category.clone(),
+                subcategory: candidate.subcategory.clone(),
+                tags: candidate.tags.clone(),
+                entities: candidate.entities.clone(),
+                confidence: candidate.confidence,
+                source: MemorySource {
+                    client: Some(actor.to_string()),
+                    session_id: None,
                 },
-                actor,
-            )
-            .map(|memory| memory.id())
+                expires_at: None,
+            },
+            actor,
+        )?;
+
+        // Project the memory into the graph, when there is one. Best-effort
+        // by design, exactly like the text index in `DirectMemorySaver`:
+        // the graph is derived state that a backfill can rebuild (Task
+        // 7.3.5), so a failed edge write must warn, never lose the memory.
+        // `valid_from` is the memory's own creation time — the point these
+        // relations became true (Task 7.3.3).
+        //
+        // `record` and `invalidate` are two separate transactions, so this
+        // is not atomic: a store can commit the new edge and then fail to
+        // close the one it contradicts, leaving both live for a window. That
+        // is the same best-effort bargain — the inconsistency is transient
+        // and a backfill (Task 7.3.5) reconciles it — not an invariant the
+        // caller can lean on.
+        if let Some(graph) = &self.graph {
+            if let Err(error) = graph.record(
+                context,
+                memory.id(),
+                memory.entities(),
+                &candidate.relations,
+                memory.created_at(),
+            ) {
+                tracing::warn!(
+                    memory_id = %memory.id(),
+                    %error,
+                    "memory stored but its graph entities and relations were not recorded"
+                );
+            }
+
+            // Bi-temporality (Task 7.3.3): a new assertion retires the
+            // edges it contradicts. Storing "backend deploys on Hetzner"
+            // closes any live "backend deploys on <something else>" edge as
+            // of now — the fact is not deleted, its validity interval is
+            // closed, so an `as_of` read from before still sees it. Done on
+            // every store, not only on a reconciliation UPDATE, because the
+            // current truth of an edge is singular regardless of whether the
+            // model judged the *memory* a duplicate; and best-effort for the
+            // same reason the record above is.
+            if !candidate.relations.is_empty()
+                && let Err(error) = graph.invalidate(
+                    context,
+                    &candidate.relations,
+                    memory.created_at(),
+                    memory.id(),
+                )
+            {
+                tracing::warn!(
+                    memory_id = %memory.id(),
+                    %error,
+                    "memory stored but the edges it contradicts were not invalidated"
+                );
+            }
+        }
+
+        Ok(memory.id())
     }
 }
 
@@ -307,6 +369,8 @@ mod tests {
     use super::*;
     use crate::memories::application::test_doubles::Fixture;
     use crate::memories::domain::category::Category;
+    use crate::memories::domain::entity_graph::Relation;
+    use crate::memories::domain::memory::Entity;
     use crate::memories::domain::memory_repository::AuditOperation;
     use crate::understanding::application::scripted_chat_model::ScriptedChatModel;
     use serde_json::json;
@@ -320,6 +384,7 @@ mod tests {
             subcategory: None,
             tags: vec![],
             entities: vec![],
+            relations: vec![],
             confidence: 0.9,
         }
     }
@@ -327,6 +392,15 @@ mod tests {
     fn reconciler(
         fixture: &Fixture,
         model: ScriptedChatModel,
+        enabled: bool,
+    ) -> (MemoryReconciler, Arc<ScriptedChatModel>) {
+        reconciler_with_graph(fixture, model, None, enabled)
+    }
+
+    fn reconciler_with_graph(
+        fixture: &Fixture,
+        model: ScriptedChatModel,
+        graph: Option<Arc<dyn EntityGraph>>,
         enabled: bool,
     ) -> (MemoryReconciler, Arc<ScriptedChatModel>) {
         let model = Arc::new(model);
@@ -337,10 +411,63 @@ mod tests {
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
                 Arc::clone(&model) as Arc<dyn ChatModel>,
+                graph,
                 enabled,
             ),
             model,
         )
+    }
+
+    /// Captures what the reconciler projects into the graph, so a use-case
+    /// test can assert a stored candidate's entities and relations reach it
+    /// without standing up a real SQLite store.
+    #[derive(Default)]
+    struct SpyGraph {
+        recorded: std::sync::Mutex<Vec<(Vec<Entity>, Vec<Relation>)>>,
+        invalidated: std::sync::Mutex<Vec<Vec<Relation>>>,
+    }
+
+    impl EntityGraph for SpyGraph {
+        fn record(
+            &self,
+            _context: &UserContext,
+            _memory_id: MemoryId,
+            entities: &[Entity],
+            relations: &[Relation],
+            _valid_from: chrono::DateTime<chrono::Utc>,
+        ) -> Result<()> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((entities.to_vec(), relations.to_vec()));
+            Ok(())
+        }
+
+        fn remove(&self, _: &UserContext, _: MemoryId) -> Result<()> {
+            Ok(())
+        }
+
+        fn neighbours(
+            &self,
+            _: &UserContext,
+            _: &[crate::memories::domain::entity_key::EntityKey],
+            _: usize,
+            _: Option<chrono::DateTime<chrono::Utc>>,
+            _: usize,
+        ) -> Result<Vec<MemoryId>> {
+            Ok(Vec::new())
+        }
+
+        fn invalidate(
+            &self,
+            _: &UserContext,
+            superseding: &[Relation],
+            _: chrono::DateTime<chrono::Utc>,
+            _: MemoryId,
+        ) -> Result<()> {
+            self.invalidated.lock().unwrap().push(superseding.to_vec());
+            Ok(())
+        }
     }
 
     fn recall(fixture: &Fixture, query: &str) -> Vec<String> {
@@ -374,6 +501,87 @@ mod tests {
         assert_eq!(
             recall(&fixture, "where does the backend run"),
             ["The backend runs on Hetzner"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_candidates_entities_and_relations_reach_the_graph() {
+        // The edge write: when a candidate is stored and a graph is
+        // present, its entities and (anchored) relations are projected into
+        // it, tagged with the memory's own creation time.
+        let fixture = Fixture::new();
+        let spy = Arc::new(SpyGraph::default());
+        let (reconciler, model) = reconciler_with_graph(
+            &fixture,
+            ScriptedChatModel::new(),
+            Some(Arc::clone(&spy) as Arc<dyn EntityGraph>),
+            true,
+        );
+
+        let mut candidate = candidate("The backend runs on Hetzner");
+        candidate.entities = vec![
+            Entity {
+                name: "backend".to_string(),
+                kind: "component".to_string(),
+            },
+            Entity {
+                name: "Hetzner".to_string(),
+                kind: "service".to_string(),
+            },
+        ];
+        candidate.relations = vec![Relation {
+            subject: "backend".to_string(),
+            predicate: "deploys_on".to_string(),
+            object: "Hetzner".to_string(),
+        }];
+
+        reconciler
+            .execute(&fixture.alex, &[candidate], ACTOR)
+            .await
+            .unwrap();
+
+        // Fresh store, so this is the no-neighbours ADD path — no model call.
+        assert_eq!(model.call_count(), 0);
+        let recorded = spy.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "the candidate was not projected");
+        let (entities, relations) = &recorded[0];
+        assert_eq!(entities.len(), 2);
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].predicate, "deploys_on");
+
+        // And the same relations are handed to invalidation, so the new
+        // assertion retires whatever it contradicts (Task 7.3.3).
+        let invalidated = spy.invalidated.lock().unwrap();
+        assert_eq!(invalidated.len(), 1);
+        assert_eq!(invalidated[0], *relations);
+    }
+
+    #[tokio::test]
+    async fn a_candidate_with_no_relations_asks_for_no_invalidation() {
+        // Nothing asserted, nothing to retire — the invalidation call is
+        // skipped rather than issued with an empty list.
+        let fixture = Fixture::new();
+        let spy = Arc::new(SpyGraph::default());
+        let (reconciler, _) = reconciler_with_graph(
+            &fixture,
+            ScriptedChatModel::new(),
+            Some(Arc::clone(&spy) as Arc<dyn EntityGraph>),
+            true,
+        );
+
+        reconciler
+            .execute(
+                &fixture.alex,
+                &[candidate("a plain fact with no entities")],
+                ACTOR,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(spy.recorded.lock().unwrap().len(), 1, "still recorded");
+        assert!(
+            spy.invalidated.lock().unwrap().is_empty(),
+            "a relationless candidate must not trigger invalidation"
         );
     }
 

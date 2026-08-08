@@ -71,6 +71,13 @@ Each memory must stand alone, out of context, months later.
   `infrastructure`). Omit rather than pad.
 - `entities` — named things the memory refers to, each with a `kind`
   such as `service`, `tool`, `person`, `project`, `language`.
+- `relations` (only when the schema lists it) — directed edges between the
+  entities above, as `subject`, `predicate`, `object` (e.g. `backend` →
+  `deploys_on` → `Hetzner`). Both endpoints must be names you also put in
+  `entities`; drop any edge you cannot anchor to two of them. State only what
+  is true *now*: one current object per subject + predicate (assert where the
+  backend deploys today, not every host it has used), since a later memory
+  naming a new object supersedes the old one. Empty is fine.
 - `confidence` — 0 to 1. High for what the user stated plainly, lower
   for what you inferred from the flow of the session. If you would not
   defend it, do not include the memory at all.

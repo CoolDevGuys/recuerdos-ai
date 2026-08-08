@@ -34,11 +34,51 @@ use chrono::{DateTime, Utc};
 /// has to remember to. The same shape drives invalidation
 /// ([`EntityGraph::invalidate`]): a superseding memory's re-assertions are
 /// just relations.
+///
+/// A `Relation` carries no time — it is the *assertion*. The stored edge
+/// gains two: it becomes valid at the asserting memory's `created_at` and
+/// stays valid until some later memory contradicts it, at which point its
+/// `invalid_at` closes. That *valid* time is a different clock from the
+/// memory's *transaction* time (`Memory::created_at`, "when we learned
+/// it") — the distinction is what lets a query ask what was true *before*
+/// a change, and it is Strategy B's whole point (implementation-plan.md
+/// Task 7.3, decision 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relation {
     pub subject: String,
     pub predicate: String,
     pub object: String,
+}
+
+/// The canonical form of a predicate — the join key invalidation matches on.
+///
+/// `"deploys on"`, `"Deploys-On"`, `"deploys_on"` all become `deploys_on`:
+/// runs of non-alphanumeric characters collapse to a single underscore, the
+/// result is lowercased, and leading/trailing underscores are trimmed.
+///
+/// It lives here, beside [`Relation`] and mirroring [`EntityKey`] for
+/// endpoints, so that *every* side agrees on it: the candidate path
+/// normalises a predicate once on the way in, and the store re-normalises
+/// defensively on both `record` and `invalidate`. Because it is idempotent
+/// (`normalise_predicate("deploys_on") == "deploys_on"`), passing an
+/// already-canonical predicate through again is a no-op — which is exactly
+/// what keeps a writer that files `deploys_on` and an invalidator that looks
+/// up `"deploys on"` from ever missing each other.
+pub fn normalise_predicate(raw: &str) -> String {
+    let mut out = String::new();
+    let mut pending_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_alphanumeric() {
+            if pending_underscore && !out.is_empty() {
+                out.push('_');
+            }
+            pending_underscore = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_underscore = true;
+        }
+    }
+    out
 }
 
 pub trait EntityGraph: Send + Sync {

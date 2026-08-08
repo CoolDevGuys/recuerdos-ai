@@ -169,6 +169,11 @@ recency_half_life_days = 90
 # semantic/keyword recall returns; it adds a third "connected to" leg on
 # top. Still being rolled out (implementation-plan.md Task 7.3).
 enabled = false
+# When the graph is on, whether extraction also asks the model for
+# relations between a memory's entities (subject–predicate–object). Turn
+# off to keep the cheaper entity/co-occurrence graph without the extra
+# completion tokens a relations field costs. No effect while enabled = false.
+extract_relations = true
 # How many edges one recall hop may traverse from its seeds. Two reaches
 # "the person who leads the team that owns X".
 max_hops = 2

@@ -54,6 +54,15 @@ pub struct Memory {
     entities: Vec<Entity>,
     confidence: f32,
     source: MemorySource,
+    /// *Transaction* time: when we learned this — created it, edited it,
+    /// retired it. Distinct from the *valid* time the graph tracks on a
+    /// relation (`memory_relations.valid_from`/`invalid_at`), which is when
+    /// the fact itself was true. The two are kept apart on purpose
+    /// (implementation-plan.md Task 7.3, decision 6): a memory recorded in
+    /// June can assert a relation that became true in January, and only the
+    /// second clock can answer "what did we deploy on *before* the
+    /// migration?". A memory's `created_at` is the `valid_from` of the
+    /// relations it asserts.
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     last_accessed_at: Option<DateTime<Utc>>,
