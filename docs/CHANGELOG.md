@@ -26,6 +26,14 @@ regressing.
   self-silencing: a query naming no known entity yields the exact two-leg
   result, so non-relational recall cannot regress — a property the eval and
   an empty-leg identity test both hold.
+- **Tuned so recall's gain isn't precision's loss.** At full weight the hop
+  let a relation "bridge" outrank the direct answer on one case, costing
+  `precision@1`. `[graph].rank_weight` (default `0.3`) down-weights the hop's
+  fusion term so it *adds* relational recall (85.7%) without *displacing* a
+  strong direct match — `precision@1` stays at its pre-graph 62.5%.
+  `[graph].unanchored_floor` (default `3`) additionally caps a memory only
+  the graph found, so it can't leapfrog a direct hit while still reaching
+  the top-k.
 - **Time-travel recall.** `as_of` (REST search and the `memory_recall` MCP
   tool) reads the hop in valid time — "who was on-call before the reorg?" —
   traversing edges that were live then. `graph_rank` in a result's `matched`

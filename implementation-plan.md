@@ -1558,11 +1558,51 @@ would otherwise be re-litigated mid-build.
   - [x] Every other `by_kind` stays inside the existing `--max-drop 5` gate — in fact none
         moved at all (needle 66.7%, all others 100%); overall recall@5 87.5% → 91.7%.
         (`precision@1` slipped 62.5% → 58.3% as the third leg reorders one relational case
-        under RRF; it is not gated.)
+        under RRF; it is not gated, and Task 7.3.7 below recovers it to 62.5%.)
   - [x] `[graph].enabled` defaults to **true** — both conditions held, so the eval now
         exercises the graph and the default build ships it on.
   - [x] Phase exit checklist → PR ([#13](https://github.com/CoolDevGuys/recuerdos-ai/pull/13)).
         Tag `v0.2.0` on merge (version already bumped in `Cargo.toml`).
+
+#### Task 7.3.7 — Precision recovery after the graph (S)
+
+- **Goal:** buy back the `precision@1` the third leg cost (62.5% → 58.3% in 7.3.6)
+  without giving up the relational recall it bought, and record the option set so a
+  future push past the pre-graph number is a decision, not a rediscovery.
+- **The regression, diagnosed:** the graph leg is a flat additive RRF term. On a
+  relational query it surfaces both the *bridge* (1 hop) and the *answer* (2 hops), and
+  the bridge — which usually also has a vector/keyword rank — stacks two terms and takes
+  #1. On `relational: database behind a team's service` the answer was the **vector-leg
+  #1** and named the very database asked for, yet lost #1 to the bridge purely on the
+  graph term. So the fix is to stop the hop from *displacing* a strong direct match while
+  still letting it *add* recall.
+- **Options (the menu, so we track what's built vs deferred):**
+  - **[x] 1. Weighted RRF.** Scale the graph term by `[graph].rank_weight` (< 1). Tuned to
+    **0.3** against the eval: `precision@1` back to **62.5%**, `relational` held at
+    **85.7%**, nothing else moved. The direct answer's vector-rank-1 lead now outweighs the
+    bridge's hop advantage. *(Implemented: `RecallRanker::with_graph_ranking`,
+    `recall_ranker.rs`.)*
+  - **[x] 2. Unanchored floor.** Cap a graph-*only* hit (no vector/keyword rank) at
+    `[graph].unanchored_floor` (rank 3), so a memory reached only by a relation can't
+    leapfrog a strong direct match but still reaches the top-k. A safety net for corpora
+    where the hop surfaces a memory the other legs never saw; pinned by unit tests rather
+    than this eval, where such a hit doesn't happen to take #1. *(Implemented, same seam.)*
+  - **[ ] 3. Cross-encoder reranker.** A final stage that re-scores the fused top-N with a
+    model reading `(query, memory)` jointly. The highest-ceiling option — it could push
+    precision *past* the pre-graph number — and fits the provider-optional pattern, but
+    adds a model to the hot path (local latency or egress). Deferred; revisit if weighting
+    proves too blunt in real use.
+  - **[ ] 4. PPR / edge-weighted hops.** Rank *within* the graph leg so the terminal answer
+    beats the bridge, rather than correcting it in fusion. The graph-native fix; heaviest,
+    and gated by the plan on "hop expansion returning too much", which isn't today's
+    problem. Deferred.
+  - **[ ] 5. Query routing.** Run/full-weight the graph leg only when the two direct legs
+    are uncertain. Cheap in principle, but needs a calibrated confidence signal. Deferred.
+- **DoD:**
+  - [x] `precision@1` ≥ its pre-graph value (62.5%) with `relational` recall@5 held at 85.7%
+        and no other `by_kind` regressed; re-recorded in `eval/baseline.json`.
+  - [x] Knobs are config (`[graph].rank_weight`, `[graph].unanchored_floor`), documented,
+        and default-tuned; the empty-graph-leg identity guarantee still holds.
 
 #### 7.3 sequencing & risk
 
@@ -1575,6 +1615,7 @@ would otherwise be re-litigated mid-build.
 | 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | ✅ Done — seeding + recursive-CTE hop as a third RRF leg; `as_of`/`graph_rank` surfaced; perf gate left for 7.3.6 |
 | 7.3.5 Budgeted backfill | M | Low | — | ✅ Done — `graph backfill --entities` (zero-LLM) and `--relations` (budgeted, resumable via a V9 watermark); `--dry-run` spends nothing |
 | 7.3.6 Measure + docs | M | Low | — | ✅ Done — eval wired to the graph; relational 71.4% → 85.7% (no other kind regressed); `[graph]` default flipped on; docs + project-plan updated |
+| 7.3.7 Precision recovery | S | Low | — | ✅ Done (opts 1–2) — weighted graph RRF (`rank_weight = 0.3`) + unanchored floor; `precision@1` back to 62.5% with `relational` held at 85.7%. Reranker / PPR / routing menu documented, deferred |
 
 **The four risks worth naming up front:**
 

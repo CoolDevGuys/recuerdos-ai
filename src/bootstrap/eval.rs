@@ -270,6 +270,26 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
     let hits = memories.recaller.execute(context, &query)?;
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();
 
+    // Ranker-tuning aid (added in Task 7.3.7): with RA_EVAL_DEBUG set, dump
+    // the top few hits and how each leg ranked them, so a precision or recall
+    // move can be traced to the exact memory that took a rank and why — which
+    // is how the graph rank-weight was tuned. Off by default; costs nothing.
+    if std::env::var("RA_EVAL_DEBUG").is_ok() {
+        eprintln!("\n[{}] {}", case.kind, case.name);
+        for (i, hit) in hits.iter().take(3).enumerate() {
+            let d = hit.match_detail;
+            eprintln!(
+                "  {}. v={:?} k={:?} g={:?} score={:.5}  {}",
+                i + 1,
+                d.vector_rank,
+                d.bm25_rank,
+                d.graph_rank,
+                hit.score,
+                truncate(hit.memory.content(), 60),
+            );
+        }
+    }
+
     let missed: Vec<String> = case
         .expect
         .iter()

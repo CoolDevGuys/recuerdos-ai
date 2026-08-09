@@ -182,6 +182,18 @@ max_hops = 2
 # The most graph-found memories a hop contributes before fusion trims them
 # against the vector and keyword legs.
 hop_limit = 50
+# Weight on the graph leg during rank fusion. 1.0 is raw three-leg RRF;
+# below 1.0 lets a hop *add* relational recall without *displacing* a
+# memory the vector or keyword leg already ranked well. Tuned to 0.3: the
+# graph keeps its recall gain (relational recall@5 71.4% -> 85.7%) while
+# precision@1 returns to its pre-graph 62.5%. Must be >= 0.
+rank_weight = 0.3
+# The rank an *unanchored* graph hit — one neither the vector nor the
+# keyword leg found — is capped at. Its fusion term may not beat a direct
+# match at this rank, so a memory reached only by a relation hop cannot
+# leapfrog a strong direct match, while still outranking weaker ones (and
+# staying in the top-k recall is measured over). 0 disables the cap.
+unanchored_floor = 3
 
 [graph.backfill_budget]
 # Bounds one `recuerdos-ai graph backfill --relations` pass, so giving an

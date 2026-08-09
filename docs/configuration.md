@@ -71,6 +71,14 @@ with its default and an explanatory comment. Highlights:
   or turn `[graph].enabled` off entirely, to restore the pre-graph
   behaviour and its lower token cost. A graph the extraction never filled
   can be backfilled with `recuerdos-ai graph backfill`.
+- `[graph].rank_weight` (default `0.3`) and `[graph].unanchored_floor`
+  (default `3`) tune how much the hop leg sways ranking. Weighting it below
+  `1.0` lets the graph *add* relational recall without *displacing* a memory
+  the vector or keyword leg already ranked well — the pair that keeps the
+  85.7% relational recall while returning `precision@1` to its pre-graph
+  62.5%. The floor caps a memory *only* the graph found so it can't leapfrog
+  a strong direct match. Both are inert when a query surfaces no graph hits,
+  so non-relational recall is unaffected.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation
