@@ -246,17 +246,21 @@ impl Default for RetrievalConfig {
 #[serde(default)]
 pub struct GraphConfig {
     /// The entity/relation graph (Strategy B, implementation-plan.md Task
-    /// 7.3). Off by default: the tables and traversal exist, but recall
-    /// does not consult them and ingest does not write edges until this is
-    /// on. Enabling it is additive — it starts recording and (from Task
-    /// 7.3.4) hopping — and never changes what plain semantic/keyword
-    /// recall returns.
+    /// 7.3). On by default as of Task 7.3.6: the eval measured relational
+    /// recall@5 climbing 71.4% → 85.7% with no other `by_kind` regressing,
+    /// so the third leg earns its place in the default build. Turning it
+    /// off restores the pre-graph behaviour exactly — recall stops
+    /// consulting the graph and ingest stops writing edges — for a
+    /// deployment that wants neither the hop nor the relation-extraction
+    /// tokens it costs.
     pub enabled: bool,
     /// Whether extraction asks the model for `relations` between a memory's
     /// entities (Task 7.3.2). Only takes effect when `enabled` — a graph
-    /// that is off records no edges regardless. A graph-enabled deployment
-    /// can turn this off to keep the cheaper entity/co-occurrence graph
-    /// without paying the extra completion tokens a relations field costs.
+    /// that is off records no edges regardless. On by default alongside the
+    /// graph, since the hop is only as good as the edges ingest gives it; a
+    /// deployment can turn this off to keep the cheaper entity/co-occurrence
+    /// graph without paying the extra completion tokens a relations field
+    /// costs.
     pub extract_relations: bool,
     /// How many edges a single recall hop may traverse from its seeds.
     /// Two reaches "the person who leads the team that owns X" without
@@ -275,9 +279,9 @@ pub struct GraphConfig {
 
 impl GraphConfig {
     /// Whether extraction should request relations: only when the graph is
-    /// on *and* relation extraction is wanted. With the graph off (the
-    /// default) the schema is unchanged and extraction costs exactly what
-    /// it did before the graph existed.
+    /// on *and* relation extraction is wanted. Turning the graph off leaves
+    /// the extraction schema unchanged and costs exactly what it did before
+    /// the graph existed.
     pub fn extract_relations(&self) -> bool {
         self.enabled && self.extract_relations
     }
@@ -286,7 +290,7 @@ impl GraphConfig {
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             extract_relations: true,
             max_hops: 2,
             hop_limit: 50,

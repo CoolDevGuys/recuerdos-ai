@@ -1014,7 +1014,7 @@ retrieval precision gained*, never in cosine math.
   `sqlite_reindexer.rs`, the understanding extraction/reconciliation/merge prompts,
   the HTTP DTOs/handlers, and the eval harness.
 
-### Task 7.3 — Graph layer (Strategy B): bi-temporal entity graph + graph-hop recall (L)
+### Task 7.3 — Graph layer (Strategy B): bi-temporal entity graph + graph-hop recall (L) ✅ DONE
 
 - **Goal:** the entity/relation graph the framework plan's "method of loci" describes is
   **already the roadmap's Strategy B** (`project-plan.md §4, §15 "Phase 3 — Scale &
@@ -1479,8 +1479,8 @@ would otherwise be re-litigated mid-build.
   - **`as_of` surfaced** on `RecallQuery`, `POST /v1/memories/search` (`as_of`), and MCP
     `memory_recall` (an RFC-3339 string parsed at the boundary); `match.graph_rank` added to
     the search DTO. Predicate normalisation stays centralised in `normalise_predicate`.
-  - **Docs deferred to 7.3.6** as the plan sequences them (`as_of`, `graph_rank` in
-    `docs/api.md`/`docs/mcp.md`, the third leg in `docs/architecture.md`).
+  - **Docs written in 7.3.6** as the plan sequenced them (`as_of`, `graph_rank` in
+    `docs/api.md`/`docs/mcp.md`, the third leg + the two clocks in `docs/architecture.md`).
   - `just check` is green (fmt, clippy `-D warnings`, boundary script, full suite — 671
     bin tests plus the integration suites: the graph modules' `allow(dead_code)` now covers
     only `remove`, still awaiting the forgetter wiring in 7.3.5).
@@ -1538,8 +1538,8 @@ would otherwise be re-litigated mid-build.
     every run. A memory ingest already gave edges is skipped by `has_relations` (a new,
     cheap indexed check) and its cursor stepped without a model call. Advanced only after a
     memory is handled, so a budget stop leaves the cursor at the last one finished.
-  - **Docs deferred to 7.3.6** (the `graph backfill` command in `docs/`), as the plan
-    sequences documentation there.
+  - **Docs written in 7.3.6** (the `graph backfill` command documented in
+    `docs/deployment.md`, alongside `reindex`), as the plan sequenced documentation there.
   - `just check` is green (fmt, clippy `-D warnings`, boundary script, full suite — 679 bin
     tests plus the integration suites).
 
@@ -1551,12 +1551,18 @@ would otherwise be re-litigated mid-build.
   `docs/configuration.md` (`[graph]`), `docs/architecture.md` (third leg + the two
   clocks); flip Strategy B's status in `project-plan.md` §4 and §15.
 - **DoD:**
-  - [ ] Relational recall@5 beats the 7.3.0 baseline by a **measured** margin, recorded in
-        the PR and in `eval/baseline.json`.
-  - [ ] Every other `by_kind` stays inside the existing `--max-drop 5` gate.
-  - [ ] `[graph].enabled` defaults to true **only if** both hold; otherwise it ships
-        default-off with the number stated plainly.
-  - [ ] Phase exit checklist → PR → tag `v0.2.0`.
+  - [x] Relational recall@5 beats the 7.3.0 baseline by a **measured** margin — **71.4% →
+        85.7%** (+14.3 points), recorded in the PR and in `eval/baseline.json`. The one
+        remaining miss is the true 2-hop case (billing service → Meridian team → Nadia),
+        exactly the gap 7.3.0 flagged.
+  - [x] Every other `by_kind` stays inside the existing `--max-drop 5` gate — in fact none
+        moved at all (needle 66.7%, all others 100%); overall recall@5 87.5% → 91.7%.
+        (`precision@1` slipped 62.5% → 58.3% as the third leg reorders one relational case
+        under RRF; it is not gated.)
+  - [x] `[graph].enabled` defaults to **true** — both conditions held, so the eval now
+        exercises the graph and the default build ships it on.
+  - [x] Phase exit checklist → PR ([#13](https://github.com/CoolDevGuys/recuerdos-ai/pull/13)).
+        Tag `v0.2.0` on merge (version already bumped in `Cargo.toml`).
 
 #### 7.3 sequencing & risk
 
@@ -1568,7 +1574,7 @@ would otherwise be re-litigated mid-build.
 | 7.3.3 Bi-temporality | M | Med | 7.3.4 | ✅ Done — invalidation wired into `store`; re-record preserves closed edges; time-travel + idempotency covered |
 | 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | ✅ Done — seeding + recursive-CTE hop as a third RRF leg; `as_of`/`graph_rank` surfaced; perf gate left for 7.3.6 |
 | 7.3.5 Budgeted backfill | M | Low | — | ✅ Done — `graph backfill --entities` (zero-LLM) and `--relations` (budgeted, resumable via a V9 watermark); `--dry-run` spends nothing |
-| 7.3.6 Measure + docs | M | Low | — | The margin, in writing |
+| 7.3.6 Measure + docs | M | Low | — | ✅ Done — eval wired to the graph; relational 71.4% → 85.7% (no other kind regressed); `[graph]` default flipped on; docs + project-plan updated |
 
 **The four risks worth naming up front:**
 
@@ -1594,7 +1600,7 @@ eval slice from 7.3.0 stays in the repo either way as the tripwire.
 |---|---|---|---|---|
 | 7.1 Budget + skip-unchanged | M | Low | ✅ Done | Fewer LLM merge calls; bounded run time — the honest version of the framework plan's Phase 1 |
 | 7.2 Optional sub-label | M | Low–Med | ✅ Done | Tighter clusters + a subcategory recall filter, exercised by the eval harness |
-| 7.3 Graph (Strategy B) | L | Med–High | 📋 Planned | Relational recall — `project-plan.md`'s moat item, now broken into 7.3.0–7.3.6 with 7.3.0 as the eval gate that justifies (or cancels) the rest |
+| 7.3 Graph (Strategy B) | L | Med–High | ✅ Done | Relational recall — `project-plan.md`'s moat item, delivered across 7.3.0–7.3.6; the eval put relational recall@5 at 85.7% (vs 71.4% without the graph), so it ships on by default in `v0.2.0` |
 
 Do **not** carry over the framework plan's cumulative "125× / 3×" projections. Each
 task above ships behind the Phase 4.6 eval gate and is described by the number it

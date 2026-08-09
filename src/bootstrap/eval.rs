@@ -24,6 +24,7 @@ use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::Category;
+use crate::memories::domain::entity_graph::Relation;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::error::{RaError, Result};
@@ -56,19 +57,19 @@ struct SeedMemory {
     subcategory: Option<String>,
     #[serde(default)]
     tags: Vec<String>,
-    /// Named things the memory refers to. Stored on the memory today and
-    /// unused by retrieval — the graph leg that hops over them arrives in
-    /// Task 7.3.4. Seeding them now is what lets a `relational` case have
-    /// a graph to walk once that lands, without re-writing the corpus.
+    /// Named things the memory refers to. Projected into the graph on
+    /// seeding (Task 7.3.6) so the graph leg has entities to seed a hop
+    /// from — the same entities production's extraction pipeline attaches
+    /// to a memory, supplied deterministically here instead of by a model.
     #[serde(default)]
     entities: Vec<SeedEntity>,
     /// Directed relations between this memory's entities
-    /// (`subject —predicate→ object`). Parsed now so the eval corpus
-    /// already carries the graph; the extraction pipeline starts emitting
-    /// them in Task 7.3.2 and recall starts walking them in 7.3.4. Unused
-    /// until then.
+    /// (`subject —predicate→ object`). Projected into the graph alongside
+    /// the entities (Task 7.3.6): they are the edges the `relational` cases
+    /// hop over. In production these come from extraction (Task 7.3.2); the
+    /// eval has no model, so the corpus carries them by hand — which is why
+    /// they were seeded into the file back when the graph was still inert.
     #[serde(default)]
-    #[allow(dead_code)]
     relations: Vec<SeedRelation>,
 }
 
@@ -79,10 +80,9 @@ struct SeedEntity {
     kind: String,
 }
 
-/// A `subject —predicate→ object` edge asserted by a seed memory. Held for
-/// Task 7.3.2 onward; nothing reads it yet.
+/// A `subject —predicate→ object` edge asserted by a seed memory. Projected
+/// into the graph on seeding so the `relational` cases have edges to hop.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct SeedRelation {
     subject: String,
     predicate: String,
@@ -170,6 +170,12 @@ fn seed(
     if let Some(cache) = model_cache_dir {
         config.embeddings.cache_dir = cache.to_string_lossy().to_string();
     }
+    // The eval measures the graph leg's contribution, so it runs with the
+    // graph on regardless of the shipped default — that is the whole point
+    // of the `relational` cases and the entities/relations the corpus
+    // carries. Whether `[graph].enabled` *ships* on is a separate decision,
+    // made from these numbers (Task 7.3.6), not read back from here.
+    config.graph.enabled = true;
 
     let database = Arc::new(SqliteDatabase::open(
         &scratch.path().join(crate::bootstrap::wiring::DATABASE_FILE),
@@ -187,22 +193,31 @@ fn seed(
             .execute("eval", vec![Scope::Read, Scope::Write], "eval")?;
     let context = identity.key_authenticator.execute(&issued.token.render())?;
 
+    // The graph is present because we turned it on above; a missing one
+    // here would be a wiring bug, not a config choice, so unwrap loudly.
+    let graph = memories
+        .graph
+        .as_ref()
+        .expect("the eval enables the graph, so Memories must have built one");
+
     for seed in &set.memories {
-        memories.saver.execute(
+        let entities: Vec<Entity> = seed
+            .entities
+            .iter()
+            .map(|e| Entity {
+                name: e.name.clone(),
+                kind: e.kind.clone(),
+            })
+            .collect();
+
+        let stored = memories.saver.execute(
             &context,
             NewMemory {
                 content: seed.content.clone(),
                 category: Category::parse(&seed.category)?,
                 subcategory: seed.subcategory.clone(),
                 tags: seed.tags.clone(),
-                entities: seed
-                    .entities
-                    .iter()
-                    .map(|e| Entity {
-                        name: e.name.clone(),
-                        kind: e.kind.clone(),
-                    })
-                    .collect(),
+                entities: entities.clone(),
                 confidence: 1.0,
                 source: MemorySource {
                     client: Some("eval".to_string()),
@@ -211,6 +226,29 @@ fn seed(
                 expires_at: None,
             },
             "eval",
+        )?;
+
+        // Project the memory into the graph exactly as the reconciler does
+        // on a real ingest (`MemoryReconciler::store`), minus the model:
+        // its entities and relations, valid from the moment it was learned.
+        // Without this the graph would know the corpus's entities but have
+        // no edges, and every `relational` hop would dead-end at its seed.
+        let relations: Vec<Relation> = seed
+            .relations
+            .iter()
+            .map(|r| Relation {
+                subject: r.subject.clone(),
+                predicate: r.predicate.clone(),
+                object: r.object.clone(),
+            })
+            .collect();
+
+        graph.record(
+            &context,
+            stored.id(),
+            &entities,
+            &relations,
+            stored.created_at(),
         )?;
     }
 

@@ -231,8 +231,11 @@ Responds `201` with the stored memory.
 
 ### `POST /v1/memories/search`
 
-Hybrid recall: semantic (vector) and keyword (BM25) legs, fused by
-reciprocal rank. Requires `read`.
+Hybrid recall: three legs — semantic (vector), keyword (BM25), and a graph
+hop over the entity/relation graph — fused by reciprocal rank. Requires
+`read`. The graph leg runs when `[graph].enabled` (the default) and the
+query names an entity some memory of yours declared; otherwise it stays
+silent and recall is exactly its two-leg self.
 
 ```bash
 curl -X POST localhost:7070/v1/memories/search \
@@ -261,7 +264,22 @@ curl -X POST localhost:7070/v1/memories/search \
 
 `matched` says which leg found the result, so a surprising ranking can be
 explained rather than merely distrusted. An absent rank means that leg
-didn't return it.
+didn't return it. It carries a third key, `graph_rank`, present only when
+the graph hop reached a result — the case where a memory answers a
+question it shares no words with, reached by walking a relation:
+
+```json
+{
+  "id": "019f7c5a-...",
+  "content": "Nadia is the tech lead of the Meridian team",
+  "score": 0.0161,
+  "matched": {"graph_rank": 1}
+}
+```
+
+Here vector and BM25 both missed (the memory never mentions "billing"),
+and only the hop `billing service → Meridian team → Nadia` connected the
+query to it.
 
 | Field | Notes |
 |---|---|
@@ -270,7 +288,14 @@ didn't return it.
 | `categories` | OR-ed. Empty means all |
 | `tags` | **AND-ed** — a memory must carry every one |
 | `since` | RFC 3339; excludes memories created before it |
+| `as_of` | RFC 3339. Reads the **graph hop** as of that instant in valid time — "who owned this before the reorg?" Omitted means now. Only the graph leg is affected; the vector and keyword legs ignore it |
 | `include_superseded` | Default `false` |
+
+`as_of` is *valid* time — when a relation was true in the world — which is
+a different clock from `since` and `created_at`, both of which are
+*transaction* time, when the memory was learned. `as_of` reads history the
+graph still holds: an edge a later memory contradicted keeps its old
+interval, so a hop dated before the change still traverses it.
 
 Filters are applied after the indexes answer, over a candidate window
 several times `limit`. A very selective filter over a large corpus can

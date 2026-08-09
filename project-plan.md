@@ -6,16 +6,20 @@ A fast, self-hostable long-term memory service for AI agents and coding assistan
 One memory backend, consumed by every agent you use — Claude Code, opencode, Hermes
 Agent, LangChain agents, custom bots — via **REST API** or **MCP**.
 
-> **Status (2026-08-04): the core product is built and released** (`v0.1.0` RC,
-> `v0.1.1`). The full engine — hybrid search, understanding pipeline, consolidation,
-> decay, MCP + REST, Python SDK — ships today. In the roadmap of §15 that means
-> **Phase 0 (POC) and Phase 1 (Understanding depth) are done, Phase 2 (OSS launch) is
-> largely done**, and **Phase 3 (Scale & moat — Strategy B graph, alternate backends)
-> is the open frontier.** The task-level build record lives in
-> [implementation-plan.md](implementation-plan.md) (its Phases 0–6, all shipped); the
-> next concrete performance/capability work is queued there as **Phase 7**. This
-> document stays the *product & architecture reference* — kept separate from
-> `implementation-plan.md` on purpose (see that file's header for the rationale).
+> **Status (2026-08-10): the core product is built and released, and the
+> Strategy B graph has landed** (`v0.1.x` → `v0.2.0`). The full engine — hybrid
+> search, understanding pipeline, consolidation, decay, MCP + REST, Python SDK —
+> ships today, now with a third relational-recall leg: an entity/relation graph
+> that recall hops over, on by default (the eval put relational recall@5 at
+> 85.7%, up from 71.4% without it). In the roadmap of §15 that means **Phase 0
+> (POC) and Phase 1 (Understanding depth) are done, Phase 2 (OSS launch) is
+> largely done**, and **Phase 3 (Scale & moat)** now has its Strategy B graph
+> half **shipped**, leaving alternate backends as the open frontier. The
+> task-level build record lives in
+> [implementation-plan.md](implementation-plan.md) (its Phases 0–6, all shipped,
+> plus Phase 7.3 graph); this document stays the *product & architecture
+> reference* — kept separate from `implementation-plan.md` on purpose (see that
+> file's header for the rationale).
 
 ---
 
@@ -180,11 +184,13 @@ pgvector) are alternative trait implementations for the SaaS/scale phase, and
 Strategy B's graph layer is an additive v2 feature (the schema below already
 reserves entity/relation tables and supersedence links so no migration pain later).
 
-> **Status:** Strategy A is ✅ **shipped** (`v0.1.x`). Strategy B (graph) and
-> Strategy C (external backends) remain unbuilt — Strategy B is queued as
-> [implementation-plan.md Phase 7.3](implementation-plan.md#phase-7), which stresses
-> keeping the **bi-temporal** facts that are the whole point of it and building on the
-> `Entity` value object already carried on every `Memory` (see `src/memories/domain/memory.rs`).
+> **Status:** Strategy A is ✅ **shipped** (`v0.1.x`). Strategy B (graph) is
+> ✅ **shipped** (`v0.2.0`), built on the `Entity` value object already carried
+> on every `Memory` and the **bi-temporal** facts that are its whole point —
+> delivered as [implementation-plan.md Phase 7.3](implementation-plan.md#phase-7).
+> The eval measured relational recall@5 at **85.7%**, up from **71.4%** without
+> the graph, with no other case kind regressing, so it ships on by default.
+> Strategy C (external backends) remains unbuilt.
 
 ---
 
@@ -592,12 +598,15 @@ blog post (LongMemEval subset), README with the isolation test story.
 `docs/performance.md` benchmarks, README isolation story. Remaining: the
 LongMemEval-subset benchmark write-up and any public "launch" push.*
 
-**Phase 3 — Scale & moat — ◻ OPEN (next frontier)**
+**Phase 3 — Scale & moat — ◻ PARTIALLY DONE**
 Postgres/Qdrant backends, temporal graph layer (Strategy B: bi-temporal facts,
 entity graph, graph-hop retrieval), Redis cache, multi-node workers.
-*Not started. The graph layer is scoped as
-[implementation-plan.md Phase 7.3](implementation-plan.md#phase-7); the
-performance groundwork (consolidation budget, sub-labels) as Phase 7.1–7.2.*
+*The temporal graph layer is ✅ **shipped** in `v0.2.0`
+([implementation-plan.md Phase 7.3](implementation-plan.md#phase-7)): bi-temporal
+facts, an entity/relation graph, and graph-hop retrieval as a third recall leg,
+on by default (relational recall@5 85.7% vs 71.4% without it). The performance
+groundwork (consolidation budget, sub-labels) shipped as Phase 7.1–7.2. Still
+open: alternate storage backends, Redis cache, multi-node workers.*
 
 **Phase 4 — SaaS (conditional on traction) — ◻ NOT STARTED**
 Hosted control plane, orgs/teams (shared project memory + private personal

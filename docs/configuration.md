@@ -60,6 +60,17 @@ with its default and an explanatory comment. Highlights:
   decay run regardless of provider — both are arithmetic. Merging
   duplicates needs `[understanding].provider`, because deciding whether
   two memories mean the same thing has no offline fallback.
+- `[graph].enabled` defaults to `true` — recall runs a third "connected to"
+  leg (an entity/relation graph hop) beside the semantic and keyword legs,
+  and ingest writes edges. It earns the default: the eval measured
+  relational recall@5 climbing 71.4% → 85.7% with no other case kind
+  regressing. It only fires when a query names an entity some memory of
+  yours declared, so a query that names nothing known gets the exact
+  two-leg result. `[graph].extract_relations` (also default `true`) is
+  whether ingest asks the model for the edges the hop walks — turn it off,
+  or turn `[graph].enabled` off entirely, to restore the pre-graph
+  behaviour and its lower token cost. A graph the extraction never filled
+  can be backfilled with `recuerdos-ai graph backfill`.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation

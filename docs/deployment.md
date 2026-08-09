@@ -224,6 +224,14 @@ because they trip people up:
   has memories, run `docker exec recuerdos-ai recuerdos-ai reindex` (with
   the daemon stopped) to re-embed them. The daemon refuses to start on a
   model mismatch and tells you this.
+- The entity/relation graph is on by default, so memories ingested from
+  here carry graph edges. To give edges to memories that predate it — a
+  store first filled with `[graph].enabled = false`, or upgraded from
+  `v0.1.x` — backfill once: `docker exec recuerdos-ai recuerdos-ai graph
+  backfill --entities --relations`. `--entities` makes no model calls;
+  `--relations` re-extracts the missing edges, one bounded, resumable pass
+  at a time (add `--dry-run` to see the scope and spend nothing). A store
+  built with the graph on needs none of this.
 
 Confirm what is actually in force at any time — no secrets printed:
 

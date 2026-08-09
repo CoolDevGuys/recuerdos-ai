@@ -163,12 +163,14 @@ default_limit = 8
 recency_half_life_days = 90
 
 [graph]
-# The entity/relation graph (Strategy B). Off by default: the tables and
-# hop traversal exist, but ingest writes no edges and recall does not hop
-# until this is on. Enabling it is additive and never changes what plain
-# semantic/keyword recall returns; it adds a third "connected to" leg on
-# top. Still being rolled out (implementation-plan.md Task 7.3).
-enabled = false
+# The entity/relation graph (Strategy B). On by default as of Task 7.3.6:
+# the eval measured relational recall@5 climbing 71.4% → 85.7% with no
+# other case kind regressing, so the third "connected to" leg ships in the
+# default build. It sits on top of plain semantic/keyword recall — a query
+# that names no known entity gets exactly the two-leg result. Turn it off
+# to restore the pre-graph behaviour: no hop, and no edges written on
+# ingest.
+enabled = true
 # When the graph is on, whether extraction also asks the model for
 # relations between a memory's entities (subject–predicate–object). Turn
 # off to keep the cheaper entity/co-occurrence graph without the extra

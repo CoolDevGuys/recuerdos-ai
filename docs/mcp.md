@@ -160,7 +160,8 @@ verbatim and this section reduces to the single-memory case.
 
 ### `memory_recall`
 
-Hybrid search — semantic and keyword — over this user's memories.
+Hybrid search — semantic, keyword, and a graph hop over the entity/relation
+graph — over this user's memories.
 
 ```json
 {"query": "how should I structure my typescript imports?", "limit": 3}
@@ -175,6 +176,15 @@ agent's context window, and JSON would spend a chunk of it on
 punctuation. The category comes first because it is the strongest signal
 for how much weight a line deserves — a `preference.coding` is an
 instruction, a `fact.project` is background.
+
+The graph leg is what lets a question reach a memory it shares no words
+with: "who owns the billing service's data?" surfaces the memory naming
+`ledger-db` by walking `billing service → ledger-db`, even though that
+memory never says "billing". It runs when the graph is on (the default)
+and the query names a known entity; otherwise recall is exactly its
+semantic + keyword self. An optional `as_of` argument (RFC 3339) reads
+those connections as of a past instant — "who was on-call before the
+reorg?" — and affects only the graph-connected results.
 
 An empty result says so explicitly rather than returning nothing: a blank
 string reads to a model as a failure rather than as an answer.
