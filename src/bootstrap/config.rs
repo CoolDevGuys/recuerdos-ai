@@ -265,6 +265,12 @@ pub struct GraphConfig {
     /// The most graph-found memories a hop contributes to a recall, before
     /// fusion trims them against the vector and keyword legs.
     pub hop_limit: usize,
+    /// Bounds one `graph backfill --relations` pass (Task 7.3.5), reusing
+    /// the same budget shape as consolidation: an existing corpus gains
+    /// relations a bounded number of model calls at a time, resuming where
+    /// it stopped, so backfilling never turns into a surprise provider bill.
+    /// `--entities` ignores it — that pass makes no model calls.
+    pub backfill_budget: ConsolidationBudgetConfig,
 }
 
 impl GraphConfig {
@@ -284,6 +290,7 @@ impl Default for GraphConfig {
             extract_relations: true,
             max_hops: 2,
             hop_limit: 50,
+            backfill_budget: ConsolidationBudgetConfig::default(),
         }
     }
 }

@@ -18,6 +18,8 @@
 
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
+use crate::memories::domain::entity_graph::EntityGraph;
+use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
@@ -26,7 +28,13 @@ use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
 use crate::shared::error::Result;
+use crate::shared::ids::MemoryId;
 use std::sync::Arc;
+
+/// The longest entity name, in words, the query scanner will try to match.
+/// Entity names are short ("billing service", "Meridian team"); a longer
+/// window only manufactures n-grams that match nothing.
+const MAX_SEED_WORDS: usize = 3;
 
 pub struct MemoryRecaller {
     memories: Arc<dyn MemoryRepository>,
@@ -35,9 +43,19 @@ pub struct MemoryRecaller {
     embedder: Arc<dyn Embedder>,
     ranker: RecallRanker,
     clock: Arc<dyn Clock>,
+    /// The entity/relation graph, present only when `[graph].enabled`
+    /// (Task 7.3.4). `None` is the default and the pre-graph behaviour:
+    /// no third leg runs, and recall is byte-identical to a two-leg build.
+    graph: Option<Arc<dyn EntityGraph>>,
+    /// How many edges one hop may traverse (`[graph].max_hops`) and how
+    /// many memories the leg may return (`[graph].hop_limit`). Unused while
+    /// `graph` is `None`.
+    max_hops: usize,
+    hop_limit: usize,
 }
 
 impl MemoryRecaller {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         memories: Arc<dyn MemoryRepository>,
         vectors: Arc<dyn VectorIndex>,
@@ -45,6 +63,9 @@ impl MemoryRecaller {
         embedder: Arc<dyn Embedder>,
         ranker: RecallRanker,
         clock: Arc<dyn Clock>,
+        graph: Option<Arc<dyn EntityGraph>>,
+        max_hops: usize,
+        hop_limit: usize,
     ) -> Self {
         Self {
             memories,
@@ -53,6 +74,9 @@ impl MemoryRecaller {
             embedder,
             ranker,
             clock,
+            graph,
+            max_hops,
+            hop_limit,
         }
     }
 
@@ -76,8 +100,14 @@ impl MemoryRecaller {
             }
         };
 
+        // The third leg: memories connected to the query's entities over
+        // the graph. Absent (no graph) or silent (query names nothing
+        // known) it contributes nothing, and degrades exactly like the
+        // keyword leg — two thirds of a hybrid search still answers.
+        let graph_hits = self.graph_leg(context, query);
+
         let mut candidate_ids: Vec<_> = vector_hits.0.clone();
-        for id in &keyword_hits.0 {
+        for id in keyword_hits.0.iter().chain(graph_hits.0.iter()) {
             if !candidate_ids.contains(id) {
                 candidate_ids.push(*id);
             }
@@ -93,9 +123,17 @@ impl MemoryRecaller {
             .filter(|memory| matches(memory, query, now))
             .collect();
 
-        let mut ranked = self
-            .ranker
-            .rank(&vector_hits, &keyword_hits, candidates, now);
+        // A build with no graph goes through the original two-leg entry
+        // point verbatim — not `rank_with_graph` over an empty leg — so the
+        // "no graph, no change" guarantee is the same code path, not merely
+        // the same arithmetic.
+        let mut ranked = if self.graph.is_some() {
+            self.ranker
+                .rank_with_graph(&vector_hits, &keyword_hits, &graph_hits, candidates, now)
+        } else {
+            self.ranker
+                .rank(&vector_hits, &keyword_hits, candidates, now)
+        };
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
@@ -107,6 +145,65 @@ impl MemoryRecaller {
 
         Ok(ranked)
     }
+
+    /// Runs the graph hop, or nothing when there is no graph. Best-effort:
+    /// a hop failure warns and yields an empty leg, so the request still
+    /// returns the vector and keyword results.
+    fn graph_leg(&self, context: &UserContext, query: &RecallQuery) -> RankedIds {
+        let Some(graph) = &self.graph else {
+            return RankedIds::default();
+        };
+        match self.hop(graph.as_ref(), context, query) {
+            Ok(ids) => RankedIds(ids),
+            Err(error) => {
+                tracing::warn!(%error, "graph hop failed; falling back to the other legs");
+                RankedIds::default()
+            }
+        }
+    }
+
+    fn hop(
+        &self,
+        graph: &dyn EntityGraph,
+        context: &UserContext,
+        query: &RecallQuery,
+    ) -> Result<Vec<MemoryId>> {
+        // Scan the query for entities the graph knows — no model call —
+        // then hop from them. No seeds means the query named nothing
+        // known, so the leg stays silent and recall is its two-leg self.
+        let seeds = graph.seeds(context, &seed_candidates(query.text()))?;
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+        graph.neighbours(
+            context,
+            &seeds,
+            self.max_hops,
+            query.as_of(),
+            self.hop_limit,
+        )
+    }
+}
+
+/// Every 1- to [`MAX_SEED_WORDS`]-word window of the query, canonicalised
+/// to an [`EntityKey`] the same way the writer filed its entities — so
+/// "the billing service team" offers `billing service` and `billing
+/// service team` as candidate seeds. Deduplicated, empties dropped; the
+/// graph then keeps only the ones some memory actually declared.
+fn seed_candidates(text: &str) -> Vec<EntityKey> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut candidates = Vec::new();
+    for start in 0..words.len() {
+        let end = (start + MAX_SEED_WORDS).min(words.len());
+        for finish in (start + 1)..=end {
+            let key = EntityKey::new(&words[start..finish].join(" "));
+            if !key.is_empty() && seen.insert(key.as_str().to_string()) {
+                candidates.push(key);
+            }
+        }
+    }
+    candidates
 }
 
 fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -146,6 +243,8 @@ mod tests {
     use super::*;
     use crate::memories::application::test_doubles::{Fixture, new_memory, now};
     use crate::memories::domain::category::Category;
+    use crate::memories::domain::entity_graph::{EntityGraph, Relation};
+    use crate::memories::domain::memory::Entity;
 
     fn query(text: &str) -> RecallQuery {
         RecallQuery::new(text, 10).unwrap()
@@ -153,6 +252,34 @@ mod tests {
 
     fn contents(results: &[ScoredMemory]) -> Vec<&str> {
         results.iter().map(|s| s.memory.content()).collect()
+    }
+
+    fn ids(results: &[ScoredMemory]) -> Vec<MemoryId> {
+        results.iter().map(|s| s.memory.id()).collect()
+    }
+
+    fn entity(name: &str, kind: &str) -> Entity {
+        Entity {
+            name: name.to_string(),
+            kind: kind.to_string(),
+        }
+    }
+
+    fn rel(subject: &str, predicate: &str, object: &str) -> Relation {
+        Relation {
+            subject: subject.to_string(),
+            predicate: predicate.to_string(),
+            object: object.to_string(),
+        }
+    }
+
+    /// Inserts a memory straight into the repository — no vector or keyword
+    /// entry — so its only possible route into recall is the graph. Returns
+    /// it so the caller can record its edges and assert on its id.
+    fn graph_only_memory(fixture: &Fixture, context: &UserContext, content: &str) -> Memory {
+        let memory = Memory::create(context.user_id(), new_memory(content), now()).unwrap();
+        fixture.memories.insert(context, &memory, "test").unwrap();
+        memory
     }
 
     #[test]
@@ -443,5 +570,178 @@ mod tests {
             "a result should say which leg found it"
         );
         assert!(results[0].score > 0.0);
+    }
+
+    #[test]
+    fn a_two_hop_memory_neither_text_leg_ranks_enters_recall_over_the_graph() {
+        // The leg's reason to exist (Task 7.3.4): billing service
+        // —maintained_by→ Meridian team ←leads— Nadia. A query about the
+        // billing service reaches Nadia only over two relations. Both
+        // memories are inserted without a vector or keyword entry, so the
+        // graph is their sole route in — proving graph evidence, and
+        // nothing else, put them in the results.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+
+        let owns = graph_only_memory(
+            &fixture,
+            &fixture.alex,
+            "the billing service is maintained by the Meridian team",
+        );
+        let leads = graph_only_memory(&fixture, &fixture.alex, "Nadia leads the Meridian team");
+
+        graph
+            .record(
+                &fixture.alex,
+                owns.id(),
+                &[
+                    entity("billing service", "service"),
+                    entity("Meridian team", "team"),
+                ],
+                &[rel("billing service", "maintained_by", "Meridian team")],
+                now(),
+            )
+            .unwrap();
+        graph
+            .record(
+                &fixture.alex,
+                leads.id(),
+                &[entity("Nadia", "person"), entity("Meridian team", "team")],
+                &[rel("Nadia", "leads", "Meridian team")],
+                now(),
+            )
+            .unwrap();
+
+        let results = fixture
+            .recaller_with_graph(graph as Arc<dyn EntityGraph>)
+            .execute(
+                &fixture.alex,
+                &RecallQuery::new("who runs the billing service", 5).unwrap(),
+            )
+            .unwrap();
+
+        let leads_hit = results
+            .iter()
+            .find(|s| s.memory.id() == leads.id())
+            .expect("the two-hop memory should reach recall over the graph");
+        assert!(
+            leads_hit.match_detail.graph_rank.is_some(),
+            "it entered only as a graph hit"
+        );
+        assert_eq!(
+            leads_hit.match_detail.vector_rank, None,
+            "no vector entry was indexed for it"
+        );
+        assert_eq!(
+            leads_hit.match_detail.bm25_rank, None,
+            "no keyword entry was indexed for it"
+        );
+    }
+
+    #[test]
+    fn the_graph_leg_never_crosses_users() {
+        // Seeding and hopping are both user-scoped: alex querying an entity
+        // name sam also used must not reach sam's memory. Both users store
+        // an entity called "shared service"; the isolation is the WHERE
+        // clause, not the names being distinct.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+
+        let alex_memory = graph_only_memory(
+            &fixture,
+            &fixture.alex,
+            "alex's note about the shared service",
+        );
+        let sam_memory = graph_only_memory(
+            &fixture,
+            &fixture.sam,
+            "sam's note about the shared service",
+        );
+        graph
+            .record(
+                &fixture.alex,
+                alex_memory.id(),
+                &[
+                    entity("shared service", "service"),
+                    entity("alex thing", "thing"),
+                ],
+                &[rel("shared service", "relates_to", "alex thing")],
+                now(),
+            )
+            .unwrap();
+        graph
+            .record(
+                &fixture.sam,
+                sam_memory.id(),
+                &[
+                    entity("shared service", "service"),
+                    entity("sam thing", "thing"),
+                ],
+                &[rel("shared service", "relates_to", "sam thing")],
+                now(),
+            )
+            .unwrap();
+
+        let results = fixture
+            .recaller_with_graph(graph as Arc<dyn EntityGraph>)
+            .execute(
+                &fixture.alex,
+                &RecallQuery::new("the shared service", 5).unwrap(),
+            )
+            .unwrap();
+
+        let found = ids(&results);
+        assert!(
+            found.contains(&alex_memory.id()),
+            "alex's own edge is reachable"
+        );
+        assert!(
+            !found.contains(&sam_memory.id()),
+            "the hop crossed into another user's rows"
+        );
+    }
+
+    #[test]
+    fn a_query_naming_no_known_entity_leaves_recall_its_two_leg_self() {
+        // The "no seeds → today's behaviour, exactly" guarantee: with a
+        // graph present but a query that mentions no stored entity, the leg
+        // is silent and the ranking matches the two-leg recaller's, every
+        // graph_rank absent.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+
+        let memory = fixture.save(&fixture.alex, "User prefers pnpm as their package manager");
+        // The only stored entity is "pnpm", a word the query below never uses.
+        graph
+            .record(
+                &fixture.alex,
+                memory.id(),
+                &[entity("pnpm", "tool")],
+                &[],
+                now(),
+            )
+            .unwrap();
+
+        let question = query("which package manager keeps dependencies tidy");
+        let with_graph = fixture
+            .recaller_with_graph(graph as Arc<dyn EntityGraph>)
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        let without_graph = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        assert_eq!(
+            ids(&with_graph),
+            ids(&without_graph),
+            "an unseeded graph leg changed the ranking"
+        );
+        assert!(
+            with_graph
+                .iter()
+                .all(|s| s.match_detail.graph_rank.is_none()),
+            "nothing should carry a graph rank when the query names no entity"
+        );
     }
 }

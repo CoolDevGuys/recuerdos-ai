@@ -181,6 +181,16 @@ max_hops = 2
 # against the vector and keyword legs.
 hop_limit = 50
 
+[graph.backfill_budget]
+# Bounds one `recuerdos-ai graph backfill --relations` pass, so giving an
+# existing corpus relations never becomes a surprise provider bill. Same
+# shape and defaults as [consolidation.budget]; a run that hits a limit
+# stops and resumes where it left off next time. `--entities` makes no
+# model calls and ignores this entirely.
+max_llm_calls = 100
+max_duration_secs = 300
+max_memories = 5000
+
 [auth]
 # api-key | none. "none" is an explicit single-user opt-out: every request
 # is treated as the built-in `default` user. Logged loudly at startup.

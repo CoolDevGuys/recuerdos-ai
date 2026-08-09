@@ -50,9 +50,8 @@ pub struct Memories {
     /// The entity/relation graph, present only when `[graph].enabled`
     /// (implementation-plan.md Task 7.3). `None` is the default and the
     /// pre-graph behaviour: nothing writes edges, recall does not hop, and
-    /// results are identical to a build without this field. Wired but not
-    /// yet consumed — the write path joins in Task 7.3.2, recall in 7.3.4.
-    #[allow(dead_code)]
+    /// results are identical to a build without this field. The write path
+    /// consumes it in Task 7.3.2 (ingest) and recall's third leg in 7.3.4.
     pub graph: Option<Arc<dyn EntityGraph>>,
     /// Config echoes the handlers need when parsing requests.
     pub extra_categories: Vec<String>,
@@ -134,6 +133,9 @@ impl Memories {
                 Arc::clone(&embedder),
                 RecallRanker::new(config.retrieval.recency_half_life_days),
                 Arc::clone(&clock),
+                graph.clone(),
+                config.graph.max_hops,
+                config.graph.hop_limit,
             )),
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
             updater: Arc::new(MemoryUpdater::new(

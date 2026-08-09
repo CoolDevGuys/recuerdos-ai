@@ -1,6 +1,7 @@
 //! Use cases: `MemoryMerger`, `ProfileDigestWriter`, `ProfileAssembler`.
 
 pub mod consolidation_runner;
+pub mod graph_backfiller;
 pub mod memory_maintainer;
 pub mod memory_merger;
 pub mod profile_digest_writer;

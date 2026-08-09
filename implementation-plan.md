@@ -1417,7 +1417,7 @@ would otherwise be re-litigated mid-build.
   - `just check` is green (668 tests; clippy `-D warnings` clean — `invalidate` is now live,
     so only `remove`/`neighbours`/`expand` remain behind the graph modules' `allow`).
 
-#### Task 7.3.4 — The graph-hop leg in recall (L)
+#### Task 7.3.4 — The graph-hop leg in recall (L) ✅ DONE
 
 - **Goal:** graph evidence can lift the right memory into the top 5 — the only version of
   this that moves 7.3.0's number.
@@ -1437,18 +1437,55 @@ would otherwise be re-litigated mid-build.
   5. `RecallQuery.as_of`, surfaced on `POST /v1/memories/search` and MCP `memory_recall`;
      `match.graph_rank` in the response DTO.
 - **DoD:**
-  - [ ] **Empty-leg identity test (load-bearing):** with no seeds, `rank` returns
-        identical ordering *and* identical scores to the two-leg call. This is what makes
-        "non-relational recall cannot regress" provable.
-  - [ ] The existing `recall_ranker` table-driven tests pass **unmodified**.
-  - [ ] Hop test: a memory that neither vector nor BM25 ranks at all, reachable only over
-        two relations, enters the top 5.
-  - [ ] Cross-tenant: the graph leg never seeds from, nor hops into, another user's rows.
-  - [ ] Perf: P95 recall stays < 50 ms at 100k memories/user with the leg **on**
-        (`scripts/bench-recall.sh`), numbers in the PR — the Phase 2 target holds or the
-        leg does not ship on by default.
+  - [x] **Empty-leg identity test (load-bearing):**
+        `an_empty_graph_leg_leaves_the_two_leg_ranking_identical` — `rank_with_graph` over
+        an empty graph leg returns the same order *and* the same scores as the two-leg
+        `rank`, which is structural: `rank` delegates to `rank_with_graph` with an empty
+        leg, and the recaller routes a no-graph build through `rank` verbatim.
+  - [x] The existing `recall_ranker` table-driven tests pass **unmodified** — the two-leg
+        `rank(vector, keyword, …)` signature is preserved, so none of them changed.
+  - [x] Hop test: `a_two_hop_memory_neither_text_leg_ranks_enters_recall_over_the_graph` —
+        two memories inserted with no vector or keyword entry, reachable only as `billing
+        service —maintained_by→ Meridian team ←leads— Nadia`, and the two-hop one lands in
+        recall as a graph-only hit (`graph_rank` set, `vector_rank`/`bm25_rank` `None`).
+  - [x] Cross-tenant: `the_graph_leg_never_crosses_users` (recall) plus the store-level
+        `a_hop_never_crosses_users_even_with_the_same_entity_name` — seeding and hopping
+        both carry `user_id = ?`, so alex querying a name sam also used never reaches sam.
+  - [~] Perf: **not measured here** — `scripts/bench-recall.sh` needs a 100k-memory corpus
+        and a representative host, which the dev container is not. The design keeps the hot
+        path cheap (one indexed seed lookup, then a single depth-bounded CTE, both off the
+        graph indexes; the leg is skipped entirely when the query names no known entity),
+        but the < 50 ms P95 gate is the operator's to confirm before flipping
+        `[graph].enabled` on by default in 7.3.6.
 
-#### Task 7.3.5 — Backfill, budgeted (M)
+- **As built (2026-08-09):**
+  - **Seeding is `EntityGraph::seeds` + a pure `seed_candidates`.** The recaller turns the
+    query into every 1-to-3-word window, canonicalises each with the writer's `EntityKey`
+    (no model call), and `seeds` narrows that to the keys some memory of *this user*
+    actually declared (one lookup on `idx_memory_entities_user_key`). No seeds ⇒ the leg
+    returns empty ⇒ recall is its two-leg self.
+  - **`neighbours` is now one recursive CTE** (the deliberate deviation the plan asked for):
+    `reachable` grows an undirected, depth-bounded frontier, `key_depth` keeps each key's
+    nearest depth, and `hits` ranks the touched memories by hop distance, then by how many
+    reached edges touch them, then by id for a stable order. Replaces the app-side per-hop
+    BFS and its `expand` helper. The existing store-level neighbour tests (2-hop reach,
+    stable order, cross-user) pass unchanged, pinning behavioural parity.
+  - **`RecallRanker` gained `rank_with_graph`** beside `rank`; `MatchDetail` gained
+    `graph_rank`. The graph leg is a third `1/(k+rank)` term — `RRF_K`/`MULTIPLIER_FLOOR`
+    untouched. A memory only the hop found is kept and scored (its other ranks `None`).
+  - **`MemoryRecaller`** took `Option<Arc<dyn EntityGraph>>` + `max_hops`/`hop_limit` from
+    `[graph]`, runs the third leg best-effort (warn-and-continue, like the keyword leg),
+    unions its ids into `candidate_ids`, and reads the hop at `query.as_of()`.
+  - **`as_of` surfaced** on `RecallQuery`, `POST /v1/memories/search` (`as_of`), and MCP
+    `memory_recall` (an RFC-3339 string parsed at the boundary); `match.graph_rank` added to
+    the search DTO. Predicate normalisation stays centralised in `normalise_predicate`.
+  - **Docs deferred to 7.3.6** as the plan sequences them (`as_of`, `graph_rank` in
+    `docs/api.md`/`docs/mcp.md`, the third leg in `docs/architecture.md`).
+  - `just check` is green (fmt, clippy `-D warnings`, boundary script, full suite — 671
+    bin tests plus the integration suites: the graph modules' `allow(dead_code)` now covers
+    only `remove`, still awaiting the forgetter wiring in 7.3.5).
+
+#### Task 7.3.5 — Backfill, budgeted (M) ✅ DONE
 
 - **Goal:** an existing corpus gains a graph without a surprise provider bill.
 - **Steps:**
@@ -1463,11 +1500,48 @@ would otherwise be re-litigated mid-build.
   3. `--dry-run` reports memories, edges and model calls it *would* make, before anything
      is spent.
 - **DoD:**
-  - [ ] Entity backfill over a seeded corpus makes zero provider calls — asserted with a
-        chat model that panics if invoked.
-  - [ ] Relation backfill stops cleanly at its budget and resumes where it stopped on the
-        next invocation.
-  - [ ] Dry-run mutates nothing (same assertion style as Phase 5's).
+  - [x] Entity backfill over a seeded corpus makes zero provider calls —
+        `entity_backfill_writes_edges_and_never_calls_the_model` wires the backfiller with a
+        `PanickingChatModel` and asserts the entities land without it ever being reached.
+  - [x] Relation backfill stops cleanly at its budget and resumes where it stopped —
+        `relation_backfill_stops_at_its_budget_and_resumes_where_it_stopped`: `max_llm_calls
+        = 1`, so the first run does one memory and reports `budget_exhausted`, and a second
+        run picks up the next rather than re-doing the first (the watermark advanced past it).
+  - [x] Dry-run mutates nothing — `an_entity_dry_run_counts_but_writes_nothing` and
+        `a_relation_dry_run_makes_no_calls_and_writes_nothing`: the report carries the
+        would-make counts, no rows are written, the watermark does not move, and the
+        relation dry run runs against a `PanickingChatModel` to prove it spends nothing.
+
+- **As built (2026-08-09):**
+  - **`recuerdos-ai graph backfill --entities|--relations [--dry-run]`** — a new CLI group
+    (`GraphCommand::Backfill`). It builds a `SqliteEntityGraph` and the watermark store
+    **directly on the database, ignoring `[graph].enabled`**: the point of backfill is to
+    populate the graph *before* turning it on, so it must not require the flag it precedes.
+  - **`GraphBackfiller` lives in `consolidation::application`** — the same kind of offline,
+    budgeted, resumable sweep over every user, reusing `BackgroundUserResolver` and
+    `ConsolidationBudget` (now `pub(crate)`, its `memories_retired` axis reread as "memories
+    finished") verbatim. Boundary-clean: it imports `understanding::application`'s extractor
+    and `memories::domain`'s contracts, never another context's infrastructure.
+  - **`--entities` is zero-LLM and orthogonal.** A new `EntityGraph::record_entities`
+    projects a memory's stored `entities` JSON into `memory_entities` and touches no edge;
+    its mirror `record_relations` replaces only the still-open edges and touches no entity.
+    `record` is now those two helpers in one transaction, so the three writers can never
+    file rows differently (`record_entities_and_record_relations_are_orthogonal`).
+  - **`--relations` re-anchors to stored entities.** It re-extracts a memory's content with
+    a relations-on extractor, then keeps only edges whose *both* endpoints are entities the
+    memory already declared (same `EntityKey` the graph files them under) — so the relation
+    pass can never rewrite the entity set `--entities` projected or wire in a name the fresh
+    extraction merely mentioned. Capped at `MAX_RELATIONS`, like ingest.
+  - **Resumption** is a per-user `created_at` watermark (new `GraphBackfillState`, migration
+    **V9**, `[graph].backfill_budget` config). It records how far the backfill has *looked*,
+    not how far it *wrote*, so a memory that yields no relations is attempted once, not on
+    every run. A memory ingest already gave edges is skipped by `has_relations` (a new,
+    cheap indexed check) and its cursor stepped without a model call. Advanced only after a
+    memory is handled, so a budget stop leaves the cursor at the last one finished.
+  - **Docs deferred to 7.3.6** (the `graph backfill` command in `docs/`), as the plan
+    sequences documentation there.
+  - `just check` is green (fmt, clippy `-D warnings`, boundary script, full suite — 679 bin
+    tests plus the integration suites).
 
 #### Task 7.3.6 — Measure, document, decide (M)
 
@@ -1492,8 +1566,8 @@ would otherwise be re-litigated mid-build.
 | 7.3.1 Schema + `EntityGraph` contract | M | Low–Med | 7.3.2–5 | ✅ Done — V8 tables, `EntityKey`, `EntityGraph`, `SqliteEntityGraph`; inert behind `[graph].enabled=false` |
 | 7.3.2 Relations in the existing call | M | Med | 7.3.3, 7.3.4 | ✅ Done — relations extracted+anchored, recorded in `MemoryReconciler::store`; opt-in, default config unchanged |
 | 7.3.3 Bi-temporality | M | Med | 7.3.4 | ✅ Done — invalidation wired into `store`; re-record preserves closed edges; time-travel + idempotency covered |
-| 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | Graph evidence reaches the top 5 |
-| 7.3.5 Budgeted backfill | M | Low | — | Existing corpora get a graph, cheaply |
+| 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | ✅ Done — seeding + recursive-CTE hop as a third RRF leg; `as_of`/`graph_rank` surfaced; perf gate left for 7.3.6 |
+| 7.3.5 Budgeted backfill | M | Low | — | ✅ Done — `graph backfill --entities` (zero-LLM) and `--relations` (budgeted, resumable via a V9 watermark); `--dry-run` spends nothing |
 | 7.3.6 Measure + docs | M | Low | — | The margin, in writing |
 
 **The four risks worth naming up front:**

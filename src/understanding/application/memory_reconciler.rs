@@ -447,6 +447,32 @@ mod tests {
             Ok(())
         }
 
+        fn record_entities(&self, _: &UserContext, _: MemoryId, _: &[Entity]) -> Result<()> {
+            Ok(())
+        }
+
+        fn record_relations(
+            &self,
+            _: &UserContext,
+            _: MemoryId,
+            _: &[Relation],
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn has_relations(&self, _: &UserContext, _: MemoryId) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn seeds(
+            &self,
+            _: &UserContext,
+            _: &[crate::memories::domain::entity_key::EntityKey],
+        ) -> Result<Vec<crate::memories::domain::entity_key::EntityKey>> {
+            Ok(Vec::new())
+        }
+
         fn neighbours(
             &self,
             _: &UserContext,

@@ -72,6 +72,11 @@ pub struct Fixture {
     /// that walks every user rather than being handed one, so it needs
     /// the same table those contexts came from.
     pub users: Arc<dyn UserRepository>,
+    /// The same in-memory database the identity table lives in, carrying
+    /// the V8 graph tables. The memories repository is a double, but the
+    /// entity graph is exercised for real over this handle so the graph
+    /// leg's SQL (the recall CTE) is tested, not stubbed.
+    pub database: Arc<crate::shared::sqlite::SqliteDatabase>,
 }
 
 impl Fixture {
@@ -88,6 +93,7 @@ impl Fixture {
             alex: authenticate(&identity, "alex"),
             sam: authenticate(&identity, "sam"),
             users: Arc::clone(&identity.users),
+            database,
         }
     }
 
@@ -109,6 +115,38 @@ impl Fixture {
             Arc::clone(&self.embedder) as Arc<dyn Embedder>,
             RecallRanker::new(90),
             fixed_clock(),
+            None,
+            2,
+            50,
+        )
+    }
+
+    /// A real SQLite-backed entity graph over the fixture's database.
+    pub fn graph(
+        &self,
+    ) -> Arc<crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph> {
+        Arc::new(
+            crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph::new(
+                Arc::clone(&self.database),
+            ),
+        )
+    }
+
+    /// A recaller whose third leg hops over `graph`.
+    pub fn recaller_with_graph(
+        &self,
+        graph: Arc<dyn crate::memories::domain::entity_graph::EntityGraph>,
+    ) -> MemoryRecaller {
+        MemoryRecaller::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&self.text) as Arc<dyn TextIndex>,
+            Arc::clone(&self.embedder) as Arc<dyn Embedder>,
+            RecallRanker::new(90),
+            fixed_clock(),
+            Some(graph),
+            2,
+            50,
         )
     }
 

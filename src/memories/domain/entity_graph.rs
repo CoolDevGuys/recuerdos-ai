@@ -101,9 +101,49 @@ pub trait EntityGraph: Send + Sync {
     /// removed.
     fn remove(&self, context: &UserContext, memory_id: MemoryId) -> Result<()>;
 
+    /// Projects only a memory's entities, replacing the ones it had and
+    /// leaving its relations untouched (Task 7.3.5). This is what the
+    /// entity backfill uses: it rebuilds `memory_entities` from the
+    /// `entities` JSON already on every memory, at zero model cost, without
+    /// disturbing any edges a later relation backfill or ingest wrote.
+    fn record_entities(
+        &self,
+        context: &UserContext,
+        memory_id: MemoryId,
+        entities: &[Entity],
+    ) -> Result<()>;
+
+    /// Projects only a memory's relations, replacing its still-open edges
+    /// and leaving its entities untouched (Task 7.3.5) — the mirror of
+    /// [`record_entities`](Self::record_entities), used by the relation
+    /// backfill. Closed edges are history and are preserved exactly as
+    /// [`record`](Self::record) preserves them.
+    fn record_relations(
+        &self,
+        context: &UserContext,
+        memory_id: MemoryId,
+        relations: &[Relation],
+        valid_from: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Whether this memory already has any relation edge (open or closed).
+    /// The relation backfill uses it to skip a memory ingest already gave
+    /// edges, so it never re-pays a model call for one that has them.
+    fn has_relations(&self, context: &UserContext, memory_id: MemoryId) -> Result<bool>;
+
+    /// Of `candidates`, the entity keys this user's graph actually knows —
+    /// the seeds a hop may start from (Task 7.3.4).
+    ///
+    /// Recall scans the query text for entity mentions and canonicalises
+    /// each to an [`EntityKey`] (no model call); this narrows that list to
+    /// the keys some memory of this user actually declared. A query naming
+    /// nothing known yields no seeds, so the graph leg stays silent and
+    /// recall is exactly its two-leg self. Deduplicated; order unspecified.
+    fn seeds(&self, context: &UserContext, candidates: &[EntityKey]) -> Result<Vec<EntityKey>>;
+
     /// The memories reachable from `seeds` within `hops` edges, live at
-    /// `as_of` (or now, if `None`), best-first by hop distance and capped
-    /// at `limit`.
+    /// `as_of` (or now, if `None`), best-first by hop distance then by how
+    /// many of the query's entities reach them, and capped at `limit`.
     ///
     /// Traversal is undirected over each edge: arriving at an entity by
     /// either endpoint lets the walk continue from the other, because

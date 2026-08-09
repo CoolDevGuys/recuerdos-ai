@@ -65,6 +65,10 @@ pub struct RecallRequest {
     pub query: String,
     pub categories: Vec<String>,
     pub limit: Option<usize>,
+    /// Read the graph hop as of this instant in valid time (Task 7.3.4).
+    /// `None` is "now"; a value asks what was true then. Only the graph
+    /// leg is affected.
+    pub as_of: Option<DateTime<Utc>>,
 }
 
 /// A finished session, handed over to be reduced to what outlives it.

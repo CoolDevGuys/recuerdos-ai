@@ -8,7 +8,7 @@
 //! [`Memory`]: crate::memories::domain::memory::Memory
 
 use crate::memories::domain::category::Category;
-use crate::memories::domain::entity_graph::{normalise_predicate, Relation};
+use crate::memories::domain::entity_graph::{Relation, normalise_predicate};
 use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::{Entity, MAX_CONTENT_LEN};
 use serde::Deserialize;

@@ -8,6 +8,7 @@ use super::http_memory_toolbox::HttpMemoryToolbox;
 use super::memory_toolbox::{DistillRequest, MemoryToolbox, RecallRequest, SaveRequest};
 use super::tool_text;
 use crate::shared::error::RaError;
+use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ContentBlock, ErrorData, Implementation, ListResourcesResult, ProtocolVersion,
@@ -41,6 +42,11 @@ pub struct RecallParams {
     pub categories: Vec<String>,
     /// How many to return. Defaults to the server's configured limit.
     pub limit: Option<usize>,
+    /// Optional point in time (RFC 3339, e.g. "2026-06-01T00:00:00Z") to
+    /// read connected memories as of — "what was true before the
+    /// migration?". Omit for the current view. Only affects graph-connected
+    /// results.
+    pub as_of: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -196,12 +202,20 @@ impl MemoryMcpServer {
         Parameters(params): Parameters<RecallParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
+        let as_of = params
+            .as_of
+            .as_deref()
+            .map(parse_as_of)
+            .transpose()
+            .map_err(to_mcp_error)?;
+
         let memories = self
             .toolbox(&context)
             .recall(RecallRequest {
                 query: params.query,
                 categories: params.categories,
                 limit: params.limit,
+                as_of,
             })
             .await
             .map_err(to_mcp_error)?;
@@ -383,6 +397,15 @@ fn strip_bearer(header: &str) -> String {
 /// Internal detail is dropped for the same reason the REST layer drops it:
 /// it names paths and SQL, and here it would land in a model's context
 /// window rather than a log.
+/// Parses the `as_of` tool argument. A model passes it as an RFC 3339
+/// string; a malformed one is the caller's mistake, so it surfaces as an
+/// invalid-params error rather than being silently ignored.
+fn parse_as_of(raw: &str) -> std::result::Result<DateTime<Utc>, RaError> {
+    DateTime::parse_from_rfc3339(raw.trim())
+        .map(|at| at.with_timezone(&Utc))
+        .map_err(|e| RaError::Validation(format!("as_of is not an RFC 3339 timestamp: {e}")))
+}
+
 fn to_mcp_error(error: RaError) -> ErrorData {
     match error {
         RaError::Validation(message) => ErrorData::invalid_params(message, None),

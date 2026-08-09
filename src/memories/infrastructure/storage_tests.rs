@@ -1409,6 +1409,69 @@ fn a_two_hop_neighbour_is_out_of_reach_at_one_hop() {
 }
 
 #[test]
+fn record_entities_and_record_relations_are_orthogonal() {
+    // The backfill (Task 7.3.5) writes entities and relations in separate
+    // passes, so each granular writer must leave the other's rows alone.
+    let fixture = fixture();
+    let memory_id = MemoryId::new();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            memory_id,
+            &[entity("backend", "component"), entity("Hetzner", "service")],
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now(),
+        )
+        .unwrap();
+
+    // Re-projecting entities alone leaves the edge intact.
+    fixture
+        .graph
+        .record_entities(
+            &fixture.alex,
+            memory_id,
+            &[entity("backend", "component"), entity("Rust", "language")],
+        )
+        .unwrap();
+    assert!(
+        fixture
+            .graph
+            .has_relations(&fixture.alex, memory_id)
+            .unwrap(),
+        "record_entities dropped a relation"
+    );
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        2
+    );
+
+    // Re-projecting relations alone leaves the entities intact.
+    fixture
+        .graph
+        .record_relations(
+            &fixture.alex,
+            memory_id,
+            &[rel("backend", "written_in", "Rust")],
+            now(),
+        )
+        .unwrap();
+    assert_eq!(
+        count(&fixture, "memory_entities", &fixture.alex, memory_id),
+        2,
+        "record_relations disturbed the entities"
+    );
+    assert!(
+        fixture
+            .graph
+            .neighbours(&fixture.alex, &[seed("Rust")], 1, None, 10)
+            .unwrap()
+            .contains(&memory_id),
+        "the freshly recorded edge is not live"
+    );
+}
+
+#[test]
 fn neighbours_come_back_in_a_stable_order() {
     // Task 7.3.4 turns this list into recall ranks, so two identical calls
     // must return the same ids in the same order — otherwise recall (and
