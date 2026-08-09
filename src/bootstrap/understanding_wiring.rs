@@ -59,9 +59,13 @@ pub fn build_chat_model(config: &AppConfig) -> Result<Option<Arc<dyn ChatModel>>
             &base_url(anthropic_chat_model::DEFAULT_BASE_URL),
         )?),
 
+        // An empty `api_key_env` means the endpoint needs no auth — a local
+        // vLLM, an Ollama-compatible shim, an offline gateway. Mirror
+        // `[embeddings]`, which already treats empty as "send no key",
+        // instead of trying to read an environment variable named "".
         "openai-compat" => Arc::new(OpenAiCompatChatModel::new(
             &understanding.model,
-            transport::key_from_env(&understanding.api_key_env, "understanding")?,
+            optional_key(&understanding.api_key_env, "understanding")?,
             &base_url(openai_compat_chat_model::DEFAULT_BASE_URL),
         )?),
 
@@ -101,6 +105,19 @@ pub fn build_chat_model(config: &AppConfig) -> Result<Option<Arc<dyn ChatModel>>
     );
 
     Ok(Some(Arc::new(RetryingChatModel::new(model))))
+}
+
+/// The key for a provider that may legitimately need none. An empty
+/// `api_key_env` yields an empty key — the client then sends no auth — while
+/// a named-but-unset variable is still a misconfiguration that stops
+/// startup. The same rule `[embeddings]` applies, kept here so an
+/// unauthenticated local reasoning endpoint is configured the same way.
+fn optional_key(api_key_env: &str, section: &str) -> Result<String> {
+    if api_key_env.trim().is_empty() {
+        Ok(String::new())
+    } else {
+        transport::key_from_env(api_key_env, section)
+    }
 }
 
 /// The understanding context as the rest of the process sees it.
@@ -213,6 +230,27 @@ mod tests {
             .expect("ollama must build without an API key")
             .expect("a model");
         assert_eq!(model.model_id(), "some-model");
+    }
+
+    #[test]
+    fn openai_compat_builds_without_a_key_for_an_unauthenticated_endpoint() {
+        // An empty `api_key_env` means the endpoint needs no auth — a local
+        // vLLM, an offline gateway. It must build without trying to read an
+        // environment variable named "", the sharp edge that made a no-auth
+        // reasoning endpoint refuse to start.
+        let config = AppConfig {
+            understanding: UnderstandingConfig {
+                provider: "openai-compat".to_string(),
+                model: "local-model".to_string(),
+                api_key_env: String::new(),
+                ..UnderstandingConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        let model = build_chat_model(&config)
+            .expect("an unauthenticated openai-compat endpoint must build without a key")
+            .expect("a model, not None");
+        assert_eq!(model.model_id(), "local-model");
     }
 
     #[test]

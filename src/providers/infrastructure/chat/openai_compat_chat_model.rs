@@ -112,14 +112,18 @@ impl TextCompletion for OpenAiCompatChatModel {
             },
         });
 
-        let response = self
+        let mut request = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(classify_transport)?;
+            .json(&body);
+        // An empty key means the endpoint needs no auth — a local vLLM, an
+        // Ollama shim, an offline gateway. Sending `Bearer ` (empty) makes
+        // some of those 401, so omit the header entirely rather than send a
+        // blank one.
+        if !self.api_key.trim().is_empty() {
+            request = request.bearer_auth(&self.api_key);
+        }
+        let response = request.send().await.map_err(classify_transport)?;
 
         let status = response.status();
         let text = response.text().await.map_err(classify_transport)?;

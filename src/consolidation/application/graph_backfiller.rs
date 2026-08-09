@@ -141,13 +141,16 @@ impl GraphBackfiller {
             ..Default::default()
         };
 
-        let Some(extractor) = self.extractor.as_ref() else {
+        // Only a real run needs the model. A dry run just counts the calls
+        // it *would* make, which is the whole point of `--dry-run`: preview
+        // the spend before a provider is even configured.
+        if !dry_run && self.extractor.is_none() {
             return Err(RaError::Validation(
                 "graph backfill --relations needs a configured [understanding] provider; \
-                 --entities does not and can run without one"
+                 --entities does not, and --relations --dry-run only previews the cost"
                     .to_string(),
             ));
-        };
+        }
 
         let users = self.users.list()?;
         report.users = users.len();
@@ -205,6 +208,12 @@ impl GraphBackfiller {
                 // nothing; otherwise we extract, write, and advance.
                 report.llm_calls += 1;
                 if !dry_run {
+                    // Present on any non-dry run: the entry guard above
+                    // returns before here when the extractor is missing.
+                    let extractor = self
+                        .extractor
+                        .as_ref()
+                        .expect("a real relation backfill requires an extractor");
                     let relations = self.extract_relations(extractor, &memory).await?;
                     self.graph.record_relations(
                         &context,
@@ -551,6 +560,56 @@ mod tests {
         assert_eq!(
             state(&fixture).relations_cursor(&fixture.alex).unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relation_dry_run_needs_no_provider() {
+        // Previewing the cost must not require a model to be configured —
+        // the point of --dry-run is to decide *whether* to spend.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        memory_with(
+            &fixture,
+            &fixture.alex,
+            "backend one",
+            vec![entity("backend", "component")],
+            now(),
+        );
+
+        let backfiller = GraphBackfiller::new(
+            Arc::clone(&fixture.users),
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&graph) as Arc<dyn EntityGraph>,
+            state(&fixture) as Arc<dyn GraphBackfillState>,
+            // No extractor at all — no provider configured.
+            None,
+            unlimited(),
+        );
+
+        let report = backfiller.backfill_relations(true).await.unwrap();
+        assert_eq!(report.memories_examined, 1);
+        assert_eq!(report.llm_calls, 1, "it reports the call it would make");
+    }
+
+    #[tokio::test]
+    async fn a_real_relation_backfill_without_a_provider_errors() {
+        // A run that would actually spend still refuses without a model.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let backfiller = GraphBackfiller::new(
+            Arc::clone(&fixture.users),
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&graph) as Arc<dyn EntityGraph>,
+            state(&fixture) as Arc<dyn GraphBackfillState>,
+            None,
+            unlimited(),
+        );
+
+        let error = backfiller.backfill_relations(false).await.unwrap_err();
+        assert!(
+            matches!(error, crate::shared::error::RaError::Validation(_)),
+            "got {error:?}"
         );
     }
 }
