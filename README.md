@@ -476,8 +476,12 @@ cleanly across every phase.
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ✅ |
 | 6 — Release | SDK, docs, packaging | ✅ |
 
-**On the roadmap:** a web dashboard, Postgres/Qdrant storage backends,
-user-visible collections/workspaces, and a knowledge-graph layer. See
+**Shipped since 1.0:** a relational recall layer — an entity/relation
+graph that recall hops over as a third leg, on by default (the eval put
+relational recall@5 at 85.7%, up from 71.4% without it).
+
+**On the roadmap:** a web dashboard, Postgres/Qdrant storage backends, and
+user-visible collections/workspaces. See
 [project-plan.md](project-plan.md) for where it's headed.
 
 ---

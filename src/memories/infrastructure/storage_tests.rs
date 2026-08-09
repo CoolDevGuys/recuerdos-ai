@@ -2056,16 +2056,18 @@ fn re_recording_a_memory_preserves_an_edge_another_memory_closed() {
 }
 
 #[test]
-fn the_default_build_has_no_graph_and_enabling_it_wires_one() {
-    // The inert-by-default guarantee, at the wiring seam: recall never
-    // consults a graph that isn't there, so a default build behaves
-    // exactly as it did before Task 7.3.
+fn the_default_build_has_a_graph_and_disabling_it_removes_one() {
+    // The graph ships on by default as of Task 7.3.6 (the eval showed
+    // relational recall gaining with no other kind regressing). Turning it
+    // off is the escape hatch that restores the pre-graph behaviour exactly
+    // — recall consults no graph, and a build is byte-identical to one from
+    // before Task 7.3.
     use crate::bootstrap::config::AppConfig;
 
-    let off = AppConfig::default();
-    assert!(!off.graph.enabled, "the graph must default to off");
+    let on = AppConfig::default();
+    assert!(on.graph.enabled, "the graph must default to on");
 
-    let mut on = AppConfig::default();
-    on.graph.enabled = true;
-    assert!(on.graph.enabled);
+    let mut off = AppConfig::default();
+    off.graph.enabled = false;
+    assert!(!off.graph.enabled);
 }

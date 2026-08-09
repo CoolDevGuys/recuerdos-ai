@@ -124,3 +124,40 @@ belongs here instead.
 
 See [implementation-plan.md §2](../implementation-plan.md#2-architecture)
 for the full rationale.
+
+## Recall: three legs, two clocks
+
+Recall in `memories` fuses three independent legs by reciprocal rank —
+each is a `domain` trait with an `infrastructure` adapter, wired in
+`bootstrap`:
+
+| Leg | Contract | Answers |
+|---|---|---|
+| Vector | `VectorIndex` | "reads like this query" (semantic) |
+| Keyword | `TextIndex` | "contains these tokens" (BM25 — the only leg that can match an identifier like `useQuery`) |
+| Graph | `EntityGraph` | "is connected to what this query names" |
+
+The graph leg (Task 7.3, "Strategy B") is what reaches a memory that
+answers a question it shares no words with: it scans the query for entity
+mentions, keeps the ones some memory of this user actually declared as
+seeds, and walks up to `[graph].max_hops` edges to the memories those
+seeds connect to. It is additive and self-silencing — `None` graph, or a
+query naming no known entity, yields the exact two-leg result. Every
+method takes a `&UserContext`, so a hop cannot compile its way into
+another user's edges, the same rule the other two indexes follow.
+
+The graph runs on **two clocks**, and keeping them apart is the whole
+point of the bi-temporal design:
+
+- **Transaction time** — *when we learned it*. This is `Memory::created_at`,
+  and what the `since` filter and the audit trail read.
+- **Valid time** — *when it was true in the world*. Each edge is valid from
+  its asserting memory's `created_at` and stays valid until a later memory
+  contradicts it (same subject and predicate, different object), which
+  closes the old interval rather than deleting it.
+
+A recall's `as_of` reads the graph in *valid* time: because a contradicted
+edge keeps its closed interval instead of vanishing, a hop dated before a
+change still traverses the edge that was true then — "who owned this
+before the reorg?" — while the default (now) sees only live edges. Nothing
+outside the graph leg consults valid time.

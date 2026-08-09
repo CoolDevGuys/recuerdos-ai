@@ -3,6 +3,43 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.2.0 — Graph (Strategy B): relational recall
+
+Recall gains a third leg. Beside the semantic (vector) and keyword (BM25)
+legs, a hop over an entity/relation graph reaches the memory that answers a
+question it shares no words with — "who owns the billing service's data?"
+surfaces the memory naming `ledger-db` by walking `billing service →
+ledger-db`. **On by default**: the eval measured relational recall@5 at
+**85.7%**, up from **71.4%** without the graph, with no other case kind
+regressing.
+
+- **A bi-temporal entity/relation graph.** Ingest extracts relations
+  (`subject —predicate→ object`) alongside the entities it already pulled,
+  and projects them into SQLite edge tables. Edges carry two clocks: *valid*
+  time (when the fact was true in the world) distinct from the memory's
+  *transaction* time (when we learned it). A superseding memory closes the
+  old edge's validity interval instead of deleting it, so history is
+  walkable, not lost.
+- **Graph-hop retrieval as a third RRF leg.** Recall scans the query for
+  entity mentions, keeps the ones some memory actually declared as seeds,
+  and walks up to `[graph].max_hops` edges. It is additive and
+  self-silencing: a query naming no known entity yields the exact two-leg
+  result, so non-relational recall cannot regress — a property the eval and
+  an empty-leg identity test both hold.
+- **Time-travel recall.** `as_of` (REST search and the `memory_recall` MCP
+  tool) reads the hop in valid time — "who was on-call before the reorg?" —
+  traversing edges that were live then. `graph_rank` in a result's `matched`
+  object says when a hop, rather than a semantic or keyword match, is why a
+  result appeared.
+- **Budgeted, resumable backfill.** `recuerdos-ai graph backfill
+  --entities` (zero model calls) and `--relations` (bounded by
+  `[graph].backfill_budget`, resuming where it stopped) give edges to a
+  corpus that predates the graph; `--dry-run` spends nothing. See
+  [deployment.md](deployment.md).
+- **Off is a clean switch.** `[graph].enabled = false` restores the
+  pre-graph behaviour exactly — no hop, no edges written, no
+  relation-extraction tokens — for a deployment that wants neither.
+
 ## v0.1.1
 
 - **`[server].mcp.allowed_hosts`.** The streamable-HTTP `/mcp` endpoint's
