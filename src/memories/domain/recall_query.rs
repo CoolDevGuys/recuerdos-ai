@@ -19,6 +19,12 @@ pub struct RecallQuery {
     subcategories: Vec<String>,
     tags: Vec<String>,
     since: Option<DateTime<Utc>>,
+    /// The point in *valid* time to read the graph at (Task 7.3.4). `None`
+    /// means "as it stands now"; a value asks the graph hop what was true
+    /// then — "what did we deploy on *before* the migration?". It filters
+    /// only the graph leg's edge liveness; the vector and keyword legs, and
+    /// the `since` transaction-time filter, are unaffected.
+    as_of: Option<DateTime<Utc>>,
     limit: usize,
     include_superseded: bool,
 }
@@ -44,6 +50,7 @@ impl RecallQuery {
             subcategories: Vec::new(),
             tags: Vec::new(),
             since: None,
+            as_of: None,
             // Clamped rather than rejected: a client asking for 200 wants
             // "as many as you'll give me", not an error.
             limit: limit.min(MAX_LIMIT),
@@ -82,6 +89,13 @@ impl RecallQuery {
         self
     }
 
+    /// Reads the graph hop at a point in valid time. `None` (the default)
+    /// is "now".
+    pub fn with_as_of(mut self, as_of: Option<DateTime<Utc>>) -> Self {
+        self.as_of = as_of;
+        self
+    }
+
     pub fn including_superseded(mut self) -> Self {
         self.include_superseded = true;
         self
@@ -105,6 +119,10 @@ impl RecallQuery {
 
     pub fn since(&self) -> Option<DateTime<Utc>> {
         self.since
+    }
+
+    pub fn as_of(&self) -> Option<DateTime<Utc>> {
+        self.as_of
     }
 
     pub fn limit(&self) -> usize {

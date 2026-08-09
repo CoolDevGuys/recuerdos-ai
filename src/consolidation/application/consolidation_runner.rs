@@ -129,8 +129,12 @@ struct ProcessedGroup {
 /// was examined.
 type PlanOutcome = (usize, Vec<Vec<Memory>>, usize, Vec<ProcessedGroup>);
 
-/// Tracks remaining budget during a consolidation run.
-struct ConsolidationBudget {
+/// Tracks remaining budget during a bounded run. Named for its first user,
+/// consolidation, but reused verbatim by the graph relation backfill (Task
+/// 7.3.5): both walk a corpus a model call at a time and must stop cleanly
+/// at the same three limits. `memories_retired` is simply "memories the run
+/// finished with" — retired for consolidation, backfilled for the graph.
+pub(crate) struct ConsolidationBudget {
     max_llm_calls: Option<usize>,
     max_duration_secs: Option<u64>,
     max_memories: Option<usize>,
@@ -142,7 +146,7 @@ struct ConsolidationBudget {
 }
 
 impl ConsolidationBudget {
-    fn new(limits: BudgetLimits) -> Self {
+    pub(crate) fn new(limits: BudgetLimits) -> Self {
         Self {
             max_llm_calls: limits.max_llm_calls,
             max_duration_secs: limits.max_duration_secs,
@@ -156,8 +160,13 @@ impl ConsolidationBudget {
     }
 
     /// Returns true if the budget is exhausted.
-    fn is_exhausted(&self) -> bool {
+    pub(crate) fn is_exhausted(&self) -> bool {
         self.exhausted
+    }
+
+    /// Why the budget stopped, for a report. `None` until it is exhausted.
+    pub(crate) fn reason(&self) -> Option<String> {
+        self.reason.clone()
     }
 
     /// Check all budget limits. Mark exhausted if any limit is reached.
@@ -193,15 +202,15 @@ impl ConsolidationBudget {
 
     /// Record that an LLM merge call was made. Returns true if the budget
     /// is now exhausted and the caller should stop.
-    fn record_llm_call(&mut self) -> bool {
+    pub(crate) fn record_llm_call(&mut self) -> bool {
         self.llm_calls_made += 1;
         self.check();
         self.exhausted
     }
 
-    /// Record that memories were retired. Returns true if the budget is
-    /// now exhausted and the caller should stop.
-    fn record_retired(&mut self, count: usize) -> bool {
+    /// Record that memories were finished (retired, or backfilled). Returns
+    /// true if the budget is now exhausted and the caller should stop.
+    pub(crate) fn record_retired(&mut self, count: usize) -> bool {
         self.memories_retired += count;
         self.check();
         self.exhausted

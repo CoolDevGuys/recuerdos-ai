@@ -135,6 +135,11 @@ impl MemoryToolbox for HttpMemoryToolbox {
         if let Some(limit) = request.limit {
             body["limit"] = json!(limit);
         }
+        if let Some(as_of) = request.as_of {
+            // serde renders it RFC 3339, which the daemon's `SearchRequest`
+            // parses straight back into a `DateTime<Utc>`.
+            body["as_of"] = json!(as_of);
+        }
 
         let response = self
             .request(reqwest::Method::POST, "/v1/memories/search", Some(body))
@@ -186,6 +191,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
             query: query.to_string(),
             categories: Vec::new(),
             limit: Some(limit),
+            as_of: None,
         })
         .await
     }

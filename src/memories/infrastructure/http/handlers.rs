@@ -65,7 +65,8 @@ pub async fn search_memories(
     .with_categories(categories)
     .with_subcategories(request.subcategories)
     .with_tags(request.tags)
-    .with_since(request.since);
+    .with_since(request.since)
+    .with_as_of(request.as_of);
     if request.include_superseded {
         query = query.including_superseded();
     }

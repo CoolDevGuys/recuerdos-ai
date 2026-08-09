@@ -84,6 +84,11 @@ pub struct MatchDetail {
     pub vector_rank: Option<usize>,
     /// 1-based rank in the keyword leg, if it appeared there.
     pub bm25_rank: Option<usize>,
+    /// 1-based rank in the graph leg, if a hop reached it (Task 7.3.4).
+    /// A memory neither the vector nor the keyword leg surfaced can still
+    /// earn a place here, reachable only over the relations it shares with
+    /// the query's entities.
+    pub graph_rank: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,15 +114,40 @@ impl RecallRanker {
         }
     }
 
-    /// Fuses both legs and returns memories best-first.
+    /// Fuses the vector and keyword legs and returns memories best-first.
     ///
     /// `candidates` supplies the memory for every id either leg
     /// mentioned; ids without one are dropped (a row deleted between the
     /// index hit and the fetch).
+    ///
+    /// This is the two-leg call the graph leg must not disturb: it is
+    /// exactly [`rank_with_graph`](Self::rank_with_graph) over an empty
+    /// graph leg, so a build with no graph, or a query that names no known
+    /// entity, ranks byte-for-byte as it did before Task 7.3.4.
     pub fn rank(
         &self,
         vector: &RankedIds,
         keyword: &RankedIds,
+        candidates: Vec<Memory>,
+        now: DateTime<Utc>,
+    ) -> Vec<ScoredMemory> {
+        self.rank_with_graph(vector, keyword, &RankedIds::default(), candidates, now)
+    }
+
+    /// Fuses all three legs — vector, keyword and the graph hop — and
+    /// returns memories best-first.
+    ///
+    /// The graph leg is just a third ranked list: it adds one more
+    /// `1/(k + rank)` term on the same scale as the other two, so a memory
+    /// several legs agree on still beats one only a single leg loves, and
+    /// `RRF_K`/[`MULTIPLIER_FLOOR`] are untouched — this adds a leg, it does
+    /// not retune the bands. An empty graph leg contributes nothing and
+    /// leaves the two-leg ranking identical.
+    pub fn rank_with_graph(
+        &self,
+        vector: &RankedIds,
+        keyword: &RankedIds,
+        graph: &RankedIds,
         candidates: Vec<Memory>,
         now: DateTime<Utc>,
     ) -> Vec<ScoredMemory> {
@@ -127,6 +157,7 @@ impl RecallRanker {
                 let detail = MatchDetail {
                     vector_rank: rank_of(vector, memory.id()),
                     bm25_rank: rank_of(keyword, memory.id()),
+                    graph_rank: rank_of(graph, memory.id()),
                 };
                 let score = self.score(&memory, detail, now);
                 ScoredMemory {
@@ -136,7 +167,9 @@ impl RecallRanker {
                 }
             })
             .filter(|scored| {
-                scored.match_detail.vector_rank.is_some() || scored.match_detail.bm25_rank.is_some()
+                scored.match_detail.vector_rank.is_some()
+                    || scored.match_detail.bm25_rank.is_some()
+                    || scored.match_detail.graph_rank.is_some()
             })
             .collect();
 
@@ -155,7 +188,9 @@ impl RecallRanker {
     }
 
     fn score(&self, memory: &Memory, detail: MatchDetail, now: DateTime<Utc>) -> f32 {
-        let relevance = reciprocal_rank(detail.vector_rank) + reciprocal_rank(detail.bm25_rank);
+        let relevance = reciprocal_rank(detail.vector_rank)
+            + reciprocal_rank(detail.bm25_rank)
+            + reciprocal_rank(detail.graph_rank);
 
         relevance * self.recency_multiplier(memory.created_at(), now) * quality(memory)
     }
@@ -412,6 +447,60 @@ mod tests {
 
         assert_eq!(result[0].match_detail.vector_rank, Some(1));
         assert_eq!(result[0].match_detail.bm25_rank, None);
+    }
+
+    #[test]
+    fn an_empty_graph_leg_leaves_the_two_leg_ranking_identical() {
+        // The load-bearing guarantee of Task 7.3.4: adding the graph leg
+        // cannot regress non-relational recall. With no graph hits,
+        // `rank_with_graph` must return the same order *and* the same
+        // scores as the two-leg `rank` — which is why `rank` delegates to
+        // it over an empty leg rather than keeping a parallel body.
+        let a = memory_aged(0, 1.0);
+        let b = memory_aged(30, 0.5);
+        let c = memory_aged(365, 0.9);
+        let vector = ids(&[&a, &b, &c]);
+        let keyword = ids(&[&c, &a]);
+        let candidates = || vec![a.clone(), b.clone(), c.clone()];
+
+        let two_leg = ranker().rank(&vector, &keyword, candidates(), now());
+        let three_leg = ranker().rank_with_graph(
+            &vector,
+            &keyword,
+            &RankedIds::default(),
+            candidates(),
+            now(),
+        );
+
+        assert_eq!(
+            ordered(&two_leg),
+            ordered(&three_leg),
+            "an empty graph leg reordered the results"
+        );
+        for (two, three) in two_leg.iter().zip(three_leg.iter()) {
+            assert_eq!(two.score, three.score, "an empty graph leg changed a score");
+            assert_eq!(three.match_detail.graph_rank, None);
+        }
+    }
+
+    #[test]
+    fn a_memory_only_the_graph_leg_found_is_kept_and_scored() {
+        // The reason the leg exists: a memory neither the vector nor the
+        // keyword leg ranks, reachable only over a relation, still earns a
+        // place and a positive score.
+        let hopped = memory();
+
+        let result = ranker().rank_with_graph(
+            &RankedIds::default(),
+            &RankedIds::default(),
+            &ids(&[&hopped]),
+            vec![hopped.clone()],
+            now(),
+        );
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].match_detail.graph_rank, Some(1));
+        assert!(result[0].score > 0.0);
     }
 
     #[test]

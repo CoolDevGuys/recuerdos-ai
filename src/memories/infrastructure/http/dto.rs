@@ -79,6 +79,10 @@ pub struct SearchRequest {
     #[serde(default)]
     pub tags: Vec<String>,
     pub since: Option<DateTime<Utc>>,
+    /// Read the graph hop as of this instant in valid time. Omitted means
+    /// "now"; a value asks what was true then — "what did we deploy on
+    /// before the migration?". Only the graph leg is affected.
+    pub as_of: Option<DateTime<Utc>>,
     #[serde(default)]
     pub include_superseded: bool,
 }
@@ -133,6 +137,10 @@ pub struct MatchResponse {
     pub vector_rank: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bm25_rank: Option<usize>,
+    /// 1-based rank in the graph leg, present only when a hop reached this
+    /// memory (Task 7.3.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_rank: Option<usize>,
 }
 
 impl From<&ScoredMemory> for SearchHit {
@@ -143,6 +151,7 @@ impl From<&ScoredMemory> for SearchHit {
             matched: MatchResponse {
                 vector_rank: scored.match_detail.vector_rank,
                 bm25_rank: scored.match_detail.bm25_rank,
+                graph_rank: scored.match_detail.graph_rank,
             },
         }
     }
@@ -277,12 +286,14 @@ mod tests {
             matched: MatchResponse {
                 vector_rank: Some(1),
                 bm25_rank: None,
+                graph_rank: None,
             },
         };
 
         let json = serde_json::to_value(&hit).unwrap();
         assert_eq!(json["matched"]["vector_rank"], 1);
         assert!(json["matched"].get("bm25_rank").is_none());
+        assert!(json["matched"].get("graph_rank").is_none());
         // `flatten` should inline the memory fields, not nest them.
         assert_eq!(json["id"], "m1");
     }

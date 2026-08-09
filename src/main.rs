@@ -98,6 +98,18 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Build the entity/relation graph for an existing corpus.
+    ///
+    /// Populates the graph tables for memories that predate it (or were
+    /// ingested with `[graph].enabled = false`), so turning the graph on
+    /// does not leave old memories unreachable by a hop. Runs regardless of
+    /// `[graph].enabled` — backfill first, then enable.
+    Graph {
+        #[command(subcommand)]
+        command: GraphCommand,
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+    },
     /// Manage users.
     User {
         #[command(subcommand)]
@@ -111,6 +123,26 @@ enum Command {
         command: identity::infrastructure::cli::KeyCommand,
         #[arg(long, global = true)]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCommand {
+    /// Backfill the graph from what memories already carry.
+    Backfill {
+        /// Project every memory's stored entities into the graph. Makes no
+        /// model call, so it is free and safe to re-run.
+        #[arg(long)]
+        entities: bool,
+        /// Re-extract relations for memories that have none. Costs one model
+        /// call each, bounded by [graph].backfill_budget, and resumes where
+        /// a previous run stopped.
+        #[arg(long)]
+        relations: bool,
+        /// Report what each pass would do — memories, and the model calls
+        /// relations would make — and change nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -141,6 +173,7 @@ async fn main() {
         Command::Consolidate { dry_run, config } => {
             run_consolidate(dry_run, config.as_deref()).await
         }
+        Command::Graph { command, config } => run_graph(command, config.as_deref()).await,
         Command::User { command, config } => run_user(command, config.as_deref()),
         Command::Key { command, config } => run_key(command, config.as_deref()),
     };
@@ -206,6 +239,144 @@ async fn run_consolidate(dry_run: bool, config_path: Option<&Path>) -> Result<()
     consolidation::infrastructure::cli::run(wired.consolidation.runner.clone(), dry_run)
         .await
         .map_err(|e| e.to_string())
+}
+
+async fn run_graph(command: GraphCommand, config_path: Option<&Path>) -> Result<(), String> {
+    match command {
+        GraphCommand::Backfill {
+            entities,
+            relations,
+            dry_run,
+        } => run_graph_backfill(entities, relations, dry_run, config_path).await,
+    }
+}
+
+async fn run_graph_backfill(
+    entities: bool,
+    relations: bool,
+    dry_run: bool,
+    config_path: Option<&Path>,
+) -> Result<(), String> {
+    if !entities && !relations {
+        return Err("nothing to do: pass --entities, --relations, or both".to_string());
+    }
+
+    bootstrap::server::init_tracing();
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
+    let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
+        .map_err(|e| e.to_string())?;
+    let memories =
+        bootstrap::memories_wiring::Memories::build(&config, std::sync::Arc::clone(&database))
+            .map_err(|e| e.to_string())?;
+    let understanding = bootstrap::understanding_wiring::Understanding::build(
+        &config,
+        std::sync::Arc::clone(&database),
+        &memories,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // The graph and its watermark are built directly on the database, not
+    // taken from `memories.graph` — that is `None` until `[graph].enabled`,
+    // and the whole point of backfill is to populate the graph *before*
+    // turning it on.
+    let graph: std::sync::Arc<dyn memories::domain::entity_graph::EntityGraph> =
+        std::sync::Arc::new(
+            memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph::new(
+                std::sync::Arc::clone(&database),
+            ),
+        );
+    let state: std::sync::Arc<dyn memories::domain::graph_backfill_state::GraphBackfillState> =
+        std::sync::Arc::new(
+            memories::infrastructure::sqlite_graph_backfill_state::SqliteGraphBackfillState::new(
+                database,
+            ),
+        );
+
+    // Relation backfill wants edges regardless of the runtime `extract_relations`
+    // flag — an operator running it has decided to spend on relations.
+    let extractor = understanding.model.clone().map(|model| {
+        std::sync::Arc::new(
+            understanding::application::candidate_extractor::CandidateExtractor::new(
+                model,
+                std::sync::Arc::clone(&understanding.taxonomy),
+                true,
+            ),
+        )
+    });
+
+    let budget_config = &config.graph.backfill_budget;
+    let budget = consolidation::application::consolidation_runner::BudgetLimits {
+        max_llm_calls: (budget_config.max_llm_calls != 0).then_some(budget_config.max_llm_calls),
+        max_duration_secs: (budget_config.max_duration_secs != 0)
+            .then_some(budget_config.max_duration_secs),
+        max_memories: (budget_config.max_memories != 0).then_some(budget_config.max_memories),
+    };
+
+    let backfiller = consolidation::application::graph_backfiller::GraphBackfiller::new(
+        std::sync::Arc::clone(&identity.users),
+        std::sync::Arc::clone(&memories.repository),
+        graph,
+        state,
+        extractor,
+        budget,
+    );
+
+    if entities {
+        let report = backfiller
+            .backfill_entities(dry_run)
+            .map_err(|e| e.to_string())?;
+        println!("{}", render_backfill(&report));
+    }
+    if relations {
+        let report = backfiller
+            .backfill_relations(dry_run)
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{}", render_backfill(&report));
+    }
+    Ok(())
+}
+
+fn render_backfill(
+    report: &consolidation::application::graph_backfiller::BackfillReport,
+) -> String {
+    use consolidation::application::graph_backfiller::BackfillPass;
+
+    let mut out = match report.pass {
+        BackfillPass::Entities => {
+            let verb = if report.dry_run {
+                "would project"
+            } else {
+                "projected"
+            };
+            format!(
+                "entities: {verb} {} of {} memories examined across {} users (no model calls)",
+                report.memories_projected, report.memories_examined, report.users
+            )
+        }
+        BackfillPass::Relations if report.dry_run => format!(
+            "relations: {} memories examined across {} users; \
+             {} model calls would be made",
+            report.memories_examined, report.users, report.llm_calls
+        ),
+        BackfillPass::Relations => format!(
+            "relations: {} model calls over {} memories examined across {} users; \
+             {} gained edges",
+            report.llm_calls, report.memories_examined, report.users, report.relations_added
+        ),
+    };
+
+    if report.budget_exhausted {
+        out.push_str(&format!(
+            "\nstopped early: {} — re-run to continue where it left off",
+            report.budget_reason.as_deref().unwrap_or("budget reached")
+        ));
+    }
+    if report.dry_run {
+        out.push_str("\nRe-run without --dry-run to apply.");
+    }
+    out
 }
 
 async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
