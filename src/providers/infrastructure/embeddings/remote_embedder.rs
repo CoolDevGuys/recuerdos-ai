@@ -63,6 +63,11 @@ pub struct RemoteEmbedder {
     api_key: Option<String>,
     model: String,
     dimensions: usize,
+    /// The most texts one request may carry; `0` means no cap (send the
+    /// whole batch at once). See [`EmbeddingsConfig::max_batch_size`].
+    ///
+    /// [`EmbeddingsConfig::max_batch_size`]: crate::bootstrap::config::EmbeddingsConfig::max_batch_size
+    max_batch_size: usize,
 }
 
 impl RemoteEmbedder {
@@ -71,11 +76,17 @@ impl RemoteEmbedder {
     /// Fails loudly if the provider is unreachable, the key is rejected,
     /// or the model name is unknown — all of which are startup
     /// misconfigurations an operator should hear about immediately.
+    ///
+    /// `max_batch_size` caps how many texts a single request carries (`0` =
+    /// no cap); larger inputs are split into sequential requests, which is
+    /// what lets a provider with a batch limit — Alibaba DashScope caps it
+    /// at 10 — survive a `reindex` or a consolidation pass.
     pub fn load(
         api: EmbeddingApi,
         model: &str,
         base_url: &str,
         api_key: Option<String>,
+        max_batch_size: usize,
     ) -> Result<Self> {
         let http = BlockingHttpWorker::spawn(|| {
             reqwest::blocking::Client::builder()
@@ -91,6 +102,7 @@ impl RemoteEmbedder {
             model: model.to_string(),
             // Filled in by the probe below.
             dimensions: 0,
+            max_batch_size,
         };
 
         // One real embedding call. Its length is the dimensionality, and
@@ -137,6 +149,39 @@ impl Embedder for RemoteEmbedder {
             return Ok(Vec::new());
         }
 
+        // Split into sub-batches when the provider caps the batch size, and
+        // send them one after another. `0` means no cap — one request for
+        // everything, the original behaviour. Order is preserved: chunk N's
+        // vectors are appended before chunk N+1's.
+        let chunk = if self.max_batch_size == 0 {
+            texts.len()
+        } else {
+            self.max_batch_size
+        };
+        if chunk >= texts.len() {
+            return self.embed_chunk(texts);
+        }
+        let mut out = Vec::with_capacity(texts.len());
+        for batch in texts.chunks(chunk) {
+            out.extend(self.embed_chunk(batch)?);
+        }
+        Ok(out)
+    }
+
+    fn model_id(&self) -> &str {
+        &self.model
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+}
+
+impl RemoteEmbedder {
+    /// Embeds a single request's worth of texts — one HTTP round trip. The
+    /// caller ([`embed`](Embedder::embed)) has already bounded `texts` to at
+    /// most `max_batch_size`.
+    fn embed_chunk(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         // Build the request off the confined HTTP thread, then run the
         // send + parse on it. The outer `?` is the transport result; the
         // closure's own `Result` is the embedding result.
@@ -185,14 +230,6 @@ impl Embedder for RemoteEmbedder {
             }
             Ok(vectors)
         })?
-    }
-
-    fn model_id(&self) -> &str {
-        &self.model
-    }
-
-    fn dimensions(&self) -> usize {
-        self.dimensions
     }
 }
 
@@ -282,6 +319,7 @@ mod tests {
             api_key: Some("sk-x".to_string()),
             model: "text-embedding-3-small".to_string(),
             dimensions: 1536,
+            max_batch_size: 0,
         };
 
         assert_eq!(embedder.endpoint(), "https://api.openai.com/v1/embeddings");
@@ -299,6 +337,7 @@ mod tests {
             api_key: None,
             model: "nomic-embed-text".to_string(),
             dimensions: 768,
+            max_batch_size: 0,
         };
         assert_eq!(embedder.endpoint(), "http://127.0.0.1:11434/api/embed");
     }
@@ -377,6 +416,7 @@ mod tests {
             api_key: None,
             model: "m".to_string(),
             dimensions: 3,
+            max_batch_size: 0,
         };
         assert!(
             embedder
@@ -448,6 +488,7 @@ mod tests {
                 "text-embedding-3-small",
                 &uri,
                 Some("sk-test".to_string()),
+                0,
             )
         })
         .await
@@ -487,6 +528,7 @@ mod tests {
                 "text-embedding-3-small",
                 &uri,
                 Some("sk-wrong".to_string()),
+                0,
             )
         })
         .await
@@ -516,7 +558,7 @@ mod tests {
 
         let uri = server.uri();
         let embedder = tokio::task::spawn_blocking(move || {
-            RemoteEmbedder::load(EmbeddingApi::Ollama, "nomic-embed-text", &uri, None)
+            RemoteEmbedder::load(EmbeddingApi::Ollama, "nomic-embed-text", &uri, None, 0)
         })
         .await
         .unwrap()
@@ -530,5 +572,55 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(vectors, vec![vec![0.0, 0.1, 0.2]]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_over_the_cap_is_split_into_sequential_requests() {
+        // The Alibaba fix: a provider that rejects a batch larger than N
+        // still gets whole-corpus work (a reindex) as a run of N-sized
+        // requests, and the vectors come back in the original order.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(Vectors {
+                api: EmbeddingApi::OpenAiCompat,
+                dim: 4,
+            })
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let embedder = tokio::task::spawn_blocking(move || {
+            // Cap of 2 — like Alibaba's 10, only smaller to keep the test tight.
+            RemoteEmbedder::load(EmbeddingApi::OpenAiCompat, "m", &uri, None, 2)
+        })
+        .await
+        .unwrap()
+        .expect("load should succeed");
+
+        let texts: Vec<String> = (0..5).map(|i| i.to_string()).collect();
+        let vectors =
+            tokio::task::spawn_blocking(move || embedder.embed(&texts, EmbeddingTask::Document))
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(vectors.len(), 5, "every input gets a vector, across chunks");
+
+        // The one-input probe from `load`, then the embed split into 2 + 2 + 1
+        // — never a request larger than the cap.
+        let sizes: Vec<usize> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| {
+                serde_json::from_slice::<Value>(&request.body).unwrap()["input"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            })
+            .collect();
+        assert_eq!(sizes, vec![1, 2, 2, 1], "the cap split the batch, in order");
     }
 }

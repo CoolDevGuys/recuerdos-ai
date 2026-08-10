@@ -116,6 +116,13 @@ pub struct EmbeddingsConfig {
     /// or a non-default Ollama host. Empty means the provider's usual
     /// address. Ignored by the local provider.
     pub base_url: String,
+    /// The most texts a single request to a remote provider may carry.
+    /// Larger inputs — a `reindex`, a consolidation pass — are split into
+    /// sequential requests of this size. `0` (the default) sends the whole
+    /// batch at once, which most providers accept; set it when a provider
+    /// caps the batch, e.g. `10` for Alibaba DashScope's OpenAI-compatible
+    /// endpoint. Ignored by the local provider, which batches in-process.
+    pub max_batch_size: usize,
 }
 
 impl Default for EmbeddingsConfig {
@@ -129,6 +136,9 @@ impl Default for EmbeddingsConfig {
             cache_dir: "~/.recuerdos-ai/models".to_string(),
             api_key_env: String::new(),
             base_url: String::new(),
+            // 0 = "no cap", preserving the send-it-all behaviour for
+            // providers (OpenAI, most gateways) that accept large batches.
+            max_batch_size: 0,
         }
     }
 }

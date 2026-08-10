@@ -3,6 +3,16 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.2.1
+
+- **`[embeddings].max_batch_size`.** A remote embedding provider that caps
+  its batch size — Alibaba DashScope rejects a batch larger than 10 — failed
+  a `reindex` or a consolidation pass, which embed many texts at once, with
+  `"batch size is invalid"`. The remote embedder now splits a large input
+  into sequential requests of at most `max_batch_size` (default `0` = no cap,
+  the previous send-it-all behaviour), preserving order. Set it to your
+  provider's limit; the local provider ignores it.
+
 ## v0.2.0 — Graph (Strategy B): relational recall
 
 Recall gains a third leg. Beside the semantic (vector) and keyword (BM25)
