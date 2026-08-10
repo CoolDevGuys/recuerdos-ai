@@ -15,19 +15,35 @@
 //! say "uses pnpm, Vitest and Biome; no barrel files" in a line, which
 //! is both shorter and more useful than any eight of the originals.
 //!
-//! # Why it is cached
+//! # Why it is cached, and why the read never generates
 //!
 //! This is read at the start of every session, by every client, of every
 //! agent. Generating on read would put a model call in front of every
 //! session start — seconds of latency and a bill proportional to how
-//! often the user opens their editor. So a digest is generated once and
-//! reused until the memories it was built from change.
+//! often the user opens their editor. Worse, that model call sits inside
+//! the daemon's 30 s request-timeout, so a slow local provider turns a
+//! stale digest into a 408 for the read rather than a wait: the failure
+//! the shim then reports to the agent as an internal error.
+//!
+//! So generation is split from serving. [`execute`] is the read path and
+//! never calls the model: it renders from whatever digests are cached,
+//! stale ones included, and assembles when the cache is cold. [`refresh`]
+//! is the write path and the only caller of the model: it regenerates the
+//! digests whose memories have moved. A [`MemoryChangeObserver`] wires the
+//! two together — the ingest worker and the nightly consolidation run call
+//! `refresh` in the background after they change a user's memories, so the
+//! cache the read serves is kept current off to the side.
+//!
+//! [`execute`]: ProfileDigestWriter::execute
+//! [`refresh`]: ProfileDigestWriter::refresh
 //!
 //! # Why it never fails
 //!
 //! Every failure path falls back to assembly rather than erroring. A
 //! provider outage should degrade the profile, not break session start
-//! for every agent connected to the daemon.
+//! for every agent connected to the daemon. And because the read no longer
+//! generates, even a provider that hangs past the request-timeout can only
+//! make the served profile stale — never make the read fail.
 
 use crate::consolidation::domain::digest_prompt::{digest_request, parse_digest, select};
 use crate::consolidation::domain::profile_digest::{
@@ -36,6 +52,7 @@ use crate::consolidation::domain::profile_digest::{
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::profile_assembler::{DEFAULT_TOKEN_BUDGET, ProfileAssembler};
 use crate::memories::domain::memory::Memory;
+use crate::memories::domain::memory_change_observer::MemoryChangeObserver;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::clock::Clock;
 use crate::shared::error::Result;
@@ -84,10 +101,24 @@ impl ProfileDigestWriter {
         }
     }
 
+    /// The read path. Renders the profile from the cached digests and
+    /// never calls the model, so it cannot be slowed — or timed out — by a
+    /// provider. [`refresh`] is what keeps the cache it reads current.
+    ///
+    /// A cached digest is served whether or not it is still current: a
+    /// digest one memory out of date is a better answer on the read path
+    /// than a model call would be, and the background refresh will have it
+    /// caught up shortly. Only when nothing is cached at all does this
+    /// assemble, so a cold cache still returns the user their memories
+    /// rather than a blank page.
+    ///
+    /// [`refresh`]: Self::refresh
     pub async fn execute(&self, context: &UserContext) -> Result<String> {
-        let Some(model) = self.model.as_ref() else {
+        // Without a model there is no digest cache to serve from — the
+        // assembler is the whole profile, not a fallback.
+        if self.model.is_none() {
             return self.assembler.execute(context);
-        };
+        }
 
         let now = self.clock.now();
         let stored = self.memories.list(context, false)?;
@@ -98,12 +129,75 @@ impl ProfileDigestWriter {
 
         if active.is_empty() {
             // The assembler's empty-profile text tells an agent what to
-            // do about it, which is more useful than a blank page and
-            // does not cost a model call to say.
+            // do about it, which is more useful than a blank page.
             return self.assembler.execute(context);
         }
 
         let mut sections: Vec<(Domain, String)> = Vec::new();
+        for domain in DOMAINS {
+            let has_memories = active
+                .iter()
+                .any(|memory| Domain::of(memory.category()) == *domain);
+            if !has_memories {
+                continue;
+            }
+
+            match self.digests.find(context, *domain) {
+                // A cached digest, current or stale. An empty one is the
+                // model having said there was nothing worth an assistant's
+                // attention here; that is an answer, so the domain is
+                // simply omitted rather than assembled.
+                Ok(Some(cached)) if !cached.content.is_empty() => {
+                    sections.push((*domain, cached.content));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // A broken cache should cost this domain its section,
+                    // not fail the whole read.
+                    tracing::warn!(%error, domain = domain.as_str(), "could not read a cached digest");
+                }
+            }
+        }
+
+        if sections.is_empty() {
+            // The cache is cold — no domain has been generated yet, or a
+            // read raced ahead of the first background refresh. Assembly
+            // at least shows the user their memories until it lands.
+            tracing::debug!("no cached digest to serve; falling back to assembly");
+            return self.assembler.execute(context);
+        }
+
+        Ok(render(context.handle(), &sections, now, self.char_budget()))
+    }
+
+    /// The background path: regenerate the digests whose memories have
+    /// moved, and cache them for the read path to serve.
+    ///
+    /// Called off to the side — by the ingest worker after it stores
+    /// memories, and by the nightly consolidation run for every user it
+    /// touches — never on the read. A domain whose fingerprint still
+    /// matches is left alone and costs no model call, so refreshing a user
+    /// nothing changed for is cheap; only stale domains are regenerated.
+    ///
+    /// Errors are swallowed per domain exactly as on the old read path: a
+    /// provider outage should leave the last good digest in place, not
+    /// propagate out of a background task.
+    pub async fn refresh(&self, context: &UserContext) -> Result<()> {
+        let Some(model) = self.model.as_ref() else {
+            return Ok(());
+        };
+
+        let now = self.clock.now();
+        let stored = self.memories.list(context, false)?;
+        let active: Vec<&Memory> = stored
+            .iter()
+            .filter(|memory| memory.is_active_at(now))
+            .collect();
+
+        if active.is_empty() {
+            return Ok(());
+        }
+
         for domain in DOMAINS {
             let theirs: Vec<&Memory> = active
                 .iter()
@@ -114,19 +208,14 @@ impl ProfileDigestWriter {
                 continue;
             }
 
-            if let Some(content) = self.digest_for(context, *domain, &theirs, model, now).await {
-                sections.push((*domain, content));
-            }
+            // `digest_for` regenerates and caches when the fingerprint has
+            // moved, and returns the cached digest untouched otherwise. We
+            // want the caching side effect; the returned content is the
+            // read path's business, so it is dropped here.
+            let _ = self.digest_for(context, *domain, &theirs, model, now).await;
         }
 
-        if sections.is_empty() {
-            // Every domain failed or came back empty. Assembly at least
-            // shows the user their memories.
-            tracing::debug!("no digest could be produced; falling back to assembly");
-            return self.assembler.execute(context);
-        }
-
-        Ok(render(context.handle(), &sections, now, self.char_budget()))
+        Ok(())
     }
 
     /// One domain's digest: the cached one if it still applies, a fresh
@@ -218,6 +307,22 @@ impl ProfileDigestWriter {
     /// together blow the budget the resource promises.
     fn word_budget(&self) -> usize {
         self.token_budget / TOKENS_PER_WORD / DOMAINS.len()
+    }
+}
+
+/// The writer is the sole subscriber to memory changes: a change is what
+/// makes a digest stale, and refreshing it is exactly this. Keeping the
+/// model call here, behind a background trigger, is what holds it off the
+/// read path.
+#[async_trait::async_trait]
+impl MemoryChangeObserver for ProfileDigestWriter {
+    async fn memories_changed(&self, context: &UserContext) {
+        if let Err(error) = self.refresh(context).await {
+            // Best-effort by contract: the read path serves the last good
+            // digest regardless, so a failed refresh is a logged warning,
+            // not a caller's problem.
+            tracing::warn!(%error, user = context.handle(), "could not refresh the profile digest");
+        }
     }
 }
 
@@ -316,6 +421,8 @@ mod tests {
             ),
         );
 
+        // The background refresh generates and caches; the read serves it.
+        writer.refresh(&fixture.alex).await.unwrap();
         let profile = writer.execute(&fixture.alex).await.unwrap();
 
         // Same shape the assembler produced, so no client notices.
@@ -330,9 +437,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unchanged_memory_set_is_served_from_cache() {
-        // The reason this is cached at all: without it every session
-        // start pays for a model call.
+    async fn an_unchanged_memory_set_is_not_regenerated() {
+        // The reason it is cached at all: without it every change would
+        // pay for a model call it did not need. A second refresh over an
+        // unchanged set must reuse the digest rather than rebuild it.
         let fixture = Fixture::new();
         save(&fixture, Category::PreferenceCoding, "prefers pnpm");
 
@@ -342,7 +450,9 @@ mod tests {
         );
         let model = model.unwrap();
 
+        writer.refresh(&fixture.alex).await.unwrap();
         let first = writer.execute(&fixture.alex).await.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
         let second = writer.execute(&fixture.alex).await.unwrap();
 
         assert_eq!(first, second);
@@ -350,6 +460,66 @@ mod tests {
             model.call_count(),
             1,
             "the digest was regenerated for an unchanged memory set"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_read_path_never_calls_the_model_even_when_the_cache_is_stale() {
+        // The whole point of the split: a read must not put a model call —
+        // and so the request timeout — in front of session start. A stale
+        // cache is served as-is; only a background refresh regenerates.
+        let fixture = Fixture::new();
+        save(&fixture, Category::PreferenceCoding, "prefers pnpm");
+
+        let (writer, model) = writer(
+            &fixture,
+            Some(ScriptedChatModel::new().queue(coding_reply())),
+        );
+        let model = model.unwrap();
+
+        writer.refresh(&fixture.alex).await.unwrap();
+        assert_eq!(model.call_count(), 1);
+
+        // A new memory makes the cached coding digest stale. The read must
+        // still not call the model — even though there are no further
+        // scripted replies, so a regeneration attempt would error.
+        save(&fixture, Category::PreferenceCoding, "prefers vitest");
+        let profile = writer.execute(&fixture.alex).await.unwrap();
+
+        assert_eq!(
+            model.call_count(),
+            1,
+            "the read path regenerated a stale digest instead of serving it"
+        );
+        assert!(
+            profile.contains("Uses pnpm"),
+            "the stale digest was not served: {profile}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_cache_read_assembles_rather_than_generating() {
+        // Before any refresh has run there is nothing to serve. The read
+        // must return the user their memories via assembly, not block on a
+        // model and not error.
+        let fixture = Fixture::new();
+        save(&fixture, Category::PreferenceCoding, "prefers pnpm");
+
+        let (writer, model) = writer(
+            &fixture,
+            Some(ScriptedChatModel::new().queue(coding_reply())),
+        );
+
+        let profile = writer.execute(&fixture.alex).await.unwrap();
+
+        assert_eq!(
+            model.unwrap().call_count(),
+            0,
+            "the read path generated instead of assembling a cold cache"
+        );
+        assert!(
+            profile.contains("prefers pnpm"),
+            "assembly should list the memory verbatim: {profile}"
         );
     }
 
@@ -373,8 +543,9 @@ mod tests {
             ),
         );
 
-        writer.execute(&fixture.alex).await.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
         save(&fixture, Category::PreferenceCoding, "prefers vitest");
+        writer.refresh(&fixture.alex).await.unwrap();
         let profile = writer.execute(&fixture.alex).await.unwrap();
 
         assert_eq!(model.unwrap().call_count(), 3);
@@ -404,8 +575,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_provider_outage_serves_the_stale_digest_rather_than_failing() {
-        // Session start must not break because a provider is down.
+    async fn a_provider_outage_during_refresh_leaves_the_last_good_digest() {
+        // A refresh that cannot reach the provider must not wipe the cache:
+        // the read path goes on serving the last good digest.
         let fixture = Fixture::new();
         save(&fixture, Category::PreferenceCoding, "prefers pnpm");
 
@@ -413,12 +585,20 @@ mod tests {
             &fixture,
             Some(ScriptedChatModel::new().queue(coding_reply())),
         );
-        let generated = writer.execute(&fixture.alex).await.unwrap();
-        assert!(generated.contains("Uses pnpm"));
+        writer.refresh(&fixture.alex).await.unwrap();
+        assert!(
+            writer
+                .execute(&fixture.alex)
+                .await
+                .unwrap()
+                .contains("Uses pnpm")
+        );
 
         // A new memory makes the cache stale, and the model is now dry —
-        // the scripted double errors on the next call.
+        // the scripted double errors on the next call. The refresh should
+        // swallow that and leave the cached digest in place.
         save(&fixture, Category::PreferenceCoding, "prefers vitest");
+        writer.refresh(&fixture.alex).await.unwrap();
         let profile = writer.execute(&fixture.alex).await.unwrap();
 
         assert!(
@@ -451,7 +631,8 @@ mod tests {
         );
         let model = model.unwrap();
 
-        writer.execute(&fixture.alex).await.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
         let profile = writer.execute(&fixture.alex).await.unwrap();
 
         assert_eq!(model.call_count(), 1, "an empty digest was re-requested");
@@ -476,6 +657,7 @@ mod tests {
             ),
         );
 
+        writer.refresh(&fixture.alex).await.unwrap();
         let profile = writer.execute(&fixture.alex).await.unwrap();
 
         let budget = DEFAULT_TOKEN_BUDGET * CHARS_PER_TOKEN;
@@ -504,11 +686,13 @@ mod tests {
             ),
         );
 
+        writer.refresh(&fixture.alex).await.unwrap();
         let alex = writer.execute(&fixture.alex).await.unwrap();
         assert!(alex.contains("alex's secret"));
 
         // Sam has no memories at all, so they get the empty-profile text
         // rather than anything of alex's.
+        writer.refresh(&fixture.sam).await.unwrap();
         let sam = writer.execute(&fixture.sam).await.unwrap();
         assert!(
             !sam.contains("alex's secret"),
@@ -535,7 +719,7 @@ mod tests {
             &fixture,
             Some(ScriptedChatModel::new().queue(coding_reply())),
         );
-        writer.execute(&fixture.alex).await.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
 
         let prompt = model.unwrap().prompt(0);
         assert!(prompt.contains("hetzner"), "{prompt}");

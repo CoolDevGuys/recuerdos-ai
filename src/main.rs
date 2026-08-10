@@ -407,6 +407,13 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         clock: std::sync::Arc::clone(&identity.clock),
         max_attempts: config.understanding.max_attempts,
         wake: std::sync::Arc::clone(&understanding.wake),
+        // Refresh the cached profile digest after an ingest changes a
+        // user's memories, so `GET /v1/profile` never has to generate it
+        // on the read path. The writer is the only subscriber.
+        observer: Some(std::sync::Arc::clone(&consolidation.profile_digest_writer)
+            as std::sync::Arc<
+                dyn memories::domain::memory_change_observer::MemoryChangeObserver,
+            >),
     }
     .start(config.understanding.workers)
     .await

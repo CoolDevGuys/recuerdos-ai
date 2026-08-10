@@ -74,6 +74,18 @@ impl Consolidation {
             );
         }
 
+        // Built before the runner so the nightly pass can refresh each
+        // user's profile digest as the catch-all behind the immediate
+        // post-ingest refresh.
+        let profile_digest_writer = Arc::new(ProfileDigestWriter::new(
+            Arc::clone(&memories.repository),
+            Arc::new(SqliteProfileDigestStore::new(Arc::clone(&database)))
+                as Arc<dyn ProfileDigestStore>,
+            Arc::clone(&memories.profile_assembler),
+            understanding.model.clone(),
+            Arc::clone(&identity.clock),
+        ));
+
         let runner = Arc::new(ConsolidationRunner::new(
             Arc::clone(&identity.users),
             Arc::clone(&memories.repository),
@@ -96,6 +108,10 @@ impl Consolidation {
                 state_store: Some(Arc::new(SqliteConsolidationStateStore::new(Arc::clone(
                     &database,
                 ))) as Arc<dyn ConsolidationStateStore>),
+                profile_observer: Some(Arc::clone(&profile_digest_writer)
+                    as Arc<
+                        dyn crate::memories::domain::memory_change_observer::MemoryChangeObserver,
+                    >),
             },
         ));
 
@@ -105,13 +121,7 @@ impl Consolidation {
                 understanding.enabled,
             )),
             runner,
-            profile_digest_writer: Arc::new(ProfileDigestWriter::new(
-                Arc::clone(&memories.repository),
-                Arc::new(SqliteProfileDigestStore::new(database)) as Arc<dyn ProfileDigestStore>,
-                Arc::clone(&memories.profile_assembler),
-                understanding.model.clone(),
-                Arc::clone(&identity.clock),
-            )),
+            profile_digest_writer,
             enabled: config.consolidation.enabled,
             schedule: config.consolidation.schedule.clone(),
         })

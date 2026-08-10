@@ -53,6 +53,7 @@ use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::Memory;
+use crate::memories::domain::memory_change_observer::MemoryChangeObserver;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::blocking::blocking;
 use crate::shared::clock::Clock;
@@ -92,6 +93,14 @@ pub struct ConsolidationRunner {
     /// skipping — every group is examined every run, the pre-7.1
     /// behaviour.
     state_store: Option<Arc<dyn ConsolidationStateStore>>,
+    /// Notified after each user is consolidated, so their derived profile
+    /// digest is caught up with whatever this run merged or retired. This
+    /// is the catch-all behind the immediate post-ingest refresh: it
+    /// covers the changes ingest does not drive — a forget, an edit, a
+    /// merge, an expiry. `None` disables it. A refresh over a user nothing
+    /// changed for is cheap: only a domain whose fingerprint moved calls
+    /// the model.
+    profile_observer: Option<Arc<dyn MemoryChangeObserver>>,
 }
 
 /// The per-run budget limits, from `[consolidation].budget`. A `None` on
@@ -112,6 +121,9 @@ pub struct ConsolidationSettings {
     pub threshold: f32,
     pub budget: BudgetLimits,
     pub state_store: Option<Arc<dyn ConsolidationStateStore>>,
+    /// Refreshed per user at the end of their consolidation. `None` in the
+    /// tests and wherever no profile is derived.
+    pub profile_observer: Option<Arc<dyn MemoryChangeObserver>>,
 }
 
 /// A `(category, subcategory)` group that was examined this run, and the
@@ -242,6 +254,7 @@ impl ConsolidationRunner {
             threshold: settings.threshold,
             budget: settings.budget,
             state_store: settings.state_store,
+            profile_observer: settings.profile_observer,
         }
     }
 
@@ -280,7 +293,18 @@ impl ConsolidationRunner {
             };
 
             match self.consolidate_user(&context, dry_run, &mut budget).await {
-                Ok(theirs) => report.absorb(theirs),
+                Ok(theirs) => {
+                    report.absorb(theirs);
+                    // A real run may have merged or retired memories, which
+                    // makes the user's cached profile digest stale. Catch
+                    // it up now, while their context is already resolved. A
+                    // dry run changed nothing, so there is nothing to
+                    // refresh. Best-effort: the observer logs its own
+                    // trouble and cannot fail the pass.
+                    if !dry_run && let Some(observer) = &self.profile_observer {
+                        observer.memories_changed(&context).await;
+                    }
+                }
                 Err(error) => {
                     // Logged and skipped: one user's failure must not
                     // cost everyone else their consolidation.
@@ -711,6 +735,7 @@ mod tests {
                     threshold,
                     budget: BudgetLimits::default(),
                     state_store: None,
+                    profile_observer: None,
                 },
             ),
             model,
@@ -747,6 +772,7 @@ mod tests {
                     threshold,
                     budget: BudgetLimits::default(),
                     state_store: Some(state),
+                    profile_observer: None,
                 },
             ),
             model,
@@ -1115,6 +1141,7 @@ mod tests {
                     ..BudgetLimits::default()
                 },
                 state_store: None,
+                profile_observer: None,
             },
         );
 
@@ -1299,5 +1326,92 @@ mod tests {
             "the retry should merge the duplicates"
         );
         assert_eq!(recall(&fixture, &fixture.alex, "package manager").len(), 1);
+    }
+
+    /// Records which users it was told changed, so a run can assert the
+    /// profile refresh fired for each.
+    #[derive(Default)]
+    struct RecordingObserver {
+        refreshed: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryChangeObserver for RecordingObserver {
+        async fn memories_changed(&self, context: &UserContext) {
+            self.refreshed
+                .lock()
+                .unwrap()
+                .push(context.handle().to_string());
+        }
+    }
+
+    fn build_runner_with_observer(
+        fixture: &Fixture,
+        observer: Arc<dyn MemoryChangeObserver>,
+    ) -> ConsolidationRunner {
+        // No merger: the profile refresh is downstream of maintenance, so
+        // it must fire even in the model-less installation where merging
+        // does not happen.
+        ConsolidationRunner::new(
+            Arc::clone(&fixture.users) as Arc<dyn UserRepository>,
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
+            Arc::new(MemoryMaintainer::new(
+                Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                Arc::new(fixture.forgetter()),
+            )),
+            None,
+            fixed_clock(),
+            ConsolidationSettings {
+                threshold: STRICT,
+                budget: BudgetLimits::default(),
+                state_store: None,
+                profile_observer: Some(observer),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn a_real_run_refreshes_every_users_profile() {
+        // The nightly catch-all: consolidation may have merged or expired
+        // memories, so each user it touches has their derived profile
+        // refreshed off the read path.
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = build_runner_with_observer(
+            &fixture,
+            Arc::clone(&observer) as Arc<dyn MemoryChangeObserver>,
+        );
+
+        runner.execute(false).await.unwrap();
+
+        // Both users the run walked — a memory-less user is still touched
+        // (expiry, decay), so their profile is refreshed too.
+        let refreshed = observer.refreshed.lock().unwrap();
+        assert!(refreshed.contains(&"alex".to_string()), "{refreshed:?}");
+        assert!(refreshed.contains(&"sam".to_string()), "{refreshed:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_refreshes_no_profile() {
+        // A dry run mutates nothing, so there is nothing to refresh and no
+        // model call to make on a preview.
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+
+        let observer = Arc::new(RecordingObserver::default());
+        let runner = build_runner_with_observer(
+            &fixture,
+            Arc::clone(&observer) as Arc<dyn MemoryChangeObserver>,
+        );
+
+        runner.execute(true).await.unwrap();
+
+        assert!(
+            observer.refreshed.lock().unwrap().is_empty(),
+            "a dry run must not refresh any profile"
+        );
     }
 }

@@ -80,6 +80,7 @@ async fn start(pipeline: Arc<dyn IngestPipeline>, max_attempts: u32) -> Harness 
         clock: Arc::new(SystemClock) as Arc<dyn Clock>,
         max_attempts,
         wake: Arc::new(Notify::new()),
+        observer: None,
     }
     // One worker: these assertions are about ordering and counts, and a
     // pool would make "which worker got it" a source of flake.
@@ -333,6 +334,7 @@ async fn a_restart_resumes_work_left_pending() {
         clock: Arc::new(SystemClock) as Arc<dyn Clock>,
         max_attempts: 3,
         wake: Arc::new(Notify::new()),
+        observer: None,
     }
     .start(1)
     .await
@@ -388,6 +390,7 @@ async fn a_job_held_by_a_crashed_process_is_reclaimed_at_startup() {
         clock: Arc::new(SystemClock) as Arc<dyn Clock>,
         max_attempts: 3,
         wake: Arc::new(Notify::new()),
+        observer: None,
     }
     .start(1)
     .await
