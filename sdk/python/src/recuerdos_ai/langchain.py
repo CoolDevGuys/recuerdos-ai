@@ -107,6 +107,7 @@ class RecuerdosRetriever(BaseRetriever):
                     "created_at": hit.created_at.isoformat(),
                     "vector_rank": hit.matched.vector_rank,
                     "bm25_rank": hit.matched.bm25_rank,
+                    "graph_rank": hit.matched.graph_rank,
                     "source": "recuerdos-ai",
                 },
             )

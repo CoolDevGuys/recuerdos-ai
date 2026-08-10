@@ -227,6 +227,20 @@ def test_search_filters_reach_the_wire() -> None:
     assert bodies[0]["since"].startswith("2026-01-01")
 
 
+def test_as_of_reaches_the_wire_for_time_travel_recall() -> None:
+    bodies: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    client_for(handler).search(
+        "who was on call", as_of=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+
+    assert bodies[0]["as_of"].startswith("2026-01-01")
+
+
 # --- models ----------------------------------------------------------
 
 
@@ -234,7 +248,7 @@ def test_a_search_hit_carries_why_it_matched() -> None:
     hit_body = {
         **MEMORY,
         "score": 0.0325,
-        "matched": {"vector_rank": 1, "bm25_rank": 2},
+        "matched": {"vector_rank": 1, "bm25_rank": 2, "graph_rank": 3},
     }
     ra = client_for(responding(200, {"results": [hit_body], "took_ms": 9}))
 
@@ -243,6 +257,7 @@ def test_a_search_hit_carries_why_it_matched() -> None:
     assert hits[0].content == "User prefers pnpm"
     assert hits[0].matched.vector_rank == 1
     assert hits[0].matched.bm25_rank == 2
+    assert hits[0].matched.graph_rank == 3
 
 
 def test_a_leg_that_did_not_match_reads_as_none_not_zero() -> None:
