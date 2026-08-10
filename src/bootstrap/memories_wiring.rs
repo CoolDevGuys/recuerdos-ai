@@ -218,6 +218,7 @@ pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
             &embeddings.model,
             &base_url(OPENAI_DEFAULT_BASE_URL),
             api_key("embeddings")?,
+            embeddings.max_batch_size,
         )?)),
 
         // Ollama is unauthenticated by design; any configured key is
@@ -227,6 +228,7 @@ pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
             &embeddings.model,
             &base_url(OLLAMA_DEFAULT_BASE_URL),
             None,
+            embeddings.max_batch_size,
         )?)),
 
         // Unreachable via `AppConfig::load`, which validates the provider

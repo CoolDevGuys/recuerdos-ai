@@ -213,6 +213,7 @@ base_url = "http://127.0.0.1:11434"         # empty = this default
 |---|---|
 | `base_url` | The provider's address. Empty means its usual one — set it for an OpenAI-compatible gateway (OpenRouter, Together, a local vLLM, LM Studio) or a non-default Ollama host. |
 | `api_key_env` | The **name** of the env var holding the key, never the key itself — a key in a config file gets committed eventually. Leave empty for a keyless local server. Ignored by `ollama`. |
+| `max_batch_size` | The most texts one request may carry. `0` (default) sends the whole batch at once. Set it when a provider caps the batch — e.g. **`10` for Alibaba DashScope**, which otherwise fails a `reindex` with `"batch size is invalid"`. Larger inputs are split into sequential requests. Ignored by `local`. |
 
 The model's **dimensionality is discovered at startup** by making one
 real embedding request, so there is no dimensions setting to get wrong. A

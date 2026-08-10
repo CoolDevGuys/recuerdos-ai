@@ -69,6 +69,20 @@ base_url = ""
 # embedding request, so a wrong URL, key or model name stops the daemon
 # immediately rather than surfacing as empty recalls later.
 api_key_env = ""
+# The most texts one request to a remote provider may carry. A reindex or a
+# consolidation pass embeds many at once; 0 (the default) sends them in one
+# request, which most providers accept. Set it when a provider caps the
+# batch — e.g. 10 for Alibaba DashScope's OpenAI-compatible endpoint, which
+# rejects a larger batch with "batch size is invalid". Ignored by the local
+# provider, which batches in-process.
+max_batch_size = 0
+
+# Example — Alibaba DashScope (OpenAI-compatible), which caps the batch at 10:
+#   provider       = "openai-compat"
+#   model          = "text-embedding-v3"
+#   base_url       = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+#   api_key_env    = "DASHSCOPE_API_KEY"
+#   max_batch_size = 10
 
 # Example — native Gemini embeddings (asymmetric, task-type-aware):
 #   provider    = "gemini"
