@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "recuerdos-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python client for Recuerdos AI, a self-hostable long-term memory service for AI agents."
 readme = "README.md"
 license = "Apache-2.0"
