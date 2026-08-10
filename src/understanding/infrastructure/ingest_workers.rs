@@ -17,6 +17,7 @@
 //! that shares it.
 
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
+use crate::memories::domain::memory_change_observer::MemoryChangeObserver;
 use crate::shared::clock::Clock;
 use crate::shared::error::Result;
 use crate::understanding::domain::ingest_job::{ClaimedJob, JobQueue};
@@ -50,6 +51,11 @@ pub struct IngestWorkers {
     pub max_attempts: u32,
     /// Pinged by the enqueue path so a new job is picked up immediately.
     pub wake: Arc<Notify>,
+    /// Notified after a job stores memories, so anything derived from them
+    /// — today, the cached profile digest — is refreshed off the request
+    /// path. `None` in installations without one, and in the tests that
+    /// exercise the queue machinery on its own.
+    pub observer: Option<Arc<dyn MemoryChangeObserver>>,
 }
 
 /// Stops the pool and waits for in-flight jobs to finish.
@@ -198,6 +204,24 @@ impl IngestWorkers {
                         %error,
                         "ingest job succeeded but could not be marked done"
                     );
+                }
+
+                // A job that stored nothing (small talk, a duplicate)
+                // changed no memory, so nothing derived from them is
+                // stale. Only refresh when something was actually written.
+                if !memory_ids.is_empty()
+                    && let Some(observer) = &self.observer
+                {
+                    // Detached rather than awaited: the refresh calls a
+                    // model and can take as long as a generation does, and
+                    // the worker must be free to drain the next job in the
+                    // meantime. It is idempotent and self-healing — a drop
+                    // on shutdown costs at most a stale digest until the
+                    // next change or the nightly sweep — so it is safe to
+                    // let go of.
+                    let observer = Arc::clone(observer);
+                    let context = context.clone();
+                    tokio::spawn(async move { observer.memories_changed(&context).await });
                 }
             }
             Err(error) => {

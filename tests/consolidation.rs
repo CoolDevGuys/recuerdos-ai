@@ -465,16 +465,21 @@ async fn distilling_requires_the_write_scope() {
 }
 
 #[tokio::test]
-async fn the_profile_is_generated_once_and_reused_until_memories_change() {
-    // The resource contract is unchanged from Phase 3 — same route, same
-    // media type, same markdown — but the body is now written rather
-    // than listed, and cached. Caching is the load-bearing part: this is
-    // read at the start of every session by every client.
-    let instance = Instance::with_model(vec![
-        json!({"digest": "- Uses pnpm, never npm or yarn"}),
-        json!({"digest": "- Uses pnpm and Vitest; never npm or yarn"}),
-    ])
-    .await;
+async fn the_profile_read_serves_without_calling_the_model() {
+    // The load-bearing guarantee behind this whole context's design: the
+    // read path must never put a model call — and so the daemon's 30s
+    // request timeout — in front of `GET /v1/profile`. A slow provider
+    // once turned a stale digest into a 408 for the read; it no longer
+    // can, because the read only serves the cached digest (or assembles),
+    // and generation happens off to the side.
+    //
+    // Here a provider is configured but no digest has been generated yet,
+    // so the read assembles from the stored memory and calls the model
+    // zero times. Generation itself — the digest being written and reused
+    // until its memories change — is driven by the ingest worker and the
+    // nightly consolidation run, and is covered by the unit tests for
+    // `ProfileDigestWriter` and `ConsolidationRunner`.
+    let instance = Instance::with_model(vec![]).await;
 
     instance
         .post(
@@ -485,24 +490,21 @@ async fn the_profile_is_generated_once_and_reused_until_memories_change() {
 
     let first = instance.profile().await;
     assert!(first.starts_with("# Memory profile: alex"), "{first}");
-    assert!(first.contains("## How they work"), "{first}");
-    assert!(first.contains("Uses pnpm, never npm or yarn"), "{first}");
+    assert!(
+        first.contains("prefers pnpm"),
+        "a cold cache should assemble the memory verbatim: {first}"
+    );
 
-    // Nothing changed: served from cache, no second model call.
+    // The read made no model call — the fix, stated as an assertion.
+    assert_eq!(
+        instance.model_calls().await,
+        0,
+        "the profile read called the model on the request path"
+    );
+
+    // And it stays that way: re-reading is stable and still model-free.
     assert_eq!(instance.profile().await, first);
-    assert_eq!(instance.model_calls().await, 1);
-
-    // A new memory makes it stale, and it regenerates.
-    instance
-        .post(
-            "/v1/memories:direct",
-            json!({"content": "prefers vitest", "category": "preference.coding"}),
-        )
-        .await;
-
-    let second = instance.profile().await;
-    assert!(second.contains("Uses pnpm and Vitest"), "{second}");
-    assert_eq!(instance.model_calls().await, 2);
+    assert_eq!(instance.model_calls().await, 0);
 }
 
 #[tokio::test]
