@@ -1543,7 +1543,7 @@ would otherwise be re-litigated mid-build.
   - `just check` is green (fmt, clippy `-D warnings`, boundary script, full suite — 679 bin
     tests plus the integration suites).
 
-#### Task 7.3.6 — Measure, document, decide (M)
+#### Task 7.3.6 — Measure, document, decide (M) ✅ DONE
 
 - **Goal:** the number that justifies the phase, and the docs that make it usable.
 - **Steps:** re-run `recuerdos-ai eval`; record the relational delta **and** that no other
@@ -1587,22 +1587,36 @@ would otherwise be re-litigated mid-build.
     leapfrog a strong direct match but still reaches the top-k. A safety net for corpora
     where the hop surfaces a memory the other legs never saw; pinned by unit tests rather
     than this eval, where such a hit doesn't happen to take #1. *(Implemented, same seam.)*
-  - **[ ] 3. Cross-encoder reranker.** A final stage that re-scores the fused top-N with a
-    model reading `(query, memory)` jointly. The highest-ceiling option — it could push
-    precision *past* the pre-graph number — and fits the provider-optional pattern, but
-    adds a model to the hot path (local latency or egress). Deferred; revisit if weighting
-    proves too blunt in real use.
-  - **[ ] 4. PPR / edge-weighted hops.** Rank *within* the graph leg so the terminal answer
-    beats the bridge, rather than correcting it in fusion. The graph-native fix; heaviest,
-    and gated by the plan on "hop expansion returning too much", which isn't today's
-    problem. Deferred.
-  - **[ ] 5. Query routing.** Run/full-weight the graph leg only when the two direct legs
-    are uncertain. Cheap in principle, but needs a calibrated confidence signal. Deferred.
+  Options 3–5 below were **prototyped and measured, then reverted** — the policy is to ship
+  only changes that move the number, and none of them does. They are recorded here as tried,
+  not open, so the evaluation isn't repeated blind. (The prototype lives in git history at the
+  reverted commit for anyone who wants to resurrect one against a different corpus.)
+  - **[✗] 3. Cross-encoder reranker.** A final stage re-scoring the fused top-N with a local
+    fastembed model reading `(query, memory)` jointly. Built end to end (`Reranker` trait,
+    `FastembedReranker`, `[rerank]` config, recaller wiring) and measured: **neutral** at a
+    window equal to the limit, and it **regressed** recall with a wider window (it evicted a
+    good paraphrase hit, recall@5 91.7% → 87.5%). Reverted. Also carries real cost — a second
+    ~1 GB ONNX model on the hot path.
+  - **[✗] 4. Specificity hop ranking (edge-weighting).** Rank *within* the graph leg by inverse
+    entity degree so a rare-entity answer beats a hub bridge. Built (`HopRanking::Specificity`)
+    and measured **neutral**: even when it lifts the terminal answer to graph-rank 1, option 1's
+    0.3 fusion weight keeps that unanchored 2-hop answer out of the top-5, so the numbers don't
+    move. (Full PPR was skipped for the same reason — it favours the same hub nodes.) Reverted.
+  - **[✗] 5. Query routing.** Skip the hop when the vector and keyword legs agree on the top
+    result. Built (`route_direct_first`) and measured **neutral** — on the relational cases the
+    direct legs rarely agree, so the hop still runs. Reverted.
+- **Why none of 3–5 helps (the finding worth keeping).** The one relational case still missed is
+  the true 2-hop chain (billing service → Meridian team → Nadia), whose link lives *only* in the
+  graph: a text reranker can't see it, graph centrality (PPR included) favours the bridge over
+  the answer, and any fusion weight high enough to surface the unanchored answer is the same one
+  option 1 *lowered* to protect precision. 62.5% is the ceiling this corpus has left; beating it
+  needs a better embedding model or a query-expansion step, not a reranking tweak.
 - **DoD:**
   - [x] `precision@1` ≥ its pre-graph value (62.5%) with `relational` recall@5 held at 85.7%
-        and no other `by_kind` regressed; re-recorded in `eval/baseline.json`.
+        and no other `by_kind` regressed; recorded in `eval/baseline.json`.
   - [x] Knobs are config (`[graph].rank_weight`, `[graph].unanchored_floor`), documented,
-        and default-tuned; the empty-graph-leg identity guarantee still holds.
+        and default-tuned; the empty-graph-leg identity guarantee still holds. Options 3–5
+        evaluated and declined — only measured wins ship.
 
 #### 7.3 sequencing & risk
 
@@ -1615,7 +1629,7 @@ would otherwise be re-litigated mid-build.
 | 7.3.4 Graph-hop leg | L | **High** | 7.3.6 | ✅ Done — seeding + recursive-CTE hop as a third RRF leg; `as_of`/`graph_rank` surfaced; perf gate left for 7.3.6 |
 | 7.3.5 Budgeted backfill | M | Low | — | ✅ Done — `graph backfill --entities` (zero-LLM) and `--relations` (budgeted, resumable via a V9 watermark); `--dry-run` spends nothing |
 | 7.3.6 Measure + docs | M | Low | — | ✅ Done — eval wired to the graph; relational 71.4% → 85.7% (no other kind regressed); `[graph]` default flipped on; docs + project-plan updated |
-| 7.3.7 Precision recovery | S | Low | — | ✅ Done (opts 1–2) — weighted graph RRF (`rank_weight = 0.3`) + unanchored floor; `precision@1` back to 62.5% with `relational` held at 85.7%. Reranker / PPR / routing menu documented, deferred |
+| 7.3.7 Precision recovery | S | Low | — | ✅ Done — weighted graph RRF (`rank_weight = 0.3`) + unanchored floor recovered `precision@1` to 62.5% with `relational` held at 85.7%. Reranker / specificity hops / routing were prototyped, measured neutral-to-negative, and reverted — only measured wins ship |
 
 **The four risks worth naming up front:**
 
