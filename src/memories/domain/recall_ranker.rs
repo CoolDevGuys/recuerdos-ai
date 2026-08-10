@@ -72,6 +72,17 @@ const RRF_K: f32 = 60.0;
 /// sort key.
 const MULTIPLIER_FLOOR: f32 = 0.8;
 
+/// The graph-leg weight `new` uses: `1.0`, i.e. the graph leg contributes
+/// its full `1/(k+rank)` term, byte-for-byte the pre-7.3.7 behaviour. The
+/// precision-recovery tuning is opt-in — wiring applies the configured
+/// weight via [`RecallRanker::with_graph_ranking`], so a plain `new` ranker
+/// (and every test built on one) is unchanged.
+const DEFAULT_GRAPH_RANK_WEIGHT: f32 = 1.0;
+
+/// The unanchored-floor `new` uses: `0`, i.e. no cap. See
+/// [`RecallRanker::with_graph_ranking`] for what a non-zero value does.
+const DEFAULT_GRAPH_UNANCHORED_FLOOR: usize = 0;
+
 /// One leg's opinion: memory ids in rank order, best first.
 #[derive(Debug, Clone, Default)]
 pub struct RankedIds(pub Vec<MemoryId>);
@@ -100,6 +111,21 @@ pub struct ScoredMemory {
 
 pub struct RecallRanker {
     recency_half_life_days: f32,
+    /// Weight on the graph leg's RRF term (Task 7.3.7). `1.0` is the raw
+    /// three-leg fusion; below `1.0` lets the graph *add* recall without
+    /// *displacing* a memory the vector or keyword leg already ranked well.
+    /// The graph brought relational recall from 71.4% to 85.7%, but at full
+    /// weight it also let a graph-boosted "bridge" memory outrank the direct
+    /// answer on one case, nudging precision@1 down; this is the dial that
+    /// buys the precision back.
+    graph_rank_weight: f32,
+    /// The rank an *unanchored* graph hit — one neither the vector nor the
+    /// keyword leg found — is capped at (Task 7.3.7). Its RRF term may not
+    /// exceed `1/(k + floor)`, so a memory reached only by a relation hop
+    /// cannot leapfrog a direct match ranked at or above `floor`, while
+    /// still ranking ahead of weaker direct matches (staying in the top-k
+    /// that recall is measured over). `0` disables the cap.
+    graph_unanchored_floor: usize,
 }
 
 impl RecallRanker {
@@ -111,7 +137,22 @@ impl RecallRanker {
             } else {
                 recency_half_life_days as f32
             },
+            graph_rank_weight: DEFAULT_GRAPH_RANK_WEIGHT,
+            graph_unanchored_floor: DEFAULT_GRAPH_UNANCHORED_FLOOR,
         }
+    }
+
+    /// Sets the graph-leg ranking knobs (Task 7.3.7 — precision recovery).
+    ///
+    /// Both default to a no-op (`weight = 1.0`, `floor = 0`), so this only
+    /// changes behaviour when wiring passes the configured `[graph]` values.
+    /// It touches nothing about the vector or keyword legs: a query that
+    /// produces no graph hits ranks identically regardless of either knob,
+    /// which is what keeps the empty-graph-leg identity guarantee intact.
+    pub fn with_graph_ranking(mut self, rank_weight: f32, unanchored_floor: usize) -> Self {
+        self.graph_rank_weight = rank_weight;
+        self.graph_unanchored_floor = unanchored_floor;
+        self
     }
 
     /// Fuses the vector and keyword legs and returns memories best-first.
@@ -190,9 +231,34 @@ impl RecallRanker {
     fn score(&self, memory: &Memory, detail: MatchDetail, now: DateTime<Utc>) -> f32 {
         let relevance = reciprocal_rank(detail.vector_rank)
             + reciprocal_rank(detail.bm25_rank)
-            + reciprocal_rank(detail.graph_rank);
+            + self.graph_relevance(detail);
 
         relevance * self.recency_multiplier(memory.created_at(), now) * quality(memory)
+    }
+
+    /// The graph leg's contribution to relevance, after the two 7.3.7
+    /// precision knobs. Zero when the graph did not reach this memory —
+    /// which is what makes every downstream ranking identical when the
+    /// graph leg is empty, whatever the knobs are set to.
+    fn graph_relevance(&self, detail: MatchDetail) -> f32 {
+        let Some(rank) = detail.graph_rank else {
+            return 0.0;
+        };
+
+        // Option 1 — weighted RRF: scale the graph term down so it rides
+        // alongside the other two legs without overpowering them.
+        let mut term = self.graph_rank_weight * reciprocal_rank(Some(rank));
+
+        // Option 2 — unanchored floor: a memory *only* the graph found has
+        // no vector or keyword rank to stand on, so cap its term at the
+        // floor rank's reciprocal. It can still beat weaker direct matches
+        // (and reach the top-k), but not a strong one.
+        let unanchored = detail.vector_rank.is_none() && detail.bm25_rank.is_none();
+        if unanchored && self.graph_unanchored_floor > 0 {
+            term = term.min(reciprocal_rank(Some(self.graph_unanchored_floor)));
+        }
+
+        term
     }
 
     fn recency_multiplier(&self, created_at: DateTime<Utc>, now: DateTime<Utc>) -> f32 {
@@ -501,6 +567,162 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].match_detail.graph_rank, Some(1));
         assert!(result[0].score > 0.0);
+    }
+
+    fn score_of(result: &[ScoredMemory], id: MemoryId) -> f32 {
+        result.iter().find(|s| s.memory.id() == id).unwrap().score
+    }
+
+    #[test]
+    fn the_graph_weight_scales_the_leg_but_never_the_others() {
+        // Option 1 (Task 7.3.7). A memory only the graph reached is scored
+        // purely from the graph term, so halving the weight halves its
+        // score — the dial that lets a hop add recall without shouting down
+        // the vector and keyword legs. `new`'s default weight is 1.0, so the
+        // graph leg is untouched unless wiring configures it.
+        let hopped = memory();
+        let graph = ids(&[&hopped]);
+        let candidates = || vec![hopped.clone()];
+
+        let full = RecallRanker::new(90) // weight 1.0
+            .rank_with_graph(
+                &RankedIds::default(),
+                &RankedIds::default(),
+                &graph,
+                candidates(),
+                now(),
+            );
+        let half = RecallRanker::new(90)
+            .with_graph_ranking(0.5, 0)
+            .rank_with_graph(
+                &RankedIds::default(),
+                &RankedIds::default(),
+                &graph,
+                candidates(),
+                now(),
+            );
+
+        assert!(
+            (score_of(&half, hopped.id()) - 0.5 * score_of(&full, hopped.id())).abs() < 1e-6,
+            "halving the graph weight did not halve a graph-only memory's score"
+        );
+    }
+
+    #[test]
+    fn down_weighting_the_graph_leg_returns_a_direct_match_to_the_top() {
+        // Option 1, at the ordering it exists to fix. `bridge` is reached by
+        // a hop *and* ranked (weakly) by the keyword leg — two terms — so at
+        // full weight it outscores `answer`, a memory the keyword leg ranked
+        // first with no hop. That is the reorder the graph cost precision@1
+        // for. Shrinking the hop's contribution returns the direct answer to
+        // the top, and `bridge` is still returned — precision, not recall.
+        let answer = memory();
+        let bridge = memory();
+
+        // `answer` is keyword rank 1; `bridge` is keyword rank 10 (the eight
+        // fillers stand in for stronger keyword matches ahead of it) plus
+        // graph rank 1. At rank 10 the keyword term alone can't catch rank 1,
+        // so the hop is what puts `bridge` over the top at full weight.
+        let mut keyword = vec![answer.id()];
+        keyword.extend(std::iter::repeat_with(MemoryId::new).take(8));
+        keyword.push(bridge.id());
+        let keyword = RankedIds(keyword);
+        let graph = ids(&[&bridge]);
+        let candidates = || vec![answer.clone(), bridge.clone()];
+
+        let full = RecallRanker::new(90).rank_with_graph(
+            &RankedIds::default(),
+            &keyword,
+            &graph,
+            candidates(),
+            now(),
+        );
+        assert_eq!(
+            ordered(&full)[0],
+            bridge.id(),
+            "at full weight the bridge should lead"
+        );
+
+        let damped = RecallRanker::new(90)
+            .with_graph_ranking(0.1, 0)
+            .rank_with_graph(&RankedIds::default(), &keyword, &graph, candidates(), now());
+        assert_eq!(
+            ordered(&damped)[0],
+            answer.id(),
+            "down-weighting the graph leg should return the direct answer to the top"
+        );
+        assert!(
+            damped.iter().any(|s| s.memory.id() == bridge.id()),
+            "the bridge must still be returned — precision, not recall, is the lever"
+        );
+    }
+
+    #[test]
+    fn the_unanchored_floor_caps_a_graph_only_hit_below_a_strong_direct_match() {
+        // Option 2 (Task 7.3.7), isolated at full weight. `unanchored` is
+        // reached only by a hop (no vector or keyword rank); `direct` is a
+        // top keyword hit. Without the floor a rank-1 hop ties a rank-1
+        // keyword match; a floor of 3 caps the hop at a rank-3 term, so the
+        // direct match wins — yet the hop is still returned, keeping the
+        // top-k that recall is measured over.
+        let direct = memory();
+        let unanchored = memory();
+        let keyword = ids(&[&direct]);
+        let graph = ids(&[&unanchored]);
+        let candidates = || vec![direct.clone(), unanchored.clone()];
+
+        let no_floor = RecallRanker::new(90).rank_with_graph(
+            &RankedIds::default(),
+            &keyword,
+            &graph,
+            candidates(),
+            now(),
+        );
+        assert!(
+            (score_of(&no_floor, direct.id()) - score_of(&no_floor, unanchored.id())).abs() < 1e-6,
+            "with no floor a rank-1 hop and a rank-1 keyword match should tie on score"
+        );
+
+        let floored = RecallRanker::new(90)
+            .with_graph_ranking(1.0, 3)
+            .rank_with_graph(&RankedIds::default(), &keyword, &graph, candidates(), now());
+        assert!(
+            score_of(&floored, direct.id()) > score_of(&floored, unanchored.id()),
+            "the floor should let the direct match outrank the graph-only hit"
+        );
+        assert_eq!(ordered(&floored)[0], direct.id());
+        assert!(
+            floored.iter().any(|s| s.memory.id() == unanchored.id()),
+            "the graph-only hit must still be returned"
+        );
+    }
+
+    #[test]
+    fn the_unanchored_floor_leaves_an_anchored_hop_untouched() {
+        // The floor targets *only* memories the graph alone found. A memory
+        // both the vector leg and a hop reached is anchored, so its graph
+        // term is not capped — the cap must not punish agreement between
+        // the legs.
+        let anchored = memory();
+        let leg = ids(&[&anchored]);
+        let candidates = || vec![anchored.clone()];
+
+        let without = RecallRanker::new(90).rank_with_graph(
+            &leg,
+            &RankedIds::default(),
+            &leg,
+            candidates(),
+            now(),
+        );
+        let with = RecallRanker::new(90)
+            .with_graph_ranking(1.0, 3)
+            .rank_with_graph(&leg, &RankedIds::default(), &leg, candidates(), now());
+
+        assert_eq!(
+            score_of(&without, anchored.id()),
+            score_of(&with, anchored.id()),
+            "the floor changed the score of an anchored hop"
+        );
     }
 
     #[test]

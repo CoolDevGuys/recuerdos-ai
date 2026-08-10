@@ -242,14 +242,19 @@ class Client:
         categories: list[str] | None = None,
         tags: list[str] | None = None,
         since: datetime | None = None,
+        as_of: datetime | None = None,
         include_superseded: bool = False,
     ) -> list[SearchHit]:
-        """Hybrid recall: semantic and keyword, fused by reciprocal rank.
+        """Hybrid recall: semantic, keyword, and a graph hop, fused by
+        reciprocal rank.
 
         Ask the question you actually have — "which package manager does
         the user prefer" — rather than keywords. Exact identifiers work
         too (``useQuery``, a ticket id), because the keyword leg matches
-        literal tokens the vector leg blurs.
+        literal tokens the vector leg blurs. When the query names an entity
+        the store knows, a third leg walks the entity graph to reach a
+        memory that answers it without sharing a word — ``hit.matched``
+        carries a ``graph_rank`` when that is why a result appeared.
 
         An empty result means nothing is stored on the subject, not that
         the user has no opinion.
@@ -259,7 +264,10 @@ class Client:
             limit: Capped at 50 server-side.
             categories: OR-ed. Empty means all.
             tags: **AND**-ed — a memory must carry every one.
-            since: Excludes memories created before it.
+            since: Excludes memories *created* before it (transaction time).
+            as_of: Reads the graph hop as of this instant in *valid* time —
+                "who owned this before the reorg?". Only the graph leg is
+                affected; omit for the current view.
             include_superseded: Include memories a later one replaced.
         """
         body: dict[str, Any] = {"query": query}
@@ -271,6 +279,8 @@ class Client:
             body["tags"] = tags
         if since is not None:
             body["since"] = since.isoformat()
+        if as_of is not None:
+            body["as_of"] = as_of.isoformat()
         if include_superseded:
             body["include_superseded"] = True
 

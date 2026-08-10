@@ -122,9 +122,10 @@ unrecallable memory.
 
 ## Reading
 
-### `search(query, *, limit, categories, tags, since, include_superseded) -> list[SearchHit]`
+### `search(query, *, limit, categories, tags, since, as_of, include_superseded) -> list[SearchHit]`
 
-Hybrid recall — semantic and keyword legs fused by reciprocal rank.
+Hybrid recall — semantic, keyword, and a graph-hop leg fused by reciprocal
+rank.
 
 ```python
 hits = ra.search("which package manager?", limit=3, categories=["preference.coding"])
@@ -134,11 +135,16 @@ for hit in hits:
 
 Ask the question you actually have rather than keywords. Exact
 identifiers (`useQuery`, a ticket id) work too — that is the keyword
-leg's reason for existing.
+leg's reason for existing. When the query names an entity the store knows,
+a third leg walks the entity graph to reach a memory that answers it
+without sharing a word (`hit.matched.graph_rank` is set when that is why a
+result appeared).
 
 `categories` are OR-ed; `tags` are **AND**-ed. `hit.matched` says which
 leg found the result, so a surprising ranking can be explained rather
-than merely distrusted.
+than merely distrusted. `as_of` (a `datetime`) reads the graph hop in
+*valid* time — "who owned this before the reorg?" — leaving the vector and
+keyword legs untouched.
 
 ### `get(memory_id) -> Memory`
 

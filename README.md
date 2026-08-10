@@ -21,7 +21,7 @@ returning both.
 ```
                     ┌───────────────┐
 Claude Code ─MCP──▶ │               │  extract → reconcile → store
-opencode ────MCP──▶ │  Recuerdos AI │  recall: vector + BM25, fused
+opencode ────MCP──▶ │  Recuerdos AI │  recall: vector + BM25 + graph, fused
 Hermes ─────REST──▶ │     daemon    │  nightly: merge, decay, expire
 LangChain ──SDK───▶ │               │
                     └───────────────┘
@@ -32,6 +32,7 @@ LangChain ──SDK───▶ │               │
 - 🔒 **Yours** — SQLite on your disk, runs offline, no account, Apache-2.0.
 - 🧩 **Any agent, any LLM** — REST + MCP, provider-agnostic, one shared memory.
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
+- 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. On by default.
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
 ---
@@ -60,6 +61,7 @@ every tool and LLM you run.
 | Export, inspect, back up | ❌ | ✅ |
 | Tags, categories, custom metadata | ❌ | ✅ |
 | Semantic **and** keyword search | opaque | ✅ hybrid, fused |
+| Relational (multi-hop) recall | ❌ | ✅ entity graph, on by default |
 | Dedup & contradiction resolution | ❌ | ✅ |
 | Importance scoring & memory aging | ❌ | ✅ |
 | Multiple users & agents, one shared store | ❌ | ✅ |
@@ -327,7 +329,8 @@ It recalls the preference without being told. ✨
 
 | | |
 |---|---|
-| **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25), fused by reciprocal rank. Paraphrases *and* exact identifiers. |
+| **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25) + a graph hop, fused by reciprocal rank. Paraphrases, exact identifiers, *and* connections. |
+| **Relational recall** | A third leg walks an entity/relation graph, so "who owns the billing service's data?" reaches the memory naming the database — no shared words needed. Bi-temporal, so you can ask what was true *before* a change. On by default; the eval put relational recall@5 at 85.7% (vs 71.4% without it). |
 | **Understands what it stores** | Raw text in, atomic labelled memories out. One sentence with two unrelated facts becomes two separately recallable memories. |
 | **Resolves contradictions** | "We moved to Hetzner" supersedes "we deploy on Fly.io" — the old one is retained for audit, gone from recall. |
 | **Session distillation** | Hand over a finished session; keep the two or three things that outlive it. |
@@ -476,9 +479,10 @@ cleanly across every phase.
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ✅ |
 | 6 — Release | SDK, docs, packaging | ✅ |
 
-**Shipped since 1.0:** a relational recall layer — an entity/relation
-graph that recall hops over as a third leg, on by default (the eval put
-relational recall@5 at 85.7%, up from 71.4% without it).
+**Shipped in `v0.2.0`:** a relational recall layer — a bi-temporal
+entity/relation graph that recall hops over as a third leg, on by default
+(the eval put relational recall@5 at 85.7%, up from 71.4% without it). See
+the [CHANGELOG](docs/CHANGELOG.md#v020--graph-strategy-b-relational-recall).
 
 **On the roadmap:** a web dashboard, Postgres/Qdrant storage backends, and
 user-visible collections/workspaces. See

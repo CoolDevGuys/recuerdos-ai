@@ -269,6 +269,18 @@ pub struct GraphConfig {
     /// The most graph-found memories a hop contributes to a recall, before
     /// fusion trims them against the vector and keyword legs.
     pub hop_limit: usize,
+    /// Weight on the graph leg during rank fusion (Task 7.3.7). `1.0` is the
+    /// raw three-leg RRF; below `1.0` lets a hop *add* relational recall
+    /// without *displacing* a memory the vector or keyword leg already
+    /// ranked well — the dial that buys back the precision@1 the graph cost
+    /// at full weight. Must be `>= 0`.
+    pub rank_weight: f32,
+    /// The rank an *unanchored* graph hit — one neither the vector nor the
+    /// keyword leg found — is capped at (Task 7.3.7). Its fusion term may
+    /// not exceed that of a direct match at this rank, so a memory reached
+    /// only by a relation hop cannot leapfrog a strong direct match, while
+    /// still outranking weaker ones. `0` disables the cap.
+    pub unanchored_floor: usize,
     /// Bounds one `graph backfill --relations` pass (Task 7.3.5), reusing
     /// the same budget shape as consolidation: an existing corpus gains
     /// relations a bounded number of model calls at a time, resuming where
@@ -294,6 +306,16 @@ impl Default for GraphConfig {
             extract_relations: true,
             max_hops: 2,
             hop_limit: 50,
+            // Tuned in Task 7.3.7 against the eval: at weight 0.3 the graph
+            // keeps its recall gain (relational recall@5 85.7%) while
+            // precision@1 returns to its pre-graph 62.5% — the direct answer
+            // to "what database does the team's service use", ranked first by
+            // the vector leg, stops losing #1 to the relation bridge above
+            // it. The floor is the belt to that suspenders: a safety cap on
+            // memories only the graph found, pinned by unit tests rather than
+            // this eval, where such hits do not happen to take #1.
+            rank_weight: 0.3,
+            unanchored_floor: 3,
             backfill_budget: ConsolidationBudgetConfig::default(),
         }
     }
@@ -447,6 +469,14 @@ impl AppConfig {
                 issues.push(
                     "[graph].hop_limit is 0 — the graph leg would return nothing".to_string(),
                 );
+            }
+            // Negatives *or* NaN, either of which would make the graph leg
+            // subtract from or corrupt a memory's fused score.
+            if self.graph.rank_weight < 0.0 || self.graph.rank_weight.is_nan() {
+                issues.push(format!(
+                    "[graph].rank_weight {} is invalid — it must be >= 0.0",
+                    self.graph.rank_weight
+                ));
             }
         }
 

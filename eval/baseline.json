@@ -1,6 +1,6 @@
 {
   "recall_at_k": 91.66666666666666,
-  "precision_at_1": 58.333333333333336,
+  "precision_at_1": 62.5,
   "cases": 24,
   "by_kind": {
     "category-filter": 100.0,

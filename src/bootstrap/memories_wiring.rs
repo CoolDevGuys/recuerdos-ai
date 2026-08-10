@@ -131,7 +131,8 @@ impl Memories {
                 Arc::clone(&vectors),
                 Arc::clone(&text),
                 Arc::clone(&embedder),
-                RecallRanker::new(config.retrieval.recency_half_life_days),
+                RecallRanker::new(config.retrieval.recency_half_life_days)
+                    .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor),
                 Arc::clone(&clock),
                 graph.clone(),
                 config.graph.max_hops,

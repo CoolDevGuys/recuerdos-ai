@@ -62,7 +62,7 @@ Each `Document` carries the memory as `page_content`, plus metadata:
 | `id` | The memory id — cite it, or pass it to `forget` |
 | `category`, `tags`, `confidence` | For filtering downstream |
 | `score` | Fused rank score |
-| `vector_rank`, `bm25_rank` | Which leg matched; `None` means that leg did not return it |
+| `vector_rank`, `bm25_rank`, `graph_rank` | Which leg matched; `None` means that leg did not return it. `graph_rank` is set when an entity-graph hop reached the memory |
 | `source` | Always `"recuerdos-ai"`, for mixed-retriever chains |
 
 `limit` defaults to 5 and should stay small. These go into every prompt,

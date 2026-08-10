@@ -53,6 +53,9 @@ class MatchDetail(_Model):
 
     vector_rank: int | None = None
     bm25_rank: int | None = None
+    #: Rank in the graph leg, set only when an entity-graph hop reached this
+    #: memory — the case where it answers a question it shares no words with.
+    graph_rank: int | None = None
 
 
 class SearchHit(Memory):

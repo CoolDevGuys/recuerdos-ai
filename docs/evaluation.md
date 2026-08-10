@@ -1,6 +1,6 @@
 # Retrieval quality
 
-**Status: Phase 4.**
+**Status: Phase 4; `relational` cases and the graph leg added in 7.3.6–7.3.7.**
 
 The service is a bet that asking a question returns the memory that
 answers it. Nothing else in the test suite protects that.
@@ -64,7 +64,8 @@ single number hides.
 | `exact-token` | An identifier like `useQuery`. Vector search alone cannot answer these — this is why retrieval is hybrid |
 | `current-fact` | The read side of reconciliation: a superseded answer must not come back |
 | `needle` | One relevant memory in a corpus of unrelated ones |
-| `category-filter`, `tag-filter` | Filters narrow correctly and do not drop valid hits |
+| `relational` | The answer lives in a memory that never names the query's subject — reachable only by walking the entity graph a hop or two ("who leads the team that owns the billing service?"). This is the case the graph leg exists for; on the committed corpus it scores 85.7%, up from 71.4% with the graph off |
+| `category-filter`, `subcategory-filter`, `tag-filter` | Filters narrow correctly and do not drop valid hits |
 
 ## The gate
 
