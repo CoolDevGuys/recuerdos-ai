@@ -35,6 +35,16 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    /// How long an ingest request may run before the daemon returns 408.
+    ///
+    /// Ingestion is an LLM pipeline — extraction plus a reconciliation
+    /// call per candidate — and a `wait: true` save runs it inline; a
+    /// batch runs it once per item. On a slow local model that can take
+    /// well past the 30s the read routes are capped at, so the write
+    /// routes (`/v1/memories`, `/v1/memories/batch`) get their own,
+    /// longer limit. Everything else stays at 30s: a read that takes this
+    /// long is stuck, not working.
+    pub ingest_timeout_secs: u64,
     pub mcp: McpConfig,
 }
 
@@ -43,6 +53,7 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".to_string(),
             port: 7070,
+            ingest_timeout_secs: 180,
             mcp: McpConfig::default(),
         }
     }
@@ -397,6 +408,12 @@ impl AppConfig {
         if self.server.port == 0 {
             issues.push("[server].port is 0".to_string());
         }
+        if self.server.ingest_timeout_secs == 0 {
+            issues.push(
+                "[server].ingest_timeout_secs is 0 — an ingest request would time out instantly"
+                    .to_string(),
+            );
+        }
 
         if !STORAGE_BACKENDS.contains(&self.storage.backend.as_str()) {
             issues.push(format!(
@@ -541,6 +558,7 @@ mod tests {
         Jail::expect_with(|_jail| {
             let config = AppConfig::load(None).expect("defaults must be valid");
             assert_eq!(config.server.port, 7070);
+            assert_eq!(config.server.ingest_timeout_secs, 180);
             assert_eq!(config.storage.backend, "embedded");
             assert_eq!(config.understanding.provider, "none");
             Ok(())
@@ -617,6 +635,23 @@ mod tests {
                 err.0.len(),
                 2,
                 "expected exactly these two issues: {:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_zero_ingest_timeout_is_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file("recuerdos-ai.toml", "[server]\ningest_timeout_secs = 0\n")?;
+
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0
+                    .iter()
+                    .any(|m| m.contains("[server].ingest_timeout_secs is 0")),
+                "a zero write timeout would 408 every ingest: {:?}",
                 err.0
             );
             Ok(())

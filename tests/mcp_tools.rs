@@ -91,6 +91,46 @@ async fn the_client_sees_the_three_memory_tools() {
         names.contains(&"memory_forget".to_string()),
         "got {names:?}"
     );
+    assert!(
+        names.contains(&"memory_save_batch".to_string()),
+        "got {names:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_save_stores_every_item_and_they_recall() {
+    // The batch tool over the real stdio shim: several memories in one
+    // call, each stored and independently recallable.
+    let client = McpClient::connect().await;
+
+    let saved = client
+        .call(
+            "memory_save_batch",
+            json!({"items": [
+                {"content": "User prefers pnpm", "category": "preference.coding"},
+                {"content": "The backend runs on Hetzner", "category": "fact.project"}
+            ]}),
+        )
+        .await;
+    assert!(saved.contains("Saved"), "{saved}");
+
+    assert!(
+        client
+            .call("memory_recall", json!({"query": "package manager"}))
+            .await
+            .contains("pnpm"),
+        "the first batch item is not recallable"
+    );
+    assert!(
+        client
+            .call(
+                "memory_recall",
+                json!({"query": "where does the backend run"})
+            )
+            .await
+            .contains("Hetzner"),
+        "the second batch item is not recallable"
+    );
 }
 
 #[tokio::test]

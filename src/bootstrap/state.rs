@@ -43,6 +43,11 @@ pub struct AppState {
     /// Extra `Host` values the `/mcp` DNS-rebinding guard accepts, beyond
     /// the loopback defaults (`[server].mcp.allowed_hosts`).
     pub mcp_allowed_hosts: Vec<String>,
+    /// How long the write routes (`/v1/memories`, `/v1/memories/batch`)
+    /// may run before timing out — longer than the 30s the rest get,
+    /// because a `wait: true` ingest runs the LLM pipeline inline
+    /// (`[server].ingest_timeout_secs`).
+    pub ingest_timeout: std::time::Duration,
 }
 
 #[cfg(test)]

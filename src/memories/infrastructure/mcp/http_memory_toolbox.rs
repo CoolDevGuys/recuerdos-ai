@@ -10,7 +10,8 @@
 //! and the same per-user scoping.
 
 use super::memory_toolbox::{
-    DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest, ToolMemory,
+    BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome,
+    SaveRequest, ToolMemory,
 };
 use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
@@ -123,6 +124,71 @@ impl MemoryToolbox for HttpMemoryToolbox {
 
         Ok(SaveOutcome {
             memories,
+            understanding,
+        })
+    }
+
+    async fn save_batch(&self, requests: Vec<SaveRequest>) -> Result<BatchSaveOutcome> {
+        // The batch route carries one `client` for the whole request; the
+        // MCP tool sets the same one on every item, so taking the first is
+        // exact rather than a guess.
+        let client = requests.iter().find_map(|request| request.client.clone());
+        let items: Vec<Value> = requests
+            .into_iter()
+            .map(|request| {
+                let mut item = json!({ "content": request.content, "tags": request.tags });
+                if let Some(category) = request.category {
+                    item["category"] = json!(category);
+                }
+                item
+            })
+            .collect();
+
+        // `wait` for the same reason `save` does: a tool has to tell the
+        // agent what happened this turn, not hand back job ids to poll.
+        let body = json!({ "items": items, "client": client, "wait": true });
+        let result = self
+            .request(reqwest::Method::POST, "/v1/memories/batch", Some(body))
+            .await?;
+
+        let understanding = result["understanding"].as_bool().unwrap_or(false);
+
+        let empty = Vec::new();
+        let mut items = Vec::new();
+        for entry in result["results"].as_array().unwrap_or(&empty) {
+            if let Some(error) = entry["error"].as_str() {
+                items.push(BatchItemOutcome {
+                    memories: Vec::new(),
+                    error: Some(error.to_string()),
+                });
+                continue;
+            }
+
+            // Same reasoning as `save`: fetch the stored wording rather
+            // than echo what was sent, since extraction may have rewritten
+            // it. A handful of loopback round trips, and worth it.
+            let ids: Vec<String> = entry["memory_ids"]
+                .as_array()
+                .unwrap_or(&empty)
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect();
+
+            let mut memories = Vec::with_capacity(ids.len());
+            for id in ids {
+                let memory = self
+                    .request(reqwest::Method::GET, &format!("/v1/memories/{id}"), None)
+                    .await?;
+                memories.push(parse_memory(&memory)?);
+            }
+            items.push(BatchItemOutcome {
+                memories,
+                error: None,
+            });
+        }
+
+        Ok(BatchSaveOutcome {
+            items,
             understanding,
         })
     }

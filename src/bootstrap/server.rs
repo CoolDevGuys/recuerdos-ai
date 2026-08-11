@@ -40,14 +40,30 @@ pub fn init_tracing() {
 }
 
 pub fn router(state: AppState) -> Router {
+    // The write routes run the LLM ingest pipeline — extraction plus a
+    // reconciliation call per candidate — and a `wait: true` request runs
+    // it inline; a batch runs it once per item. That is seconds to minutes
+    // on a slow local model, well past what the read routes should ever
+    // take, so they carry their own longer timeout. Built as a separate
+    // router and merged in *after* the 30s layer below, so the short
+    // timeout never reaches them.
+    let write_routes = Router::new()
+        .route("/v1/memories", post(understanding_http::handlers::ingest))
+        .route(
+            "/v1/memories/batch",
+            post(understanding_http::handlers::ingest_batch),
+        )
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            state.ingest_timeout,
+        ));
+
     Router::new()
         // Unauthenticated by design: a health check that needs a
         // credential is useless to a load balancer or `docker healthcheck`.
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .route("/v1/ping", get(ping))
-        // Raw content in, understood memories out — asynchronously.
-        .route("/v1/memories", post(understanding_http::handlers::ingest))
         .route("/v1/jobs/{id}", get(understanding_http::handlers::get_job))
         // The escape hatch: store exactly this, no pipeline. For a caller
         // that has already decided what to remember.
@@ -79,11 +95,16 @@ pub fn router(state: AppState) -> Router {
             get(consolidation_http::handlers::read_profile),
         )
         .route("/v1/audit", get(memories_http::handlers::read_audit))
-        .with_state(state)
+        // The 30s cap covers only the routes added above it. The write
+        // routes are merged in afterwards so they keep their own longer
+        // timeout rather than being clamped to this one.
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
         ))
+        .merge(write_routes)
+        .with_state(state)
+        // Observability wraps everything, both timeout groups alike.
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))

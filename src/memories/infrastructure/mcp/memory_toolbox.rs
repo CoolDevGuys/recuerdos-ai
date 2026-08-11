@@ -60,6 +60,27 @@ pub struct SaveOutcome {
     pub understanding: bool,
 }
 
+/// One item's result inside a batch save.
+#[derive(Debug, Clone)]
+pub struct BatchItemOutcome {
+    /// What this item produced. Empty for a NOOP or a failure — the two are
+    /// told apart by `error`.
+    pub memories: Vec<ToolMemory>,
+    /// Set when the item failed, carrying why. `None` for a success, even
+    /// one that stored nothing.
+    pub error: Option<String>,
+}
+
+/// What a batch save did, one entry per submitted item, in order.
+#[derive(Debug, Clone)]
+pub struct BatchSaveOutcome {
+    pub items: Vec<BatchItemOutcome>,
+    /// Whether a language model extracted and reconciled, or the content
+    /// was stored as sent — a server-wide property, so it sits here rather
+    /// than on every item.
+    pub understanding: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RecallRequest {
     pub query: String,
@@ -89,6 +110,12 @@ pub struct DistillRequest {
 #[async_trait::async_trait]
 pub trait MemoryToolbox: Send + Sync {
     async fn save(&self, request: SaveRequest) -> Result<SaveOutcome>;
+
+    /// Saves several submissions in one call, returning an outcome per
+    /// input in order — the NOOPs and the failures included, because an
+    /// agent that reported "all saved" over a batch where one item failed
+    /// would be telling the user something untrue.
+    async fn save_batch(&self, requests: Vec<SaveRequest>) -> Result<BatchSaveOutcome>;
 
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>>;
 
