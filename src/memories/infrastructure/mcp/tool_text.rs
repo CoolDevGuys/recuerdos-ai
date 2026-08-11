@@ -27,7 +27,7 @@
 //! the agent's context window, and JSON spends tokens on punctuation the
 //! model does not need.
 
-use super::memory_toolbox::{SaveOutcome, ToolMemory};
+use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, ToolMemory};
 
 pub const PROFILE_DESCRIPTION: &str = "\
 A short digest of who this user is: their standing preferences, \
@@ -110,6 +110,85 @@ It will be available in future sessions.",
     }
     output.push_str("\nThey will be available in future sessions.");
     output
+}
+
+/// What a batch save did, per item, phrased so an agent reports it
+/// accurately — including the items that stored nothing and the ones that
+/// failed, which "saved N memories" alone would paper over.
+pub fn render_saved_batch(outcome: &BatchSaveOutcome) -> String {
+    let total = outcome.items.len();
+    let saved: usize = outcome.items.iter().map(|item| item.memories.len()).sum();
+    let failures: Vec<(usize, &str)> = outcome
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| item.error.as_deref().map(|error| (index, error)))
+        .collect();
+    let noops = outcome
+        .items
+        .iter()
+        .filter(|item| item.error.is_none() && item.memories.is_empty())
+        .count();
+
+    // Nothing stored and nothing failed: every item was a NOOP. Same trap
+    // as the single save — an agent told "saved" here misinforms the user.
+    if saved == 0 && failures.is_empty() {
+        return if outcome.understanding {
+            format!(
+                "Nothing new was stored — all {total} {} were already known, or held nothing \
+                 that stays true beyond this conversation. Do not tell the user they were saved.",
+                plural(total, "item", "items")
+            )
+        } else {
+            "Nothing was stored.".to_string()
+        };
+    }
+
+    let mut output = format!(
+        "Saved {saved} {} from {total} {}.",
+        plural(saved, "memory", "memories"),
+        plural(total, "item", "items")
+    );
+
+    if saved > 0 {
+        output.push('\n');
+        for memory in outcome.items.iter().flat_map(|item| &item.memories) {
+            output.push_str(&format!(
+                "\n- [{}] {} (id {})",
+                memory.category,
+                memory.content.replace('\n', " "),
+                memory.id
+            ));
+        }
+        output.push_str("\n\nThey will be available in future sessions.");
+    }
+
+    if noops > 0 {
+        output.push_str(&format!(
+            "\n\n{noops} {} added nothing new (already known, or nothing durable in it).",
+            plural(noops, "item", "items")
+        ));
+    }
+
+    if !failures.is_empty() {
+        output.push_str(&format!(
+            "\n\n{} {} failed and {} not saved:",
+            failures.len(),
+            plural(failures.len(), "item", "items"),
+            plural(failures.len(), "was", "were")
+        ));
+        for (index, error) in failures {
+            output.push_str(&format!("\n- item {index}: {error}"));
+        }
+    }
+
+    output
+}
+
+/// Singular or plural word for a count, so the summaries read as English
+/// rather than "1 items".
+fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
 }
 
 /// What a session left behind.
@@ -251,5 +330,73 @@ mod tests {
         assert!(render_forgotten(1).contains("1 memory."));
         assert!(render_forgotten(3).contains("3 memories"));
         assert!(render_forgotten(0).contains("No memories were deleted"));
+    }
+
+    #[test]
+    fn a_batch_reports_saved_noop_and_failed_items_distinctly() {
+        use super::super::memory_toolbox::BatchItemOutcome;
+
+        let outcome = BatchSaveOutcome {
+            understanding: true,
+            items: vec![
+                BatchItemOutcome {
+                    memories: vec![memory("User prefers pnpm", None)],
+                    error: None,
+                },
+                // Stored nothing, but did not fail — already known.
+                BatchItemOutcome {
+                    memories: vec![],
+                    error: None,
+                },
+                BatchItemOutcome {
+                    memories: vec![],
+                    error: Some("provider down".to_string()),
+                },
+            ],
+        };
+
+        let rendered = render_saved_batch(&outcome);
+
+        assert!(
+            rendered.contains("Saved 1 memory from 3 items"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("User prefers pnpm"), "{rendered}");
+        assert!(
+            rendered.contains("1 item added nothing new"),
+            "a NOOP item must be reported, not silently counted as saved: {rendered}"
+        );
+        assert!(rendered.contains("1 item failed"), "{rendered}");
+        assert!(
+            rendered.contains("provider down"),
+            "the failure reason must reach the agent: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_batch_that_stored_nothing_does_not_claim_it_saved() {
+        use super::super::memory_toolbox::BatchItemOutcome;
+
+        let outcome = BatchSaveOutcome {
+            understanding: true,
+            items: vec![
+                BatchItemOutcome {
+                    memories: vec![],
+                    error: None,
+                },
+                BatchItemOutcome {
+                    memories: vec![],
+                    error: None,
+                },
+            ],
+        };
+
+        let rendered = render_saved_batch(&outcome);
+
+        assert!(rendered.contains("Nothing new was stored"), "{rendered}");
+        assert!(
+            rendered.contains("Do not tell the user"),
+            "an all-NOOP batch must warn against reporting a save: {rendered}"
+        );
     }
 }

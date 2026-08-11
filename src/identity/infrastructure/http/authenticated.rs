@@ -203,6 +203,7 @@ mod tests {
             auth_mode,
             mcp_http: false,
             mcp_allowed_hosts: Vec::new(),
+            ingest_timeout: std::time::Duration::from_secs(180),
         };
 
         let router = Router::new()

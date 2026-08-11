@@ -9,6 +9,12 @@
 [server]
 host = "127.0.0.1"
 port = 7070
+# How long a write request (`POST /v1/memories` and `/v1/memories/batch`)
+# may run before the daemon returns 408. A `wait = true` save runs the LLM
+# ingest pipeline inline, and a batch runs it once per item, which on a
+# slow local model can take well past the 30s the read routes are capped
+# at. Raise this if a large batch or a slow provider is timing out.
+ingest_timeout_secs = 180
 # MCP transports. `stdio` is the `recuerdos-ai mcp` shim (a per-client
 # process). `http` mounts the streamable-HTTP MCP endpoint at `/mcp` on
 # this daemon, so a client can connect over HTTP with a bearer token and

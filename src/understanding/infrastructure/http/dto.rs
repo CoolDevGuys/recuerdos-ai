@@ -40,6 +40,80 @@ impl From<IngestRequest> for IngestPayload {
     }
 }
 
+/// Several submissions in one request.
+///
+/// Exists so a caller with a handful of things to remember at once — an
+/// agent wrapping up a session, say — makes one request instead of one per
+/// memory. Sending them separately works too, but N `wait: true` saves are
+/// N races against the request timeout, and firing them concurrently makes
+/// N pipeline runs contend for one model; a batch lets the daemon pace the
+/// work behind a single, longer-lived request.
+#[derive(Debug, Deserialize)]
+pub struct BatchIngestRequest {
+    pub items: Vec<BatchIngestItem>,
+    /// Applied to every item's audit record. A per-item client would let
+    /// one batch span several sources, which is not a thing a batch is.
+    pub client: Option<String>,
+    /// Run every item now and answer with the results, rather than
+    /// returning job ids to poll. Same meaning, and same caveat, as on the
+    /// single ingest — see [`IngestRequest::wait`].
+    #[serde(default)]
+    pub wait: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchIngestItem {
+    pub content: String,
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub session_id: Option<String>,
+}
+
+impl BatchIngestItem {
+    /// Turns one item into a payload, taking the batch-wide `client`.
+    pub fn into_payload(self, client: Option<String>) -> IngestPayload {
+        IngestPayload {
+            content: self.content,
+            category: self.category,
+            tags: self.tags,
+            client,
+            session_id: self.session_id,
+        }
+    }
+}
+
+/// The `wait = false` batch answer: one job to poll per item, in the order
+/// the items were sent.
+#[derive(Debug, Serialize)]
+pub struct BatchAcceptedResponse {
+    pub jobs: Vec<AcceptedResponse>,
+}
+
+/// The `wait = true` batch answer: what each item produced, in order.
+///
+/// Reports per item rather than all-or-nothing: one item whose content the
+/// model chokes on must not discard the memories the others yielded, so a
+/// failed item is recorded in place and the rest still return.
+#[derive(Debug, Serialize)]
+pub struct BatchIngestedResponse {
+    /// False when no provider is configured — the same signal the single
+    /// ingest carries, and batch-wide because it is a property of the
+    /// server, not the item.
+    pub understanding: bool,
+    pub results: Vec<BatchItemResult>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BatchItemResult {
+    pub job_id: String,
+    pub status: &'static str,
+    pub memory_ids: Vec<String>,
+    /// Present only for an item that failed, carrying why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// The 202 answer: what to poll.
 #[derive(Debug, Serialize)]
 pub struct AcceptedResponse {
@@ -117,6 +191,34 @@ mod tests {
         assert_eq!(request.content, "hi");
         assert!(!request.wait, "waiting must be opt-in");
         assert!(request.tags.is_empty());
+    }
+
+    #[test]
+    fn a_batch_item_defaults_its_tags_and_carries_the_batch_client() {
+        let request: BatchIngestRequest = serde_json::from_value(json!({
+            "items": [{"content": "prefers pnpm"}, {"content": "on hetzner", "category": "fact.project"}],
+            "client": "claude",
+        }))
+        .unwrap();
+
+        assert_eq!(request.items.len(), 2);
+        assert!(!request.wait, "waiting must be opt-in for a batch too");
+
+        let payload = request
+            .items
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_payload(request.client.clone());
+        assert_eq!(payload.content, "prefers pnpm");
+        assert_eq!(payload.client.as_deref(), Some("claude"));
+        assert!(payload.tags.is_empty());
+    }
+
+    #[test]
+    fn a_batch_needs_at_least_an_items_key() {
+        // An absent `items` is a malformed request, not an empty batch.
+        assert!(serde_json::from_value::<BatchIngestRequest>(json!({})).is_err());
     }
 
     #[test]

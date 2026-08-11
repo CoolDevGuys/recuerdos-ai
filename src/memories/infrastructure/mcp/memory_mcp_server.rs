@@ -34,6 +34,23 @@ pub struct SaveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveBatchParams {
+    /// The memories to save, each written as a standalone sentence.
+    pub items: Vec<SaveBatchItem>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SaveBatchItem {
+    /// The memory, written as a standalone sentence.
+    pub content: String,
+    /// One of: preference.coding, preference.personal, decision,
+    /// fact.project, fact.person, experience, skill, reference.
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RecallParams {
     /// The question you actually have.
     pub query: String,
@@ -180,6 +197,46 @@ impl MemoryMcpServer {
 
         Ok(CallToolResult::success(vec![ContentBlock::text(
             tool_text::render_saved(&outcome),
+        )]))
+    }
+
+    /// Save several memories in one call, when the user has stated multiple durable things
+    /// at once — wrapping up a session, or a message that lists several preferences and
+    /// decisions together.
+    ///
+    /// Prefer this over many `memory_save` calls for a burst: it stores them in a single
+    /// request, and the server paces the work so a handful of memories does not overwhelm
+    /// the model behind extraction. Each item is a standalone memory, exactly as
+    /// `memory_save` expects — do not stuff several facts into one item; give each its own.
+    ///
+    /// It reports per item, including the ones that were already known (stored nothing) and
+    /// any that failed — repeat that back accurately rather than telling the user all were
+    /// saved. For a single memory, use `memory_save`.
+    #[tool(name = "memory_save_batch")]
+    async fn memory_save_batch(
+        &self,
+        Parameters(params): Parameters<SaveBatchParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let requests = params
+            .items
+            .into_iter()
+            .map(|item| SaveRequest {
+                content: item.content,
+                category: item.category,
+                tags: item.tags,
+                client: Some(self.client_name.clone()),
+            })
+            .collect();
+
+        let outcome = self
+            .toolbox(&context)
+            .save_batch(requests)
+            .await
+            .map_err(to_mcp_error)?;
+
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            tool_text::render_saved_batch(&outcome),
         )]))
     }
 

@@ -477,3 +477,98 @@ async fn the_direct_endpoint_still_bypasses_the_pipeline_entirely() {
     // The mock model was given no scripted replies at all; reaching it
     // would have produced an error rather than this 201.
 }
+
+#[tokio::test]
+async fn a_wait_true_batch_stores_every_item_in_one_request() {
+    // The point of the endpoint: several submissions, one request, each
+    // run through the full pipeline and reported on individually.
+    let pipeline = Pipeline::with_model(vec![
+        json!({"candidates": [
+            {"content": "User prefers pnpm", "category": "preference.coding"}
+        ]}),
+        json!({"candidates": [
+            {"content": "Backend runs on Hetzner", "category": "fact.project"}
+        ]}),
+    ])
+    .await;
+
+    // If the second item finds the first as a neighbour, reconciliation
+    // fires; answer it with ADD so both are kept. Lowest priority, so it
+    // only runs after the two scripted extractions are consumed.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": json!({
+                    "decisions": [{"action": "ADD", "reason": "unrelated"}]
+                }).to_string()},
+            }]
+        })))
+        .with_priority(200)
+        .mount(&pipeline.model)
+        .await;
+
+    let (status, body) = pipeline
+        .post(
+            "/v1/memories/batch",
+            json!({"items": [
+                {"content": "i prefer pnpm"},
+                {"content": "the backend runs on hetzner"}
+            ], "wait": true}),
+        )
+        .await;
+
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["understanding"], true, "{body}");
+    let results = body["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2, "one result per item: {body}");
+    assert_eq!(results[0]["status"], "succeeded", "{body}");
+    assert_eq!(results[1]["status"], "succeeded", "{body}");
+    assert!(
+        !results[0]["memory_ids"].as_array().unwrap().is_empty(),
+        "the first item should have produced a memory: {body}"
+    );
+
+    // Both are actually stored and recallable.
+    let pnpm = pipeline.search("package manager").await;
+    assert!(pnpm.iter().any(|c| c.contains("pnpm")), "{pnpm:?}");
+    let host = pipeline.search("where does the backend run").await;
+    assert!(host.iter().any(|c| c.contains("Hetzner")), "{host:?}");
+}
+
+#[tokio::test]
+async fn a_wait_false_batch_returns_a_job_per_item_to_poll() {
+    let pipeline = Pipeline::with_model(vec![json!({"candidates": [
+        {"content": "User prefers pnpm", "category": "preference.coding"}
+    ]})])
+    .await;
+
+    let (status, body) = pipeline
+        .post(
+            "/v1/memories/batch",
+            json!({"items": [{"content": "i prefer pnpm"}]}),
+        )
+        .await;
+
+    assert_eq!(status, 202, "{body}");
+    let jobs = body["jobs"].as_array().expect("jobs");
+    assert_eq!(jobs.len(), 1, "one job per item: {body}");
+
+    let job = pipeline
+        .await_job(jobs[0]["job_id"].as_str().unwrap())
+        .await;
+    assert_eq!(job["status"], "succeeded", "{job}");
+}
+
+#[tokio::test]
+async fn an_empty_batch_is_rejected() {
+    // An empty batch is a caller mistake, not a no-op success.
+    let pipeline = Pipeline::with_model(vec![]).await;
+
+    let (status, _) = pipeline
+        .post("/v1/memories/batch", json!({"items": []}))
+        .await;
+
+    assert_eq!(status, 400);
+}
