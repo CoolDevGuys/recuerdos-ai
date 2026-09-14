@@ -1,6 +1,7 @@
 //! Use cases: `CandidateExtractor`, `MemoryReconciler`, `SessionDistiller`.
 
 pub mod candidate_extractor;
+pub mod intent_first_ingestor;
 pub mod memory_ingestor;
 pub mod memory_reconciler;
 #[cfg(test)]

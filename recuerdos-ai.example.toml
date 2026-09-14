@@ -182,6 +182,42 @@ hybrid = true
 default_limit = 8
 recency_half_life_days = 90
 
+# Results scoring below this relevance are dropped rather than returned.
+# Relevance is measured from what the indexes matched — not from where a
+# result ranked — so unlike the rank score it means something read on its
+# own: 0.8 is "this is about your question", 0.0 is "nothing here is".
+#
+# The point is that a rank score cannot say "no match": a query with nothing
+# to answer it still has a top result, and a client that cannot hear "no
+# match" summarises the noise into a confident answer. 0.25 sits in the gap
+# measured on the default embedding model, where an unrelated query tops out
+# near 0.13 and a genuine answer starts near 0.36.
+#
+# 0.0 turns it off and returns every candidate the indexes produced, which is
+# what an exhaustive admin tool or an eval harness wants. A single search can
+# override it per request with "min_relevance".
+#
+# One exemption: a search that filters by categories, subcategories or tags
+# ignores this default and returns the whole slice. Naming a category is
+# already saying what you want in the store's own vocabulary, so the words in
+# the query are a preference inside that slice rather than the definition of
+# it — and refusing to answer "what decisions have I stored?" because the
+# phrasing was a poor vector match would be a new bug. An explicit
+# "min_relevance" always applies, filtered or not. The response reports the
+# floor that produced the list.
+min_relevance = 0.25
+
+# The cosine similarity at which the vector leg stops being evidence. Two
+# unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,
+# so that much similarity is what *nothing* looks like, and it is subtracted
+# before relevance is reported.
+#
+# 0.5 was measured against bge-small-en-v1.5 below. Changing [embeddings].model
+# changes it — a model that expects a retrieval instruction on queries has a
+# lower baseline — so if you swap models and recall gets too strict or too
+# loose, retune here before anywhere else. 0.0 reports raw cosine.
+similarity_baseline = 0.5
+
 [graph]
 # The entity/relation graph (Strategy B). On by default as of Task 7.3.6:
 # the eval measured relational recall@5 climbing 71.4% → 85.7% with no
@@ -229,3 +265,24 @@ max_memories = 5000
 # api-key | none. "none" is an explicit single-user opt-out: every request
 # is treated as the built-in `default` user. Logged loudly at startup.
 mode = "api-key"
+
+[rate_limit]
+# Per-caller request budget, enforced before routing, tracing, or an API-key
+# verification. A caller that runs out gets 429 with a Retry-After; other
+# callers are untouched, because the budget is per caller rather than global.
+#
+# The default is wide — 300/min with a burst of 60 is an order of magnitude
+# above what a well-behaved agent does to a personal memory server in a
+# minute. It exists because writes run an LLM pipeline and key verification is
+# deliberately slow: without a budget, one agent in a retry loop decides how
+# much work this daemon does.
+enabled = true
+requests_per_minute = 300
+burst = 60
+
+# Which address a request is charged to. Off by default: `X-Forwarded-For` is
+# client-supplied, so a directly reachable daemon that believed it would let
+# every request pick the bucket it is counted against. Turn it on only when a
+# reverse proxy is the only way in, and that proxy overwrites the header with
+# the real peer rather than appending to it.
+trust_proxy = false

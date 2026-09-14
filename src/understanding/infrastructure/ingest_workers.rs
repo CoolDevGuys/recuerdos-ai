@@ -182,10 +182,12 @@ impl IngestWorkers {
         };
 
         match self.pipeline.execute(&context, &job.payload).await {
-            Ok(memory_ids) => {
+            Ok(outcome) => {
+                let memory_ids = outcome.memory_ids;
                 tracing::info!(
                     job = %id,
                     memories = memory_ids.len(),
+                    status = ?outcome.status,
                     "ingest job finished"
                 );
                 let queue = Arc::clone(&self.queue);

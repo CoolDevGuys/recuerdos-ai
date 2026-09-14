@@ -184,7 +184,12 @@ impl TextIndex for TantivyTextIndex {
         Ok(())
     }
 
-    fn search(&self, context: &UserContext, query: &str, limit: usize) -> Result<Vec<MemoryId>> {
+    fn search(
+        &self,
+        context: &UserContext,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f32)>> {
         if limit == 0 || query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -221,8 +226,8 @@ impl TextIndex for TantivyTextIndex {
             .search(&parsed, &TopDocs::with_limit(limit))
             .map_err(|e| RaError::Internal(format!("text search failed: {e}")))?;
 
-        let mut ids = Vec::with_capacity(hits.len());
-        for (_score, address) in hits {
+        let mut hits_by_id = Vec::with_capacity(hits.len());
+        for (score, address) in hits {
             let document: TantivyDocument = searcher
                 .doc(address)
                 .map_err(|e| RaError::Internal(format!("failed to read an indexed doc: {e}")))?;
@@ -232,11 +237,11 @@ impl TextIndex for TantivyTextIndex {
                 .and_then(|value| value.as_str())
                 && let Ok(id) = MemoryId::from_str(raw)
             {
-                ids.push(id);
+                hits_by_id.push((id, score));
             }
         }
 
-        Ok(ids)
+        Ok(hits_by_id)
     }
 }
 

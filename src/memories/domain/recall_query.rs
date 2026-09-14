@@ -27,10 +27,23 @@ pub struct RecallQuery {
     as_of: Option<DateTime<Utc>>,
     limit: usize,
     include_superseded: bool,
+    /// Results scoring below this are dropped rather than shown.
+    ///
+    /// `0.0` (the default) means no floor, which is the behaviour a
+    /// reconciler or merger wants: they are asking "what is related to
+    /// this?", and a weak relation is still an answer. An agent-facing
+    /// surface wants the opposite — its default should be a floor, because
+    /// a confident-looking weak result gets believed, and in the
+    /// [`memory_forget`](crate::memories::infrastructure::mcp) case
+    /// believed results are how the wrong memory gets deleted.
+    min_relevance: f32,
 }
 
 impl RecallQuery {
-    pub fn new(text: &str, limit: usize) -> Result<Self> {
+    /// `limit` is signed so a client asking for `-5` reaches the domain's
+    /// explanation instead of dying in a deserializer that describes Rust's
+    /// number types to the caller.
+    pub fn new(text: &str, limit: i64) -> Result<Self> {
         let text = text.trim();
         if text.is_empty() {
             return Err(RaError::Validation("query is empty".to_string()));
@@ -40,8 +53,15 @@ impl RecallQuery {
                 "query is longer than {MAX_QUERY_LEN} characters"
             )));
         }
+        if limit < 0 {
+            return Err(RaError::Validation(format!(
+                "limit must be at least 1, got {limit}"
+            )));
+        }
         if limit == 0 {
-            return Err(RaError::Validation("limit is 0".to_string()));
+            return Err(RaError::Validation(
+                "limit must be at least 1: ask for the results you want to read".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -53,8 +73,9 @@ impl RecallQuery {
             as_of: None,
             // Clamped rather than rejected: a client asking for 200 wants
             // "as many as you'll give me", not an error.
-            limit: limit.min(MAX_LIMIT),
+            limit: (limit as usize).min(MAX_LIMIT),
             include_superseded: false,
+            min_relevance: 0.0,
         })
     }
 
@@ -101,6 +122,15 @@ impl RecallQuery {
         self
     }
 
+    /// Drops results below `min_relevance`. Clamped into `0.0..=1.0`, so a
+    /// misconfigured `1.5` means "show me the perfect ones only" rather
+    /// than silently meaning "show me nothing at all", which is what an
+    /// unclamped comparison above the maximum relevance would amount to.
+    pub fn with_min_relevance(mut self, min_relevance: f32) -> Self {
+        self.min_relevance = min_relevance.clamp(0.0, 1.0);
+        self
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -131,6 +161,10 @@ impl RecallQuery {
 
     pub fn include_superseded(&self) -> bool {
         self.include_superseded
+    }
+
+    pub fn min_relevance(&self) -> f32 {
+        self.min_relevance
     }
 
     /// How many candidates each leg should fetch.
@@ -185,6 +219,36 @@ mod tests {
     #[test]
     fn rejects_a_zero_limit() {
         assert!(RecallQuery::new("x", 0).is_err());
+    }
+
+    #[test]
+    fn rejects_a_negative_limit_explaining_the_range() {
+        // The number arrives from JSON, so this is the only place a
+        // human-readable complaint can be made about it.
+        let error = RecallQuery::new("x", -5).unwrap_err().to_string();
+        assert!(error.contains("at least 1"), "got {error}");
+        assert!(
+            error.contains("-5"),
+            "must quote what it was given: {error}"
+        );
+    }
+
+    #[test]
+    fn clamps_an_excessive_min_relevance() {
+        // Above the maximum relevance an unclamped comparison would match
+        // nothing at all, which is not what the caller meant.
+        let query = RecallQuery::new("x", 5).unwrap().with_min_relevance(1.5);
+        assert_eq!(query.min_relevance(), 1.0);
+
+        let negative = RecallQuery::new("x", 5).unwrap().with_min_relevance(-1.0);
+        assert_eq!(negative.min_relevance(), 0.0, "0.0 means no floor");
+    }
+
+    #[test]
+    fn has_no_floor_by_default() {
+        // Reconciliation asks for related memories, not relevant ones; an
+        // inherited floor would quietly stop it seeing a supersession.
+        assert_eq!(RecallQuery::new("x", 5).unwrap().min_relevance(), 0.0);
     }
 
     #[test]

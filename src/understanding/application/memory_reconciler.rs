@@ -46,7 +46,7 @@ use std::sync::Arc;
 /// contradicted — while a longer list measurably increases the chance the
 /// model picks a loosely-related memory and supersedes something it
 /// should have left alone.
-pub const NEIGHBOUR_LIMIT: usize = 5;
+pub const NEIGHBOUR_LIMIT: i64 = 5;
 
 #[derive(Clone)]
 pub struct MemoryReconciler {

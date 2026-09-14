@@ -472,12 +472,12 @@ impl VectorIndex for InMemoryVectorIndex {
         context: &UserContext,
         embedding: &[f32],
         limit: usize,
-    ) -> Result<Vec<MemoryId>> {
+    ) -> Result<Vec<(MemoryId, f32)>> {
         let vectors = self.vectors.lock().unwrap();
         let mut scored: Vec<(MemoryId, f32)> = vectors
             .iter()
             .filter(|((user, _), _)| *user == context.user_id())
-            .map(|((_, id), stored)| (*id, cosine(embedding, stored)))
+            .map(|((_, id), stored)| (*id, cosine(embedding, stored).clamp(0.0, 1.0)))
             .collect();
 
         scored.sort_by(|a, b| {
@@ -486,7 +486,7 @@ impl VectorIndex for InMemoryVectorIndex {
                 .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
         });
         scored.truncate(limit);
-        Ok(scored.into_iter().map(|(id, _)| id).collect())
+        Ok(scored)
     }
 }
 
@@ -546,12 +546,25 @@ impl TextIndex for InMemoryTextIndex {
     /// Ranks by how many query words a document contains — a crude BM25
     /// stand-in that is enough to give the ranker two differing opinions
     /// to fuse.
-    fn search(&self, context: &UserContext, query: &str, limit: usize) -> Result<Vec<MemoryId>> {
+    ///
+    /// The weight reported per matched word stands in for a real BM25
+    /// contribution rather than being the count itself, so that relevance
+    /// computed against this double saturates anywhere near where the real
+    /// index's does. A bare count would read as "a two-word match is 0.2
+    /// relevant" and every floor test would be testing the wrong number.
+    fn search(
+        &self,
+        context: &UserContext,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        const NOMINAL_BM25_PER_WORD: f32 = 5.0;
+
         let query = query.to_ascii_lowercase();
         let words: Vec<&str> = query.split_whitespace().collect();
 
         let documents = self.documents.lock().unwrap();
-        let mut scored: Vec<(MemoryId, usize)> = documents
+        let mut scored: Vec<(MemoryId, f32)> = documents
             .iter()
             .filter(|((user, _), _)| *user == context.user_id())
             .map(|((_, id), haystack)| {
@@ -560,18 +573,20 @@ impl TextIndex for InMemoryTextIndex {
                     words
                         .iter()
                         .filter(|word| haystack.contains(**word))
-                        .count(),
+                        .count() as f32
+                        * NOMINAL_BM25_PER_WORD,
                 )
             })
-            .filter(|(_, hits)| *hits > 0)
+            .filter(|(_, score)| *score > 0.0)
             .collect();
 
         scored.sort_by(|a, b| {
-            b.1.cmp(&a.1)
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
         });
         scored.truncate(limit);
-        Ok(scored.into_iter().map(|(id, _)| id).collect())
+        Ok(scored)
     }
 }
 

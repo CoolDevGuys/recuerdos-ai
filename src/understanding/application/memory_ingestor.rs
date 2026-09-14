@@ -7,12 +7,11 @@
 
 use crate::identity::domain::user_context::UserContext;
 use crate::shared::error::Result;
-use crate::shared::ids::MemoryId;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
 use crate::understanding::domain::extraction_prompt::SourceHints;
 use crate::understanding::domain::ingest_job::IngestPayload;
-use crate::understanding::domain::ingest_pipeline::IngestPipeline;
+use crate::understanding::domain::ingest_pipeline::{IngestOutcome, IngestPipeline, IngestStatus};
 use std::sync::Arc;
 
 /// Recorded as the actor on every memory the pipeline writes when the
@@ -40,7 +39,7 @@ impl IngestPipeline for MemoryIngestor {
         &self,
         context: &UserContext,
         payload: &IngestPayload,
-    ) -> Result<Vec<MemoryId>> {
+    ) -> Result<IngestOutcome> {
         let hints = SourceHints {
             client: payload.client.clone(),
             category: payload.category.clone(),
@@ -53,7 +52,7 @@ impl IngestPipeline for MemoryIngestor {
             // empty list: nothing to compare, and it makes the common
             // "small talk" case free.
             tracing::debug!("nothing durable found in the submitted content");
-            return Ok(Vec::new());
+            return Ok(IngestOutcome::empty(IngestStatus::NothingDurable));
         }
 
         let actor = payload.client.as_deref().unwrap_or(DEFAULT_ACTOR);
@@ -67,7 +66,13 @@ impl IngestPipeline for MemoryIngestor {
             "ingestion complete"
         );
 
-        Ok(outcome.stored)
+        // The reconciler knows whether it changed the store even when it
+        // wrote nothing — a retraction deletes, a supersession retires — and
+        // "nothing stored" covers all three of those differently.
+        Ok(IngestOutcome::from_reconciled(
+            outcome.stored,
+            outcome.superseded.len() + outcome.deleted.len(),
+        ))
     }
 }
 
@@ -153,7 +158,8 @@ mod tests {
                 &payload("we moved to Hetzner; always table-driven tests"),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         assert_eq!(stored.len(), 2);
         // Both are retrievable. Which one ranks first is a property of
@@ -184,7 +190,8 @@ mod tests {
         let stored = ingestor
             .execute(&fixture.alex, &payload("I prefer pnpm"))
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories
@@ -220,7 +227,8 @@ mod tests {
         let stored = ingestor
             .execute(&fixture.alex, &payload("thanks, that worked!"))
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         assert!(stored.is_empty());
         assert_eq!(model.call_count(), 1, "reconciliation should not have run");

@@ -1,6 +1,6 @@
 //! Shared axum state: what every handler and extractor can reach.
 
-use crate::bootstrap::config::AppConfig;
+use crate::bootstrap::config::{AppConfig, RateLimitConfig};
 use crate::bootstrap::consolidation_wiring::Consolidation;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::understanding_wiring::Understanding;
@@ -36,6 +36,12 @@ pub struct AppState {
     pub understanding: Arc<Understanding>,
     pub consolidation: Arc<Consolidation>,
     pub auth_mode: AuthMode,
+    /// `[rate_limit]`: the per-caller request budget `serve` enforces.
+    ///
+    /// The config rather than a built limiter, because the limiter is stateful
+    /// and belongs to the process, not to a router; `serve` builds it once and
+    /// the test routers built from this state stay free of it.
+    pub rate_limit: RateLimitConfig,
     /// Whether to mount the streamable-HTTP MCP transport at `/mcp`
     /// (`[server].mcp.http`). Held here so `serve` can decide without
     /// re-reading config.

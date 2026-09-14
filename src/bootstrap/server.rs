@@ -1,18 +1,27 @@
 //! axum router, graceful shutdown, tracing init. The observability
 //! baseline every later phase's routes build on.
 
+use crate::bootstrap::config::RateLimitConfig;
 use crate::bootstrap::state::{AppState, AuthMode};
 use crate::consolidation::infrastructure::http as consolidation_http;
-use crate::identity::infrastructure::http::authenticated::Authenticated;
+use crate::identity::infrastructure::http::authenticated::{self, Authenticated};
 use crate::memories::infrastructure::http as memories_http;
+use crate::shared::api_error::{ApiErrorBody, ApiErrorDetail};
+use crate::shared::rate_limit::{Decision, RateLimiter};
 use crate::understanding::infrastructure::http as understanding_http;
 use axum::Json;
 use axum::Router;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
+use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
@@ -159,22 +168,189 @@ pub async fn serve(host: &str, port: u16, state: AppState) -> std::io::Result<()
     // loopback, so it needs no state — only the port.
     let mut app = router(state.clone());
     if state.mcp_http {
-        app = app.nest_service(
-            "/mcp",
-            crate::memories::infrastructure::mcp::http_service::http_service(
-                format!("http://127.0.0.1:{port}"),
-                state.mcp_allowed_hosts.clone(),
-            ),
-        );
+        // Gated rather than trusted to the transport's own lazy check: an
+        // unauthenticated request must be answered with a 401 at the HTTP
+        // layer, not with a session and a later JSON-RPC error. Merged in
+        // rather than layered on `app`, which would gate every route.
+        let mcp = Router::new()
+            .nest_service(
+                "/mcp",
+                crate::memories::infrastructure::mcp::http_service::http_service(
+                    format!("http://127.0.0.1:{port}"),
+                    state.mcp_allowed_hosts.clone(),
+                ),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                authenticated::require_authentication,
+            ))
+            .with_state(state.clone());
+        app = app.merge(mcp);
         tracing::info!(
             allowed_hosts = ?state.mcp_allowed_hosts,
             "MCP over streamable HTTP mounted at /mcp"
         );
     }
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    // One limiter for the process: buckets are per caller, so nothing is lost
+    // by sharing it, and rebuilding it per router would reset everyone's spend.
+    //
+    // Wrapped around the whole app rather than `router`, so `/mcp` is counted
+    // with everything else — it is the surface whose worst case (an LLM ingest
+    // per call) costs the most. Being *outermost* is also the point: a request
+    // refused for volume should not first pay for routing, tracing, or an
+    // argon2 verification, which is the expensive thing an unauthenticated
+    // caller can make this server do.
+    let app = match Gate::new(&state.rate_limit) {
+        Some(gate) => app.layer(middleware::from_fn_with_state(gate.clone(), rate_limit)),
+        None => {
+            tracing::info!("[rate_limit].enabled = false: no request budget is enforced");
+            app
+        }
+    };
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+}
+
+/// What the rate-limit gate needs: the process's buckets, and how much of
+/// `X-Forwarded-For` to believe.
+#[derive(Clone)]
+struct Gate {
+    limiter: Arc<RateLimiter>,
+    trust_proxy: bool,
+}
+
+impl Gate {
+    /// `None` when `[rate_limit].enabled` is false.
+    ///
+    /// The switch is honoured by not building the gate at all, in one place,
+    /// rather than by a branch inside it that every future reader has to find
+    /// and preserve.
+    fn new(config: &RateLimitConfig) -> Option<Self> {
+        if !config.enabled {
+            return None;
+        }
+
+        tracing::info!(
+            requests_per_minute = config.requests_per_minute,
+            burst = config.burst,
+            trust_proxy = config.trust_proxy,
+            "rate limiting per caller"
+        );
+        Some(Self {
+            limiter: Arc::new(RateLimiter::new(config.requests_per_minute, config.burst)),
+            trust_proxy: config.trust_proxy,
+        })
+    }
+}
+
+/// Refuses a caller that has spent its budget, before anything cheaper or more
+/// expensive than a HashMap lookup happens.
+///
+/// `/healthz` is exempt. A container orchestrator's probe is the one client
+/// whose budget must never run out: a refused health check reads as an
+/// unhealthy service, and a healthy daemon gets restarted — the limiter would
+/// have caused the outage it was preventing.
+async fn rate_limit(State(gate): State<Gate>, request: Request, next: Next) -> Response {
+    if request.uri().path() == "/healthz" {
+        return next.run(request).await;
+    }
+
+    let caller = gate.caller(&request);
+    let retry_after = match gate.limiter.try_acquire(&caller, Instant::now()) {
+        Decision::Allowed => return next.run(request).await,
+        Decision::Denied { retry_after } => retry_after,
+    };
+
+    // Logged here because a refused request never reaches the tracing layer,
+    // which sits inside the router. The caller label is a hash or an address —
+    // never the credential itself.
+    tracing::warn!(%caller, retry_after = %retry_after.as_secs(), "rate limited");
+
+    let seconds = retry_after.as_secs().max(1);
+    let body = Json(ApiErrorBody {
+        error: ApiErrorDetail {
+            code: "rate_limited",
+            message: format!(
+                "too many requests: this caller is allowed a burst and then a steady rate;                  retry in {seconds}s"
+            ),
+        },
+    });
+
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(RETRY_AFTER, seconds.to_string())],
+        body,
+    )
+        .into_response()
+}
+
+impl Gate {
+    /// Which budget a request spends.
+    ///
+    /// A bearer token is the primary key because it is what identifies the
+    /// caller: hashing it keeps the bucket label from *being* the secret (these
+    /// labels go into logs), and separate keys stay separate budgets, so
+    /// revoking one does not hand the other its spend.
+    ///
+    /// With no token — the requests about to be refused with 401, and the
+    /// unauthenticated probes — the peer address is all there is. Those share
+    /// one bucket per address, which is the right shape for a crowd of
+    /// credential-less attempts from one host, and the reason the address must
+    /// never come from a header a client controls.
+    fn caller(&self, request: &Request) -> String {
+        match bearer(request) {
+            Some(token) => format!("key:{}", &fingerprint(token)[..12]),
+            None => format!("ip:{}", self.peer(request)),
+        }
+    }
+
+    /// The address the connection came from.
+    ///
+    /// `X-Forwarded-For` is consulted only when `[rate_limit].trust_proxy` is
+    /// on; a directly reachable daemon must not let a request name the bucket
+    /// it is counted against, which is how a limiter becomes a way to evade
+    /// itself.
+    fn peer(&self, request: &Request) -> String {
+        if self.trust_proxy {
+            if let Some(first) = request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(',').next())
+            {
+                return first.trim().to_string();
+            }
+        }
+
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+fn bearer(request: &Request) -> Option<&str> {
+    let header = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())?;
+    let (scheme, token) = header.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|token| !token.is_empty())
+}
+
+fn fingerprint(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    hex::encode(&digest[..6])
 }
 
 async fn shutdown_signal() {

@@ -7,6 +7,7 @@ pub mod blocking;
 pub mod clock;
 pub mod error;
 pub mod ids;
+pub mod rate_limit;
 pub mod sqlite;
 
 // Re-exported for a nicer `crate::shared::X` surface. Not yet used outside

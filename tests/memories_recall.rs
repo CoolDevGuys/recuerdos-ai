@@ -166,6 +166,49 @@ async fn search_filters_by_category() {
 }
 
 #[tokio::test]
+async fn a_structural_filter_is_not_gated_behind_the_relevance_floor() {
+    // The floor exists so that a caller asking in prose does not receive
+    // near-noise dressed as a match. A request that names a category has
+    // already said what it wants in the store's vocabulary, so the floor must
+    // not answer it with nothing — that is a new bug, not a fix for the old
+    // one. The response reports which floor was actually in force.
+    let client = Client::spawn().await;
+    client
+        .save(json!({
+            "content": "We chose SQLite over Postgres because installer size matters more",
+            "category": "decision"
+        }))
+        .await;
+
+    let filtered = client
+        .search(json!({"query": "we chose", "categories": ["decision"]}))
+        .await;
+    assert_eq!(
+        filtered["min_relevance"].as_f64(),
+        Some(0.0),
+        "a category filter lifts the default floor: {filtered}"
+    );
+    assert_eq!(contents(&filtered).len(), 1, "got {filtered}");
+
+    // The same weak query with nothing but prose to go on keeps the floor.
+    let prose = client.search(json!({"query": "we chose"})).await;
+    assert!(
+        prose["min_relevance"].as_f64().unwrap_or(0.0) > 0.0,
+        "a prose-only search should still be floored: {prose}"
+    );
+
+    // And naming a number overrides all of it.
+    let explicit = client
+        .search(json!({"query": "we chose", "categories": ["decision"], "min_relevance": 0.99}))
+        .await;
+    assert_eq!(explicit["min_relevance"].as_f64(), Some(0.99), "{explicit}");
+    assert!(
+        contents(&explicit).is_empty(),
+        "an explicit floor of 0.99 must not be quietly ignored: {explicit}"
+    );
+}
+
+#[tokio::test]
 async fn search_filters_by_tag() {
     let client = Client::spawn().await;
     client

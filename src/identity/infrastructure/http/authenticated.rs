@@ -14,8 +14,11 @@ use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
 use crate::shared::error::RaError;
 use axum::extract::FromRequestParts;
+use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 
 /// Any valid credential.
 pub struct Authenticated(pub UserContext);
@@ -69,6 +72,38 @@ impl FromRequestParts<AppState> for WriteAccess {
         context.require(Scope::Write)?;
         Ok(WriteAccess(context))
     }
+}
+
+/// Authentication for a surface mounted as a *service* rather than as axum
+/// handlers — today that is only `/mcp`.
+///
+/// The MCP transport authenticates lazily: it reads the bearer token out of
+/// each tool call and forwards it to the REST API. Without this gate an
+/// unauthenticated request to `/mcp` is therefore *accepted* — rmcp
+/// allocates a session, replies to `initialize`, and only fails later,
+/// inside a tool, where the answer is delivered as a JSON-RPC error even
+/// though it is an HTTP fact. Worse, session state is allocated for callers
+/// who have not proved who they are, which hands the sizing of that memory
+/// to whoever finds the port.
+///
+/// So the credential is checked here, and the request never reaches rmcp if
+/// it fails. The token is verified again by the tool's own loopback call:
+/// two argon2 runs per tool call is the deliberate price of having exactly
+/// one authentication path, rather than the MCP surface trusting a
+/// credential some other layer vouches for.
+pub async fn require_authentication(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    if let Err(error) = authenticate(&parts, &state).await {
+        // `RaError` renders the 401 with its `WWW-Authenticate: Bearer`, so
+        // this surface says how to authenticate exactly as the REST routes
+        // do.
+        return error.into_response();
+    }
+    next.run(Request::from_parts(parts, body)).await
 }
 
 async fn authenticate(parts: &Parts, state: &AppState) -> Result<UserContext, RaError> {
@@ -152,11 +187,13 @@ mod tests {
     use crate::bootstrap::wiring::Identity;
     use crate::shared::sqlite::SqliteDatabase;
     use axum::Router;
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
+    use axum::http::header::WWW_AUTHENTICATE;
     use axum::http::{Request, StatusCode};
+    use axum::middleware;
     use axum::routing::get;
     use std::sync::Arc;
-    use tower::ServiceExt;
+    use tower::{ServiceExt, service_fn};
 
     /// A router exposing one route per extractor, so each can be probed
     /// independently — including the scope rejection that Phase 1 has no
@@ -201,6 +238,7 @@ mod tests {
             understanding,
             consolidation,
             auth_mode,
+            rate_limit: crate::bootstrap::config::RateLimitConfig::default(),
             mcp_http: false,
             mcp_allowed_hosts: Vec::new(),
             ingest_timeout: std::time::Duration::from_secs(180),
@@ -219,9 +257,27 @@ mod tests {
                 "/write",
                 get(|WriteAccess(ctx): WriteAccess| async move { ctx.handle().to_string() }),
             )
+            .merge(gated(state.clone()))
             .with_state(state);
 
         (router, identity)
+    }
+
+    /// A surface mounted as a *service* and gated by
+    /// [`require_authentication`], which is how `/mcp` is mounted. It answers
+    /// "served" so a test can tell a rejection apart from a pass-through.
+    fn gated(state: AppState) -> Router<AppState> {
+        Router::new()
+            .nest_service(
+                "/gated",
+                service_fn(|_: axum::extract::Request| async {
+                    Ok::<_, std::convert::Infallible>(Response::new(Body::from("served")))
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_authentication,
+            ))
     }
 
     fn issue(identity: &Identity, handle: &str, scopes: Vec<Scope>) -> String {
@@ -245,6 +301,86 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    /// Status, `WWW-Authenticate` value, and body of a gate response.
+    async fn probe(
+        router: &Router,
+        path: &str,
+        header: Option<&str>,
+    ) -> (StatusCode, Option<String>, String) {
+        let mut request = Request::builder().method("POST").uri(path);
+        if let Some(value) = header {
+            request = request.header(AUTHORIZATION, value);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let challenge = response
+            .headers()
+            .get(WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+
+        (status, challenge, body)
+    }
+
+    #[tokio::test]
+    async fn the_service_gate_answers_a_missing_credential_with_a_challenge() {
+        let (router, _) = app(AuthMode::ApiKey);
+
+        let (status, challenge, body) = probe(&router, "/gated", None).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some("Bearer"), "RFC 9110");
+        assert!(
+            !body.contains("served"),
+            "the gated service ran without a credential: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_service_gate_answers_a_bad_key_the_same_way() {
+        let (router, _) = app(AuthMode::ApiKey);
+
+        let (status, _, body) = probe(&router, "/gated", Some("Bearer ra_live_nonsense")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!body.contains("served"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_service_gate_lets_a_valid_key_through() {
+        let (router, identity) = app(AuthMode::ApiKey);
+        let key = issue(&identity, "alex", vec![Scope::Read]);
+
+        let (status, _, body) = probe(&router, "/gated", Some(&format!("Bearer {key}"))).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "served");
+    }
+
+    #[tokio::test]
+    async fn the_service_gate_passes_single_user_mode_through() {
+        // No credential exists to present in `auth_mode = "none"`, so the
+        // gate must not become the thing that makes a local `/mcp` unusable.
+        let (router, _) = app(AuthMode::None);
+
+        let (status, _, body) = probe(&router, "/gated", None).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "served");
     }
 
     #[tokio::test]

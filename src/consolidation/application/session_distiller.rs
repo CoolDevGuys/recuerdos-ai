@@ -81,15 +81,17 @@ impl SessionDistiller {
             session_id: transcript.session_id.clone(),
         };
 
-        let memory_ids = self.pipeline.execute(context, &payload).await?;
+        let outcome = self.pipeline.execute(context, &payload).await?;
 
         tracing::info!(
-            distilled = memory_ids.len(),
+            distilled = outcome.memory_ids.len(),
             session_id = transcript.session_id.as_deref().unwrap_or("-"),
             "session distilled"
         );
 
-        Ok(Distillation { memory_ids })
+        Ok(Distillation {
+            memory_ids: outcome.memory_ids,
+        })
     }
 }
 

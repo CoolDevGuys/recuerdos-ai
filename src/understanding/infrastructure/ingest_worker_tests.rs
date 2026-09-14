@@ -14,7 +14,8 @@ use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use crate::shared::sqlite::SqliteDatabase;
 use crate::understanding::domain::ingest_job::{IngestPayload, JobQueue, JobStatus};
-use crate::understanding::domain::ingest_pipeline::IngestPipeline;
+use crate::understanding::domain::ingest_pipeline::IngestStatus;
+use crate::understanding::domain::ingest_pipeline::{IngestOutcome, IngestPipeline};
 use chrono::Utc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,12 +23,12 @@ use tokio::sync::Notify;
 
 /// A pipeline that follows a script and records what it saw.
 struct ScriptedPipeline {
-    outcomes: Mutex<Vec<Result<Vec<MemoryId>>>>,
+    outcomes: Mutex<Vec<Result<IngestOutcome>>>,
     seen: Mutex<Vec<(String, String)>>,
 }
 
 impl ScriptedPipeline {
-    fn new(outcomes: Vec<Result<Vec<MemoryId>>>) -> Arc<Self> {
+    fn new(outcomes: Vec<Result<IngestOutcome>>) -> Arc<Self> {
         Arc::new(Self {
             outcomes: Mutex::new(outcomes),
             seen: Mutex::new(Vec::new()),
@@ -46,7 +47,7 @@ impl IngestPipeline for ScriptedPipeline {
         &self,
         context: &UserContext,
         payload: &IngestPayload,
-    ) -> Result<Vec<MemoryId>> {
+    ) -> Result<IngestOutcome> {
         self.seen
             .lock()
             .unwrap()
@@ -54,7 +55,7 @@ impl IngestPipeline for ScriptedPipeline {
 
         let mut outcomes = self.outcomes.lock().unwrap();
         if outcomes.is_empty() {
-            return Ok(vec![]);
+            return Ok(IngestOutcome::empty(IngestStatus::NothingDurable));
         }
         outcomes.remove(0)
     }
@@ -136,7 +137,7 @@ async fn eventually(mut check: impl FnMut() -> bool, what: &str) {
 #[tokio::test]
 async fn a_job_is_picked_up_and_marked_done() {
     let produced = vec![MemoryId::new()];
-    let pipeline = ScriptedPipeline::new(vec![Ok(produced.clone())]);
+    let pipeline = ScriptedPipeline::new(vec![Ok(IngestOutcome::stored(produced.clone()))]);
     let harness = start(Arc::clone(&pipeline) as Arc<dyn IngestPipeline>, 3).await;
 
     let id = harness
@@ -174,7 +175,7 @@ async fn a_transient_failure_is_retried_and_then_succeeds() {
     // user ever learning it happened.
     let pipeline = ScriptedPipeline::new(vec![
         Err(RaError::Internal("provider returned 503".to_string())),
-        Ok(vec![MemoryId::new()]),
+        Ok(IngestOutcome::stored(vec![MemoryId::new()])),
     ]);
     let harness = start(Arc::clone(&pipeline) as Arc<dyn IngestPipeline>, 5).await;
 
@@ -277,7 +278,8 @@ async fn unacceptable_content_fails_immediately_rather_than_burning_attempts() {
 async fn an_empty_extraction_is_success_not_failure() {
     // Small talk produces no memories. Treating that as an error would
     // dead-letter every "thanks!" a user sends.
-    let pipeline = ScriptedPipeline::new(vec![Ok(vec![])]);
+    let pipeline =
+        ScriptedPipeline::new(vec![Ok(IngestOutcome::empty(IngestStatus::AlreadyKnown))]);
     let harness = start(Arc::clone(&pipeline) as Arc<dyn IngestPipeline>, 3).await;
 
     let id = harness
@@ -326,7 +328,7 @@ async fn a_restart_resumes_work_left_pending() {
         .enqueue(&alex, &payload("survive the deploy"), Utc::now())
         .unwrap();
 
-    let pipeline = ScriptedPipeline::new(vec![Ok(vec![MemoryId::new()])]);
+    let pipeline = ScriptedPipeline::new(vec![Ok(IngestOutcome::stored(vec![MemoryId::new()]))]);
     let workers = IngestWorkers {
         queue: Arc::clone(&queue),
         pipeline: Arc::clone(&pipeline) as Arc<dyn IngestPipeline>,
@@ -382,7 +384,7 @@ async fn a_job_held_by_a_crashed_process_is_reclaimed_at_startup() {
         "precondition: the job looks held"
     );
 
-    let pipeline = ScriptedPipeline::new(vec![Ok(vec![MemoryId::new()])]);
+    let pipeline = ScriptedPipeline::new(vec![Ok(IngestOutcome::stored(vec![MemoryId::new()]))]);
     let workers = IngestWorkers {
         queue: Arc::clone(&queue),
         pipeline: Arc::clone(&pipeline) as Arc<dyn IngestPipeline>,

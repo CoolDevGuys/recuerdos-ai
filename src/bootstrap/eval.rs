@@ -39,7 +39,7 @@ use std::sync::Arc;
 /// Five because that is roughly what fits in an agent's context budget
 /// alongside an actual conversation — a memory ranked eighth is not
 /// wrong, it is just never seen.
-const K: usize = 5;
+const K: i64 = 5;
 
 #[derive(Debug, Deserialize)]
 struct EvalSet {

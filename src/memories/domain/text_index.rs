@@ -17,5 +17,16 @@ pub trait TextIndex: Send + Sync {
     fn remove(&self, context: &UserContext, id: MemoryId) -> Result<()>;
 
     /// Best matches for `query`, best first, scoped to this user.
-    fn search(&self, context: &UserContext, query: &str, limit: usize) -> Result<Vec<MemoryId>>;
+    ///
+    /// Returns `(id, score)` pairs where `score` is the raw BM25 weight —
+    /// unbounded, and on a scale that moves with the corpus. It is
+    /// therefore *not* comparable to the vector leg's similarity, and must
+    /// be saturated before it can be read as relevance; a higher number
+    /// only ever means "this leg matched it better".
+    fn search(
+        &self,
+        context: &UserContext,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(MemoryId, f32)>>;
 }

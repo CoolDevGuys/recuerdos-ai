@@ -24,9 +24,9 @@ use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::{MemorySource, NewMemory};
 use crate::shared::error::Result;
-use crate::shared::ids::MemoryId;
 use crate::understanding::application::memory_ingestor::DEFAULT_ACTOR;
 use crate::understanding::domain::ingest_job::IngestPayload;
+use crate::understanding::domain::ingest_pipeline::IngestOutcome;
 use crate::understanding::domain::ingest_pipeline::IngestPipeline;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ impl IngestPipeline for VerbatimIngestor {
         &self,
         context: &UserContext,
         payload: &IngestPayload,
-    ) -> Result<Vec<MemoryId>> {
+    ) -> Result<IngestOutcome> {
         // The caller's category wins when they gave one — they know more
         // about the content than a keyword rule does. An unparseable one
         // is an error, not something to quietly ignore: a client sending
@@ -85,7 +85,9 @@ impl IngestPipeline for VerbatimIngestor {
                 crate::shared::error::RaError::Internal(format!("a save task panicked: {error}"))
             })??;
 
-        Ok(vec![memory.id()])
+        // Always exactly one, and never empty: verbatim storage cannot
+        // decide that the user's own words were not worth keeping.
+        Ok(IngestOutcome::stored(vec![memory.id()]))
     }
 }
 
@@ -155,7 +157,8 @@ mod tests {
         let stored = ingestor(&fixture)
             .execute(&fixture.alex, &payload("The backend runs on Hetzner"))
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories
@@ -180,7 +183,8 @@ mod tests {
             let stored = ingestor(&fixture)
                 .execute(&fixture.alex, &payload(content))
                 .await
-                .unwrap();
+                .unwrap()
+                .memory_ids;
             let memory = fixture
                 .memories
                 .find(&fixture.alex, stored[0])
@@ -205,7 +209,8 @@ mod tests {
                 &payload("We decided to use SQLite because the installer has to stay small"),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories
@@ -222,7 +227,8 @@ mod tests {
         let stored = ingestor(&fixture)
             .execute(&fixture.alex, &payload("The API is written in Rust"))
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories
@@ -246,7 +252,8 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories
@@ -269,7 +276,8 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
+            .unwrap()
+            .memory_ids;
 
         let memory = fixture
             .memories

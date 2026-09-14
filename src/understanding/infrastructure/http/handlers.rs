@@ -11,6 +11,7 @@ use crate::shared::blocking::blocking;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::{JobId, MemoryId};
 use crate::understanding::domain::ingest_job::{IngestPayload, JobStatus};
+use crate::understanding::domain::ingest_pipeline::IngestOutcome;
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -53,12 +54,18 @@ pub async fn ingest(
 
     let (job_id, outcome) = ingest_inline(&state, &context, payload).await?;
     match outcome {
-        Ok(memory_ids) => Ok((
+        Ok(outcome) => Ok((
             StatusCode::CREATED,
             Json(IngestedResponse {
                 job_id: job_id.to_string(),
                 status: status_name(JobStatus::Succeeded),
-                memory_ids: memory_ids.iter().map(MemoryId::to_string).collect(),
+                memory_ids: outcome.memory_ids.iter().map(MemoryId::to_string).collect(),
+                // The machine-readable "what happened", including the three
+                // kinds of nothing. An empty `memory_ids` on its own cannot
+                // tell a caller whether to say "saved", "already knew it" or
+                // "there was nothing in that", and a client forced to infer
+                // it will infer the cheerful option.
+                outcome: outcome.status,
                 understanding: state.understanding.enabled,
             }),
         )
@@ -141,16 +148,18 @@ pub async fn ingest_batch(
     for payload in payloads {
         let (job_id, outcome) = ingest_inline(&state, &context, payload).await?;
         results.push(match outcome {
-            Ok(memory_ids) => BatchItemResult {
+            Ok(outcome) => BatchItemResult {
                 job_id: job_id.to_string(),
                 status: status_name(JobStatus::Succeeded),
-                memory_ids: memory_ids.iter().map(MemoryId::to_string).collect(),
+                memory_ids: outcome.memory_ids.iter().map(MemoryId::to_string).collect(),
+                outcome: Some(outcome.status),
                 error: None,
             },
             Err(error) => BatchItemResult {
                 job_id: job_id.to_string(),
                 status: status_name(JobStatus::DeadLetter),
                 memory_ids: Vec::new(),
+                outcome: None,
                 error: Some(error.to_string()),
             },
         });
@@ -192,7 +201,7 @@ async fn ingest_inline(
     state: &AppState,
     context: &UserContext,
     payload: IngestPayload,
-) -> Result<(JobId, Result<Vec<MemoryId>>)> {
+) -> Result<(JobId, Result<IngestOutcome>)> {
     let job_id = enqueue_only(state, context, &payload).await?;
 
     // Claim to lock: flips this job to running so a worker cannot pick it
@@ -213,10 +222,10 @@ async fn ingest_inline(
     let finish_now = state.identity.clock.now();
 
     match outcome {
-        Ok(memory_ids) => {
-            let recorded = memory_ids.clone();
+        Ok(outcome) => {
+            let recorded = outcome.memory_ids.clone();
             blocking(move || queue.succeed(job_id, &recorded, finish_now)).await?;
-            Ok((job_id, Ok(memory_ids)))
+            Ok((job_id, Ok(outcome)))
         }
         Err(error) => {
             let message = error.to_string();
