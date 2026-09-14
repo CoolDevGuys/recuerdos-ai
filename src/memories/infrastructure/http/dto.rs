@@ -71,7 +71,17 @@ pub struct UpdateMemoryRequest {
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
-    pub limit: Option<usize>,
+    /// Signed so a client sending `-5` gets the domain's complaint about
+    /// the allowed range rather than a deserializer's about Rust's number
+    /// types.
+    pub limit: Option<i64>,
+    /// Overrides `[retrieval].min_relevance` for this query. `Some(0.0)`
+    /// means "show me everything the indexes returned, however weak";
+    /// omitted means use the server's floor — except on a request that
+    /// filters by category, subcategory or tag, where omitting it lifts the
+    /// floor: a caller who named a slice has said what they want without
+    /// needing their wording to carry it.
+    pub min_relevance: Option<f32>,
     #[serde(default)]
     pub categories: Vec<String>,
     #[serde(default)]
@@ -125,6 +135,14 @@ impl From<&Memory> for MemoryResponse {
 pub struct SearchHit {
     #[serde(flatten)]
     pub memory: MemoryResponse,
+    /// How relevant this memory is to the query, `0.0..=1.0`. The number to
+    /// read: it is measured from the matches themselves, so a query with no
+    /// good answer produces low numbers rather than a healthy-looking
+    /// top hit.
+    pub relevance: f32,
+    /// The fused rank score. Only meaningful as a sort key within one
+    /// response — it is built from result positions, so it is always a
+    /// small positive number regardless of match quality.
     pub score: f32,
     /// Why this result was returned. Surfaced so a surprising ranking can
     /// be explained rather than merely distrusted.
@@ -147,6 +165,7 @@ impl From<&ScoredMemory> for SearchHit {
     fn from(scored: &ScoredMemory) -> Self {
         Self {
             memory: MemoryResponse::from(&scored.memory),
+            relevance: scored.relevance,
             score: scored.score,
             matched: MatchResponse {
                 vector_rank: scored.match_detail.vector_rank,
@@ -161,6 +180,11 @@ impl From<&ScoredMemory> for SearchHit {
 pub struct SearchResponse {
     pub results: Vec<SearchHit>,
     pub took_ms: u64,
+    /// The floor that produced this list. An empty list with a floor above
+    /// `0.0` means "nothing cleared it", which is a different fact from
+    /// "nothing matched at all" and lets a client decide between giving up
+    /// and retrying with `min_relevance: 0.0`.
+    pub min_relevance: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -270,6 +294,7 @@ mod tests {
     #[test]
     fn a_search_response_omits_absent_ranks_rather_than_sending_null() {
         let hit = SearchHit {
+            relevance: 0.8,
             memory: MemoryResponse {
                 id: "m1".to_string(),
                 content: "x".to_string(),

@@ -5,7 +5,9 @@
 //! over a different protocol. No memory rules live here.
 
 use super::http_memory_toolbox::HttpMemoryToolbox;
-use super::memory_toolbox::{DistillRequest, MemoryToolbox, RecallRequest, SaveRequest};
+use super::memory_toolbox::{
+    BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest,
+};
 use super::tool_text;
 use crate::shared::error::RaError;
 use chrono::{DateTime, Utc};
@@ -18,6 +20,7 @@ use rmcp::model::{
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub const PROFILE_URI: &str = "memory://profile";
@@ -57,8 +60,8 @@ pub struct RecallParams {
     /// Optional category filter.
     #[serde(default)]
     pub categories: Vec<String>,
-    /// How many to return. Defaults to the server's configured limit.
-    pub limit: Option<usize>,
+    /// How many to return, at least 1. Defaults to the server's configured limit.
+    pub limit: Option<i64>,
     /// Optional point in time (RFC 3339, e.g. "2026-06-01T00:00:00Z") to
     /// read connected memories as of — "what was true before the
     /// migration?". Omit for the current view. Only affects graph-connected
@@ -195,9 +198,8 @@ impl MemoryMcpServer {
             .await
             .map_err(to_mcp_error)?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            tool_text::render_saved(&outcome),
-        )]))
+        let text = tool_text::render_saved(&outcome);
+        Ok(save_result(&text, &outcome))
     }
 
     /// Save several memories in one call, when the user has stated multiple durable things
@@ -235,9 +237,8 @@ impl MemoryMcpServer {
             .await
             .map_err(to_mcp_error)?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            tool_text::render_saved_batch(&outcome),
-        )]))
+        let text = tool_text::render_saved_batch(&outcome);
+        Ok(save_batch_result(&text, &outcome))
     }
 
     /// Search the user's stored memories by meaning and by keyword.
@@ -272,6 +273,10 @@ impl MemoryMcpServer {
                 query: params.query,
                 categories: params.categories,
                 limit: params.limit,
+                // The server's floor: a caller with an opinion about it has
+                // the REST surface, and every MCP caller is an agent, which
+                // is exactly the audience the floor is tuned for.
+                min_relevance: None,
                 as_of,
             })
             .await
@@ -457,6 +462,51 @@ fn strip_bearer(header: &str) -> String {
 /// Parses the `as_of` tool argument. A model passes it as an RFC 3339
 /// string; a malformed one is the caller's mistake, so it surfaces as an
 /// invalid-params error rather than being silently ignored.
+/// A save result carrying both halves of the answer.
+///
+/// The prose is for the model, which is what reads it; the structured content
+/// is for the client, which should not have to parse English to learn whether
+/// anything was written. The spec makes `outputSchema` optional, so declaring
+/// none is legal — the shape is small and stable:
+/// `{"status": ..., "understanding": ..., "stored": [...]}`.
+fn save_result(text: &str, outcome: &SaveOutcome) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text.to_string())]);
+    result.structured_content = Some(json!({
+        "status": outcome.status,
+        "understanding": outcome.understanding,
+        "stored": stored_json(&outcome.memories),
+    }));
+    result
+}
+
+/// The batch form: one entry per submitted item, in order, so a client can
+/// tell a NOOP item from a failed one without reading the summary sentence.
+fn save_batch_result(text: &str, outcome: &BatchSaveOutcome) -> CallToolResult {
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text.to_string())]);
+    result.structured_content = Some(json!({
+        "understanding": outcome.understanding,
+        "items": outcome.items.iter().map(|item| json!({
+            "status": item.status,
+            "error": item.error,
+            "stored": stored_json(&item.memories),
+        })).collect::<Vec<_>>(),
+    }));
+    result
+}
+
+fn stored_json(memories: &[super::memory_toolbox::ToolMemory]) -> Vec<Value> {
+    memories
+        .iter()
+        .map(|memory| {
+            json!({
+                "id": memory.id,
+                "category": memory.category,
+                "content": memory.content,
+            })
+        })
+        .collect()
+}
+
 fn parse_as_of(raw: &str) -> std::result::Result<DateTime<Utc>, RaError> {
     DateTime::parse_from_rfc3339(raw.trim())
         .map(|at| at.with_timezone(&Utc))

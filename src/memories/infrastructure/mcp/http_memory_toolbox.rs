@@ -11,7 +11,7 @@
 
 use super::memory_toolbox::{
     BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome,
-    SaveRequest, ToolMemory,
+    SaveRequest, SaveStatus, ToolMemory,
 };
 use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
@@ -125,6 +125,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
         Ok(SaveOutcome {
             memories,
             understanding,
+            status: SaveStatus::from_wire(&result["outcome"]),
         })
     }
 
@@ -160,6 +161,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
                 items.push(BatchItemOutcome {
                     memories: Vec::new(),
                     error: Some(error.to_string()),
+                    status: None,
                 });
                 continue;
             }
@@ -184,6 +186,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
             items.push(BatchItemOutcome {
                 memories,
                 error: None,
+                status: Some(SaveStatus::from_wire(&entry["outcome"])),
             });
         }
 
@@ -200,6 +203,9 @@ impl MemoryToolbox for HttpMemoryToolbox {
         });
         if let Some(limit) = request.limit {
             body["limit"] = json!(limit);
+        }
+        if let Some(min_relevance) = request.min_relevance {
+            body["min_relevance"] = json!(min_relevance);
         }
         if let Some(as_of) = request.as_of {
             // serde renders it RFC 3339, which the daemon's `SearchRequest`
@@ -252,11 +258,14 @@ impl MemoryToolbox for HttpMemoryToolbox {
         Ok(memories)
     }
 
-    async fn find_candidates(&self, query: &str, limit: usize) -> Result<Vec<ToolMemory>> {
+    async fn find_candidates(&self, query: &str, limit: i64) -> Result<Vec<ToolMemory>> {
         self.recall(RecallRequest {
             query: query.to_string(),
             categories: Vec::new(),
             limit: Some(limit),
+            // Stricter than a recall, because the caller is about to delete
+            // one of these. See `RecallRequest::FORGET_MIN_RELEVANCE`.
+            min_relevance: Some(RecallRequest::FORGET_MIN_RELEVANCE),
             as_of: None,
         })
         .await
@@ -326,7 +335,7 @@ fn parse_memory(value: &Value) -> Result<ToolMemory> {
             })
             .unwrap_or_default(),
         created_at: parse_timestamp(&field("created_at")?)?,
-        score: value["score"].as_f64().map(|score| score as f32),
+        relevance: value["relevance"].as_f64().map(|value| value as f32),
     })
 }
 
@@ -348,7 +357,7 @@ mod tests {
             "category": "preference.coding",
             "tags": ["typescript"],
             "created_at": "2026-06-02T12:00:00Z",
-            "score": 0.91
+            "relevance": 0.91
         });
 
         let memory = parse_memory(&value).unwrap();
@@ -356,12 +365,15 @@ mod tests {
         assert_eq!(memory.content, "User prefers pnpm");
         assert_eq!(memory.category, "preference.coding");
         assert_eq!(memory.tags, vec!["typescript".to_string()]);
-        assert_eq!(memory.score, Some(0.91));
+        assert_eq!(memory.relevance, Some(0.91));
     }
 
     #[test]
-    fn a_memory_without_a_score_parses_as_unscored() {
-        // Saves return no score; only search results carry one.
+    fn a_memory_without_a_relevance_parses_as_unmeasured() {
+        // Saves return no relevance; only search results carry one. A tool
+        // that rendered this as "relevance 0.00" would be claiming the save
+        // was a bad match, which is a category error — it was never a match
+        // at all, it was the thing just stored.
         let value = json!({
             "id": "019f7c5a-0000-7000-8000-000000000001",
             "content": "x",
@@ -371,7 +383,7 @@ mod tests {
 
         let memory = parse_memory(&value).unwrap();
 
-        assert_eq!(memory.score, None);
+        assert_eq!(memory.relevance, None);
         assert!(memory.tags.is_empty());
     }
 

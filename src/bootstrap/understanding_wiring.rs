@@ -17,6 +17,7 @@ use crate::providers::infrastructure::chat::{
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
+use crate::understanding::application::intent_first_ingestor::IntentFirstIngestor;
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
 use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
@@ -157,27 +158,38 @@ impl Understanding {
             config.understanding.taxonomy.extra_categories.clone(),
         ));
 
+        // Built in every mode, not just the provider-less one: a submission
+        // that names its own category is routed here even with a model
+        // configured, so a caller who said what it is does not have it
+        // paraphrased, split and re-filed on the way in. See
+        // `IntentFirstIngestor` for why that is the caller's right and what
+        // giving up reconciliation costs.
+        let verbatim: Arc<dyn IngestPipeline> = Arc::new(VerbatimIngestor::new(
+            Arc::clone(&memories.saver),
+            config.understanding.taxonomy.extra_categories.clone(),
+        ));
+
         let pipeline: Arc<dyn IngestPipeline> = match &model {
-            Some(model) => Arc::new(MemoryIngestor::new(
-                Arc::new(CandidateExtractor::new(
-                    Arc::clone(model),
-                    Arc::clone(&taxonomy),
-                    config.graph.extract_relations(),
+            Some(model) => Arc::new(IntentFirstIngestor::new(
+                Arc::new(MemoryIngestor::new(
+                    Arc::new(CandidateExtractor::new(
+                        Arc::clone(model),
+                        Arc::clone(&taxonomy),
+                        config.graph.extract_relations(),
+                    )),
+                    Arc::new(MemoryReconciler::new(
+                        Arc::clone(&memories.recaller),
+                        Arc::clone(&memories.saver),
+                        Arc::clone(&memories.forgetter),
+                        Arc::clone(&memories.repository),
+                        Arc::clone(model),
+                        memories.graph.clone(),
+                        config.understanding.reconcile,
+                    )),
                 )),
-                Arc::new(MemoryReconciler::new(
-                    Arc::clone(&memories.recaller),
-                    Arc::clone(&memories.saver),
-                    Arc::clone(&memories.forgetter),
-                    Arc::clone(&memories.repository),
-                    Arc::clone(model),
-                    memories.graph.clone(),
-                    config.understanding.reconcile,
-                )),
+                verbatim,
             )),
-            None => Arc::new(VerbatimIngestor::new(
-                Arc::clone(&memories.saver),
-                config.understanding.taxonomy.extra_categories.clone(),
-            )),
+            None => verbatim,
         };
 
         let enabled = config.understanding.provider != "none";

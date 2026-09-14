@@ -11,7 +11,7 @@ use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
-use crate::memories::domain::recall_ranker::RecallRanker;
+use crate::memories::domain::recall_ranker::{RecallRanker, RelevanceCalibration};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
@@ -56,6 +56,9 @@ pub struct Memories {
     /// Config echoes the handlers need when parsing requests.
     pub extra_categories: Vec<String>,
     pub default_limit: usize,
+    /// The relevance floor every agent-facing read applies unless the
+    /// request overrides it. See `[retrieval].min_relevance`.
+    pub min_relevance: f32,
 }
 
 impl Memories {
@@ -132,7 +135,10 @@ impl Memories {
                 Arc::clone(&text),
                 Arc::clone(&embedder),
                 RecallRanker::new(config.retrieval.recency_half_life_days)
-                    .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor),
+                    .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
+                    .with_relevance_calibration(RelevanceCalibration::new(
+                        config.retrieval.similarity_baseline,
+                    )),
                 Arc::clone(&clock),
                 graph.clone(),
                 config.graph.max_hops,
@@ -161,6 +167,7 @@ impl Memories {
             graph,
             extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,
+            min_relevance: config.retrieval.min_relevance,
         })
     }
 }

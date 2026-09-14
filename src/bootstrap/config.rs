@@ -28,6 +28,7 @@ pub struct AppConfig {
     pub retrieval: RetrievalConfig,
     pub graph: GraphConfig,
     pub auth: AuthConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,6 +84,51 @@ impl Default for McpConfig {
             stdio: true,
             http: true,
             allowed_hosts: Vec::new(),
+        }
+    }
+}
+
+/// `[rate_limit]`: per-caller request budget (`shared::rate_limit`).
+///
+/// The MCP surface is the reason this exists at all: a client in a retry loop
+/// (or a hostile one) would otherwise get an unlimited number of argon2
+/// verifications and LLM ingest calls, which are the two most expensive
+/// things this daemon does. Because the budget is per caller, an agent
+/// misbehaving costs it its own throughput rather than everyone else's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// `false` turns the limiter off entirely — the documented answer for a
+    /// single-user daemon behind something else that rate limits, rather than
+    /// a big number that is nearly off.
+    pub enabled: bool,
+    /// Sustained requests per minute per caller.
+    pub requests_per_minute: u32,
+    /// What a caller may spend at once after being quiet. Above this, requests
+    /// are refused with 429 and a `Retry-After`.
+    pub burst: u32,
+    /// Whether to take the caller's address from `X-Forwarded-For`.
+    ///
+    /// Off by default because that header is a client-supplied identity: a
+    /// daemon reachable directly must not let a request pick the bucket it is
+    /// counted against. Turn it on only when a reverse proxy in front of this
+    /// daemon is the only way in, and rewrites the header itself.
+    pub trust_proxy: bool,
+}
+
+impl Default for RateLimitConfig {
+    /// 300/min with a burst of 60: an order of magnitude above what a
+    /// well-behaved agent does to a personal memory server in a minute, and
+    /// far below what would matter for a human clicking around. A save runs an
+    /// LLM pipeline, so the expensive routes are protected by the same number
+    /// as the cheap ones — one knob, and the failure mode of guessing wrong is
+    /// a 429 with a retry time, not data loss.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_minute: 300,
+            burst: 60,
+            trust_proxy: false,
         }
     }
 }
@@ -251,6 +297,38 @@ pub struct RetrievalConfig {
     pub hybrid: bool,
     pub default_limit: u32,
     pub recency_half_life_days: u32,
+    /// Results below this relevance are dropped rather than returned.
+    ///
+    /// Relevance is measured from what the indexes actually matched —
+    /// cosine similarity and BM25, baseline-corrected against
+    /// `[retrieval].similarity_baseline` — not from where a result ranked, so
+    /// unlike the rank score it means something in the abstract: `0.8` is
+    /// "this is about your question", `0.0` is "nothing here is, and this is
+    /// the least-bad of what we had".
+    ///
+    /// `0.25` sits in the gap measured on the default embedding model, where
+    /// an unrelated query tops out near `0.09` and a real answer starts near
+    /// `0.36`. It exists because a rank score cannot say "no match", and a
+    /// client that cannot hear "no match" invents one: a retrieval list of
+    /// near-noise gets summarised into a confident answer, and in the
+    /// `memory_forget` case it gets a wrong memory deleted. Set to `0.0` to
+    /// return every candidate the indexes produced, as an exhaustive admin
+    /// tool or an eval harness wants.
+    pub min_relevance: f32,
+    /// The cosine similarity at which the vector leg stops being evidence.
+    ///
+    /// Two unrelated English sentences measure 0.4–0.55 in a sentence
+    /// embedding space, so that much similarity is what *nothing* looks like
+    /// and it is subtracted before relevance is reported. Raising it makes
+    /// every relevance number smaller and the floor stricter without touching
+    /// the ranking; lowering it does the reverse.
+    ///
+    /// `0.5` was measured against `bge-small-en-v1.5`, the default. Changing
+    /// `[embeddings].model` changes the answer — a model that expects a
+    /// retrieval instruction on queries has a lower baseline — so a
+    /// deployment that swaps models and then finds recall too strict or too
+    /// loose should retune here first. `0.0` reports raw cosine.
+    pub similarity_baseline: f32,
 }
 
 impl Default for RetrievalConfig {
@@ -259,6 +337,8 @@ impl Default for RetrievalConfig {
             hybrid: true,
             default_limit: 8,
             recency_half_life_days: 90,
+            min_relevance: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_FLOOR,
+            similarity_baseline: 0.5,
         }
     }
 }
@@ -414,6 +494,18 @@ impl AppConfig {
                     .to_string(),
             );
         }
+        // 0 is accepted by the limiter itself (it clamps to 1) but is never
+        // what the author meant, and a rate limit that refuses nothing looks
+        // like one that is working.
+        if self.rate_limit.enabled && self.rate_limit.requests_per_minute == 0 {
+            issues.push(
+                "[rate_limit].requests_per_minute is 0 — use enabled = false to turn the limit off"
+                    .to_string(),
+            );
+        }
+        if self.rate_limit.enabled && self.rate_limit.burst == 0 {
+            issues.push("[rate_limit].burst is 0 — every request would be refused".to_string());
+        }
 
         if !STORAGE_BACKENDS.contains(&self.storage.backend.as_str()) {
             issues.push(format!(
@@ -482,6 +574,18 @@ impl AppConfig {
         }
         if self.retrieval.recency_half_life_days == 0 {
             issues.push("[retrieval].recency_half_life_days is 0".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.retrieval.min_relevance) {
+            issues.push(format!(
+                "[retrieval].min_relevance {} is out of range 0.0..=1.0 (0.0 disables the floor)",
+                self.retrieval.min_relevance
+            ));
+        }
+        if !(0.0..=0.99).contains(&self.retrieval.similarity_baseline) {
+            issues.push(format!(
+                "[retrieval].similarity_baseline {} is out of range 0.0..=0.99",
+                self.retrieval.similarity_baseline
+            ));
         }
 
         // Only when the graph is on: a zero here would silently make the
@@ -621,7 +725,7 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.create_file(
                 "recuerdos-ai.toml",
-                "[server]\nport = 0\n[embeddings]\nmodel = \"\"\n",
+                "[server]\nport = 0\n[embeddings]\nmodel = \"\"\n\n[rate_limit]\nburst = 0\n",
             )?;
 
             let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
@@ -633,10 +737,54 @@ mod tests {
             );
             assert_eq!(
                 err.0.len(),
-                2,
-                "expected exactly these two issues: {:?}",
+                3,
+                "expected exactly these three issues: {:?}",
                 err.0
             );
+            assert!(
+                err.0.iter().any(|m| m.contains("[rate_limit].burst is 0")),
+                "a burst of 0 refuses every request, which reads as a working limit: {:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_zero_rate_is_rejected_rather_than_silently_clamped() {
+        // The limiter itself would treat 0 as 1, but a config that means
+        // "off" should say so: `enabled = false` exists for exactly that.
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rate_limit]\nrequests_per_minute = 0\n",
+            )?;
+
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0
+                    .iter()
+                    .any(|m| m.contains("[rate_limit].requests_per_minute is 0")),
+                "{:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_disabled_rate_limit_may_carry_any_numbers() {
+        // Numbers that would be refused while enabled are inert once the
+        // limiter is off, and refusing them would block `enabled = false`
+        // from being the one documented escape hatch.
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rate_limit]\nenabled = false\nrequests_per_minute = 0\nburst = 0\n",
+            )?;
+
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
+            assert!(!config.rate_limit.enabled);
             Ok(())
         });
     }

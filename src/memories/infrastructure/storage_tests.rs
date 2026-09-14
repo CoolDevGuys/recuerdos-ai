@@ -24,6 +24,18 @@ use std::sync::Arc;
 
 const DIMENSIONS: usize = 4;
 
+/// The ids out of a leg's `(id, score)` answers, for the assertions here
+/// that are about *which* memories came back rather than how they scored.
+trait JustIds {
+    fn into_ids(self) -> Vec<MemoryId>;
+}
+
+impl JustIds for Vec<(MemoryId, f32)> {
+    fn into_ids(self) -> Vec<MemoryId> {
+        self.into_iter().map(|(id, _)| id).collect()
+    }
+}
+
 struct Fixture {
     memories: SqliteMemoryRepository,
     vectors: SqliteVectorIndex,
@@ -544,7 +556,8 @@ fn vector_search_returns_the_nearest_first() {
     let hits = fixture
         .vectors
         .search(&fixture.alex, &[0.9, 0.1, 0.0, 0.0], 10)
-        .unwrap();
+        .unwrap()
+        .into_ids();
 
     assert_eq!(hits.first(), Some(&near.id()));
     assert_eq!(hits.len(), 2);
@@ -567,10 +580,18 @@ fn vector_search_never_crosses_users_even_for_identical_vectors() {
         .upsert(&fixture.sam, sam_memory.id(), &vector)
         .unwrap();
 
-    let alex_hits = fixture.vectors.search(&fixture.alex, &vector, 10).unwrap();
+    let alex_hits = fixture
+        .vectors
+        .search(&fixture.alex, &vector, 10)
+        .unwrap()
+        .into_ids();
     assert_eq!(alex_hits, vec![alex_memory.id()]);
 
-    let sam_hits = fixture.vectors.search(&fixture.sam, &vector, 10).unwrap();
+    let sam_hits = fixture
+        .vectors
+        .search(&fixture.sam, &vector, 10)
+        .unwrap()
+        .into_ids();
     assert_eq!(sam_hits, vec![sam_memory.id()]);
 }
 
@@ -591,7 +612,8 @@ fn upserting_the_same_memory_replaces_its_vector() {
     let hits = fixture
         .vectors
         .search(&fixture.alex, &[0.0, 1.0, 0.0, 0.0], 10)
-        .unwrap();
+        .unwrap()
+        .into_ids();
 
     assert_eq!(hits, vec![memory.id()], "the old vector was left behind");
 }
@@ -612,6 +634,7 @@ fn removing_a_vector_takes_it_out_of_search() {
             .vectors
             .search(&fixture.alex, &[1.0, 0.0, 0.0, 0.0], 10)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }
@@ -629,7 +652,11 @@ fn one_user_cannot_remove_anothers_vector() {
     fixture.vectors.remove(&fixture.sam, memory.id()).unwrap();
 
     assert_eq!(
-        fixture.vectors.search(&fixture.alex, &vector, 10).unwrap(),
+        fixture
+            .vectors
+            .search(&fixture.alex, &vector, 10)
+            .unwrap()
+            .into_ids(),
         vec![memory.id()],
         "another user's remove deleted this vector"
     );
@@ -656,6 +683,7 @@ fn searching_an_empty_index_returns_nothing() {
             .vectors
             .search(&fixture.alex, &[1.0, 0.0, 0.0, 0.0], 10)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }
@@ -674,11 +702,114 @@ fn a_zero_limit_returns_nothing_rather_than_erroring() {
             .vectors
             .search(&fixture.alex, &[1.0, 0.0, 0.0, 0.0], 0)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }
 
+/// The reported symptom this pins: results whose score cannot say "nothing
+/// here matches" because it is derived from rank position.
+///
+/// sqlite-vec reports L2 distance; every embedder this service ships returns
+/// unit-length vectors, so `cos = 1 - d²/2`. If the extension ever reports
+/// *squared* distance, or stops partitioning as expected, the arithmetic in
+/// `similarity_from_l2` is wrong and these assertions fail with the real
+/// numbers rather than quietly mis-thresholding every relevance floor in the
+/// system.
+#[test]
+fn vector_search_reports_cosine_similarity_of_the_match() {
+    let fixture = fixture();
+    let same = memory_for(&fixture.alex, "identical direction");
+    let orthogonal = memory_for(&fixture.alex, "unrelated direction");
+    let opposite = memory_for(&fixture.alex, "opposite direction");
+
+    fixture
+        .vectors
+        .upsert(&fixture.alex, same.id(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    fixture
+        .vectors
+        .upsert(&fixture.alex, orthogonal.id(), &[0.0, 1.0, 0.0, 0.0])
+        .unwrap();
+    fixture
+        .vectors
+        .upsert(&fixture.alex, opposite.id(), &[-1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+
+    let similarity = |query: [f32; 4], wanted: MemoryId| -> f32 {
+        fixture
+            .vectors
+            .search(&fixture.alex, &query, 10)
+            .unwrap()
+            .into_iter()
+            .find(|(id, _)| *id == wanted)
+            .unwrap_or_else(|| panic!("{wanted} missing from the results"))
+            .1
+    };
+
+    let query = [1.0, 0.0, 0.0, 0.0];
+    let identical = similarity(query, same.id());
+    let unrelated = similarity(query, orthogonal.id());
+    let opposed = similarity(query, opposite.id());
+
+    assert!(
+        (identical - 1.0).abs() < 1e-4,
+        "a vector queried against itself should be 1.0, got {identical}"
+    );
+    assert!(
+        unrelated.abs() < 1e-4,
+        "perpendicular vectors should be 0.0, got {unrelated}"
+    );
+    assert_eq!(
+        opposed, 0.0,
+        "the opposite direction clamps to 0.0 rather than going negative"
+    );
+
+    // Halfway between, in the sense that matters: a 45° separation is 0.707
+    // cosines, comfortably above a floor that means "this is about it".
+    let diagonal = [
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+    ];
+    let close = similarity(diagonal, same.id());
+    assert!(
+        (close - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4,
+        "a 45° separation should read as ~0.707, got {close}"
+    );
+}
+
 // ---- text index ----
+
+#[test]
+fn text_search_reports_a_bounded_positive_match_weight() {
+    let fixture = fixture();
+    let memory = memory_for(
+        &fixture.alex,
+        "the useQuery cache key includes the tenant id",
+    );
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    let hits = fixture.text.search(&fixture.alex, "useQuery", 10).unwrap();
+    let weight = hits.iter().find(|(id, _)| *id == memory.id()).unwrap().1;
+
+    // The exact value is tantivy's business; the sign and the finiteness are
+    // the contract this leg has to keep, because the relevance floor treats a
+    // negative weight as "no evidence" and a NaN would poison every result.
+    assert!(weight.is_finite() && weight > 0.0, "got {weight}");
+
+    // More matched terms is more evidence — the property saturation relies on.
+    let more = fixture
+        .text
+        .search(&fixture.alex, "useQuery cache tenant", 10)
+        .unwrap();
+    let stronger = more.iter().find(|(id, _)| *id == memory.id()).unwrap().1;
+    assert!(
+        stronger > weight,
+        "matching three terms ({stronger}) should outweigh matching one ({weight})"
+    );
+}
 
 #[test]
 fn text_search_finds_a_memory_by_its_words() {
@@ -692,7 +823,8 @@ fn text_search_finds_a_memory_by_its_words() {
     let hits = fixture
         .text
         .search(&fixture.alex, "barrel files", 10)
-        .unwrap();
+        .unwrap()
+        .into_ids();
 
     assert_eq!(hits, vec![memory.id()]);
 }
@@ -716,7 +848,11 @@ fn text_search_finds_an_exact_identifier_a_vector_would_blur() {
     fixture.text.upsert(&fixture.alex, &target).unwrap();
     fixture.text.upsert(&fixture.alex, &neighbour).unwrap();
 
-    let hits = fixture.text.search(&fixture.alex, "useQuery", 10).unwrap();
+    let hits = fixture
+        .text
+        .search(&fixture.alex, "useQuery", 10)
+        .unwrap()
+        .into_ids();
 
     assert_eq!(
         hits.first(),
@@ -735,7 +871,8 @@ fn text_search_matches_tags_and_category_too() {
         fixture
             .text
             .search(&fixture.alex, "typescript", 10)
-            .unwrap(),
+            .unwrap()
+            .into_ids(),
         vec![memory.id()],
         "tags should be searchable"
     );
@@ -743,7 +880,8 @@ fn text_search_matches_tags_and_category_too() {
         fixture
             .text
             .search(&fixture.alex, "preference.coding", 10)
-            .unwrap(),
+            .unwrap()
+            .into_ids(),
         vec![memory.id()],
         "category should be searchable"
     );
@@ -758,11 +896,19 @@ fn text_search_never_crosses_users() {
     fixture.text.upsert(&fixture.sam, &sam_memory).unwrap();
 
     assert_eq!(
-        fixture.text.search(&fixture.alex, "pnpm", 10).unwrap(),
+        fixture
+            .text
+            .search(&fixture.alex, "pnpm", 10)
+            .unwrap()
+            .into_ids(),
         vec![alex_memory.id()]
     );
     assert_eq!(
-        fixture.text.search(&fixture.sam, "pnpm", 10).unwrap(),
+        fixture
+            .text
+            .search(&fixture.sam, "pnpm", 10)
+            .unwrap()
+            .into_ids(),
         vec![sam_memory.id()]
     );
 }
@@ -774,7 +920,11 @@ fn reindexing_a_memory_does_not_duplicate_it() {
     fixture.text.upsert(&fixture.alex, &memory).unwrap();
     fixture.text.upsert(&fixture.alex, &memory).unwrap();
 
-    let hits = fixture.text.search(&fixture.alex, "pnpm", 10).unwrap();
+    let hits = fixture
+        .text
+        .search(&fixture.alex, "pnpm", 10)
+        .unwrap()
+        .into_ids();
 
     assert_eq!(
         hits.len(),
@@ -802,7 +952,11 @@ fn editing_a_memory_makes_the_new_words_findable_and_the_old_ones_not() {
     fixture.text.upsert(&fixture.alex, &edited).unwrap();
 
     assert_eq!(
-        fixture.text.search(&fixture.alex, "hetzner", 10).unwrap(),
+        fixture
+            .text
+            .search(&fixture.alex, "hetzner", 10)
+            .unwrap()
+            .into_ids(),
         vec![memory.id()]
     );
     assert!(
@@ -810,6 +964,7 @@ fn editing_a_memory_makes_the_new_words_findable_and_the_old_ones_not() {
             .text
             .search(&fixture.alex, "flyio", 10)
             .unwrap()
+            .into_ids()
             .is_empty(),
         "the superseded wording is still indexed"
     );
@@ -828,6 +983,7 @@ fn removing_a_memory_takes_it_out_of_text_search() {
             .text
             .search(&fixture.alex, "pnpm", 10)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }
@@ -841,7 +997,11 @@ fn one_user_cannot_remove_anothers_indexed_memory() {
     fixture.text.remove(&fixture.sam, memory.id()).unwrap();
 
     assert_eq!(
-        fixture.text.search(&fixture.alex, "pnpm", 10).unwrap(),
+        fixture
+            .text
+            .search(&fixture.alex, "pnpm", 10)
+            .unwrap()
+            .into_ids(),
         vec![memory.id()],
         "another user's remove deleted this document"
     );
@@ -857,7 +1017,8 @@ fn a_natural_language_question_matches_on_any_of_its_words() {
     let hits = fixture
         .text
         .search(&fixture.alex, "which package manager should I use?", 10)
-        .unwrap();
+        .unwrap()
+        .into_ids();
 
     assert_eq!(hits, vec![memory.id()]);
 }
@@ -885,6 +1046,7 @@ fn searching_an_empty_query_or_zero_limit_returns_nothing() {
             .text
             .search(&fixture.alex, "   ", 10)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
     assert!(
@@ -892,6 +1054,7 @@ fn searching_an_empty_query_or_zero_limit_returns_nothing() {
             .text
             .search(&fixture.alex, "pnpm", 0)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }
@@ -904,6 +1067,7 @@ fn searching_a_user_with_no_index_yet_is_empty_not_an_error() {
             .text
             .search(&fixture.sam, "anything", 10)
             .unwrap()
+            .into_ids()
             .is_empty()
     );
 }

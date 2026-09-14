@@ -58,15 +58,36 @@ pub async fn search_memories(
         .map(|raw| Category::parse_with_extras(raw, &memories.extra_categories))
         .collect::<Result<Vec<_>>>()?;
 
+    // The default floor exists for a caller who can only describe what they
+    // want in prose: without it, a weak similarity and a strong one look
+    // identical and unrelated memories arrive dressed as matches. A request
+    // that names a category, subcategory or tag has already said what it wants
+    // in the store's own vocabulary, so its prose is a preference *inside*
+    // that slice rather than the definition of it — holding the floor there
+    // would turn "what decisions have I stored?" into an empty answer merely
+    // because the wording was a poor vector match.
+    //
+    // An explicit number is never second-guessed, filtered or not.
+    let structurally_filtered = !request.categories.is_empty()
+        || !request.subcategories.is_empty()
+        || !request.tags.is_empty();
+    let min_relevance = match request.min_relevance {
+        Some(explicit) => explicit,
+        None if structurally_filtered => 0.0,
+        None => memories.min_relevance,
+    }
+    .clamp(0.0, 1.0);
+
     let mut query = RecallQuery::new(
         &request.query,
-        request.limit.unwrap_or(memories.default_limit),
+        request.limit.unwrap_or(memories.default_limit as i64),
     )?
     .with_categories(categories)
     .with_subcategories(request.subcategories)
     .with_tags(request.tags)
     .with_since(request.since)
-    .with_as_of(request.as_of);
+    .with_as_of(request.as_of)
+    .with_min_relevance(min_relevance);
     if request.include_superseded {
         query = query.including_superseded();
     }
@@ -77,6 +98,7 @@ pub async fn search_memories(
     Ok(Json(SearchResponse {
         results: results.iter().map(SearchHit::from).collect(),
         took_ms: started.elapsed().as_millis() as u64,
+        min_relevance,
     }))
 }
 

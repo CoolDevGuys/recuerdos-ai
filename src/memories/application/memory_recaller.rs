@@ -29,6 +29,7 @@ use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The longest entity name, in words, the query scanner will try to match.
@@ -87,16 +88,18 @@ impl MemoryRecaller {
         let embedding = self
             .embedder
             .embed_one(query.text(), EmbeddingTask::Query)?;
-        let vector_hits = RankedIds(self.vectors.search(context, &embedding, depth)?);
+        let vector_scores = self.vectors.search(context, &embedding, depth)?;
+        let vector_hits = ranked(&vector_scores);
+        let vector_scores = scores(&vector_scores);
 
         // A keyword failure degrades the result rather than failing the
         // request: half a hybrid search still answers the question, and
         // the caller would rather have that than an error.
-        let keyword_hits = match self.text.search(context, query.text(), depth) {
-            Ok(ids) => RankedIds(ids),
+        let (keyword_hits, keyword_scores) = match self.text.search(context, query.text(), depth) {
+            Ok(hits) => (ranked(&hits), scores(&hits)),
             Err(error) => {
                 tracing::warn!(%error, "keyword search failed; falling back to vectors only");
-                RankedIds::default()
+                (RankedIds::default(), HashMap::new())
             }
         };
 
@@ -134,6 +137,32 @@ impl MemoryRecaller {
             self.ranker
                 .rank(&vector_hits, &keyword_hits, candidates, now)
         };
+
+        // Relevance is attached after fusion because it is a different
+        // question from the one fusion answers. Fusion ranks; this measures
+        // how good a match each result actually is, which is what lets a
+        // caller — or the floor below — say "nothing here answers you"
+        // instead of always serving back the top of a list of noise.
+        for scored in &mut ranked {
+            scored.relevance = self.ranker.relevance(
+                vector_scores.get(&scored.memory.id()).copied(),
+                keyword_scores
+                    .get(&scored.memory.id())
+                    .copied()
+                    .unwrap_or_default(),
+                scored.match_detail.graph_rank.is_some()
+                    && scored.match_detail.vector_rank.is_none()
+                    && scored.match_detail.bm25_rank.is_none(),
+            );
+        }
+
+        // Before the truncate, so a caller asking for five results gets
+        // five relevant ones rather than three once the floor has eaten two
+        // of the five it was truncated to.
+        let floor = query.min_relevance();
+        if floor > 0.0 {
+            ranked.retain(|scored| scored.relevance >= floor);
+        }
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
@@ -183,6 +212,17 @@ impl MemoryRecaller {
             self.hop_limit,
         )
     }
+}
+
+/// One leg's `(id, score)` answers in the rank order the fusion wants.
+fn ranked(hits: &[(MemoryId, f32)]) -> RankedIds {
+    RankedIds(hits.iter().map(|(id, _)| *id).collect())
+}
+
+/// The same answers keyed by id, so relevance can be looked up per result
+/// after fusion has reordered them.
+fn scores(hits: &[(MemoryId, f32)]) -> HashMap<MemoryId, f32> {
+    hits.iter().copied().collect()
 }
 
 /// Every 1- to [`MAX_SEED_WORDS`]-word window of the query, canonicalised
@@ -552,6 +592,108 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].memory.subcategory(), Some("testing"));
+    }
+
+    #[test]
+    fn the_floor_drops_a_result_it_was_measured_against() {
+        // The reported symptom: a question with no answer in the store came
+        // back full of near-noise, every row wearing a confident score,
+        // because that score is a rank position and a rank-1 hit out of
+        // nothing still looks like a rank-1 hit.
+        //
+        // Asserted against the relevance the fixture's own indexes report
+        // rather than a hardcoded threshold: the fake embedder is a
+        // bag-of-words stand-in whose absolute numbers mean nothing, and a
+        // test that pinned one here would be testing the fake.
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm as their package manager");
+
+        let unrelated = query("the cat sat on the mat");
+        let measured = fixture
+            .recaller()
+            .execute(&fixture.alex, &unrelated)
+            .unwrap();
+
+        assert_eq!(
+            measured.len(),
+            1,
+            "with no floor the weak candidate comes back, which is what this test needs"
+        );
+        let noise = measured[0].relevance;
+
+        let above = fixture
+            .recaller()
+            .execute(
+                &fixture.alex,
+                &unrelated.clone().with_min_relevance(noise + 0.01),
+            )
+            .unwrap();
+        assert!(
+            above.is_empty(),
+            "a floor of {} left a result measuring {noise}",
+            noise + 0.01
+        );
+
+        // And the boundary is inclusive, so a floor set exactly at a
+        // result's own relevance does not delete it.
+        let at = fixture
+            .recaller()
+            .execute(&fixture.alex, &unrelated.with_min_relevance(noise))
+            .unwrap();
+        assert_eq!(
+            at.len(),
+            1,
+            "a floor exactly at {noise} should keep a result measuring {noise}"
+        );
+    }
+
+    #[test]
+    fn a_floor_spares_the_memory_that_actually_answers() {
+        // The other half: a floor that only ever deletes things is a broken
+        // floor. Between the noise and the real match there has to be room.
+        let fixture = Fixture::new();
+        let answering = fixture.save(&fixture.alex, "User prefers pnpm as their package manager");
+        let distraction = fixture.save(&fixture.alex, "The cat sat on the mat");
+
+        let results = fixture
+            .recaller()
+            .execute(
+                &fixture.alex,
+                &query("which package manager does the user prefer"),
+            )
+            .unwrap();
+
+        let relevance = |wanted: MemoryId| -> f32 {
+            results
+                .iter()
+                .find(|scored| scored.memory.id() == wanted)
+                .unwrap_or_else(|| panic!("{wanted} was not recalled at all"))
+                .relevance
+        };
+        let answer = relevance(answering.id());
+        let noise = relevance(distraction.id());
+
+        assert!(
+            answer > noise,
+            "the answering memory scored {answer}, the distraction {noise}"
+        );
+
+        // Anywhere in the gap works, so the assertion does not depend on
+        // where the fake model happens to land.
+        let between = (answer + noise) / 2.0;
+        let floored = fixture
+            .recaller()
+            .execute(
+                &fixture.alex,
+                &query("which package manager does the user prefer").with_min_relevance(between),
+            )
+            .unwrap();
+
+        assert_eq!(
+            contents(&floored),
+            vec!["User prefers pnpm as their package manager"],
+            "a floor between {noise} and {answer} kept the wrong one"
+        );
     }
 
     #[test]

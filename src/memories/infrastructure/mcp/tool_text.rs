@@ -27,7 +27,7 @@
 //! the agent's context window, and JSON spends tokens on punctuation the
 //! model does not need.
 
-use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, ToolMemory};
+use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, SaveStatus, ToolMemory};
 
 pub const PROFILE_DESCRIPTION: &str = "\
 A short digest of who this user is: their standing preferences, \
@@ -43,7 +43,14 @@ context the user should not have to repeat.";
 /// instruction, a `fact.project` is background.
 pub fn render_recall(memories: &[ToolMemory]) -> String {
     if memories.is_empty() {
-        return "No memories matched. Nothing has been stored on this subject.".to_string();
+        // Careful not to claim nothing was *stored*: results below the
+        // relevance floor are filtered rather than absent, and an agent that
+        // tells the user "I never saved that" on the strength of a floor is
+        // reporting the threshold as if it were the contents.
+        return "No memories matched this query well enough to return. Try different \
+words, or a category filter. If that finds nothing either, it was probably never \
+stored."
+            .to_string();
     }
 
     let mut output = String::new();
@@ -56,8 +63,8 @@ pub fn render_recall(memories: &[ToolMemory]) -> String {
         ));
 
         let mut annotations = vec![format!("saved {}", memory.created_at.format("%Y-%m-%d"))];
-        if let Some(score) = memory.score {
-            annotations.push(format!("score {score:.2}"));
+        if let Some(relevance) = memory.relevance {
+            annotations.push(format!("relevance {relevance:.2}"));
         }
         if !memory.tags.is_empty() {
             annotations.push(memory.tags.join(", "));
@@ -76,12 +83,33 @@ pub fn render_recall(memories: &[ToolMemory]) -> String {
 /// — both legitimate, and both very different from "saved". An agent told
 /// "saved" after a NOOP goes on to tell the user something untrue.
 pub fn render_saved(outcome: &SaveOutcome) -> String {
+    // The empty case used to be one blob, and an agent given a blob picks the
+    // reading it wants — "saved". Each kind of nothing now says which it was.
     if outcome.memories.is_empty() {
-        return if outcome.understanding {
-            "Nothing new was stored — either this is already known, or there was              nothing in it that stays true beyond this conversation. Do not tell the              user it was saved."
-                .to_string()
-        } else {
-            "Nothing was stored.".to_string()
+        return match outcome.status {
+            SaveStatus::NothingDurable => "Nothing was stored: there was nothing in it that \
+             stays true beyond this conversation — small talk, an acknowledgement, a step in \
+             the task. This is the expected answer to a lot of messages; do not rephrase it as \
+             a save, and do not try again with different words."
+                .to_string(),
+            SaveStatus::AlreadyKnown => "Nothing new was stored: the store already knows this. \
+             It is not lost — it will come back on recall. Saving it again only duplicates the \
+             question, so do not retry."
+                .to_string(),
+            SaveStatus::ChangedWithoutStoring => "Nothing was stored, but the store did change: \
+             this retracted or superseded what it already knew, and that update is done. Tell \
+             the user what changed rather than that something was saved."
+                .to_string(),
+            SaveStatus::Stored | SaveStatus::Unknown => {
+                if outcome.understanding {
+                    "Nothing was stored, and the reason is not known — it may already have been \
+                     known, or there may have been nothing durable in it. Do not tell the user \
+                     it was saved."
+                        .to_string()
+                } else {
+                    "Nothing was stored.".to_string()
+                }
+            }
         };
     }
 
@@ -227,7 +255,14 @@ pub fn render_distilled(memories: &[ToolMemory]) -> String {
 /// because a model that assumes otherwise will tell the user it has.
 pub fn render_forget_candidates(memories: &[ToolMemory]) -> String {
     if memories.is_empty() {
-        return "No memories matched, so there is nothing to forget.".to_string();
+        // Deleting the wrong memory is unrecoverable, so candidates are
+        // held to a stricter bar than a recall. Saying so is what turns a
+        // miss into a retry rather than a shrug — or, worse, a delete aimed
+        // at whatever the agent found instead.
+        return "Nothing matched closely enough to be a safe thing to delete, so \
+nothing is proposed. Describe it more specifically — its exact wording, category, \
+or a distinctive phrase — rather than deleting a near miss."
+            .to_string();
     }
 
     let mut output = String::from("Nothing has been deleted yet. These memories match:\n\n");
@@ -259,14 +294,14 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
-    fn memory(content: &str, score: Option<f32>) -> ToolMemory {
+    fn memory(content: &str, relevance: Option<f32>) -> ToolMemory {
         ToolMemory {
             id: "019f7c5a-0000-7000-8000-000000000001".to_string(),
             content: content.to_string(),
             category: "preference.coding".to_string(),
             tags: vec!["typescript".to_string()],
             created_at: Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap(),
-            score,
+            relevance,
         }
     }
 
@@ -278,7 +313,7 @@ mod tests {
 
         assert!(rendered.starts_with("1. [preference.coding] User prefers pnpm"));
         assert!(rendered.contains("saved 2026-06-02"));
-        assert!(rendered.contains("score 0.91"));
+        assert!(rendered.contains("relevance 0.91"));
         assert_eq!(rendered.lines().count(), 1, "one memory, one line");
     }
 
@@ -321,8 +356,12 @@ mod tests {
     fn forget_with_no_matches_does_not_invite_a_confirmation() {
         let rendered = render_forget_candidates(&[]);
 
-        assert!(rendered.contains("nothing to forget"), "{rendered}");
+        assert!(rendered.contains("nothing is proposed"), "{rendered}");
         assert!(!rendered.contains("confirm: true"), "{rendered}");
+        // The failure the strict bar can produce is "I couldn't find it", and
+        // the wrong recovery from that is deleting the nearest thing it did
+        // find. The message has to close that door.
+        assert!(rendered.contains("more specifically"), "{rendered}");
     }
 
     #[test]
@@ -330,6 +369,62 @@ mod tests {
         assert!(render_forgotten(1).contains("1 memory."));
         assert!(render_forgotten(3).contains("3 memories"));
         assert!(render_forgotten(0).contains("No memories were deleted"));
+    }
+
+    fn saved_nothing(status: SaveStatus) -> String {
+        render_saved(&SaveOutcome {
+            memories: vec![],
+            understanding: true,
+            status,
+        })
+    }
+
+    #[test]
+    fn a_save_that_found_nothing_durable_says_so_instead_of_making_it_vague() {
+        let rendered = saved_nothing(SaveStatus::NothingDurable);
+
+        assert!(rendered.contains("Nothing was stored"), "{rendered}");
+        assert!(
+            rendered.contains("stays true beyond this conversation"),
+            "the agent needs to know this is an ordinary outcome, not a failure: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_save_that_was_already_known_says_it_is_not_lost() {
+        let rendered = saved_nothing(SaveStatus::AlreadyKnown);
+
+        assert!(rendered.contains("already knows this"), "{rendered}");
+        assert!(
+            rendered.contains("come back on recall"),
+            "an agent that fears the memory was dropped will retry it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_change_that_stored_nothing_reports_the_change() {
+        // A retraction stores no memory but is not a no-op. Rendering it as
+        // "nothing was stored" would have the agent report inaction after the
+        // store deleted something.
+        let rendered = saved_nothing(SaveStatus::ChangedWithoutStoring);
+
+        assert!(rendered.contains("the store did change"), "{rendered}");
+        assert!(rendered.contains("superseded"), "{rendered}");
+        assert!(
+            !rendered.starts_with("Nothing was stored."),
+            "must not read as an inaction: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_status_still_hedges_rather_than_claiming_a_save() {
+        // A daemon older than the outcome field sends nothing. The worst
+        // possible rendering here is "Saved".
+        let rendered = saved_nothing(SaveStatus::Unknown);
+
+        assert!(rendered.contains("Nothing was stored"), "{rendered}");
+        assert!(rendered.contains("not known"), "{rendered}");
+        assert!(!rendered.contains("Saved as"), "{rendered}");
     }
 
     #[test]
@@ -342,15 +437,18 @@ mod tests {
                 BatchItemOutcome {
                     memories: vec![memory("User prefers pnpm", None)],
                     error: None,
+                    status: Some(SaveStatus::Stored),
                 },
                 // Stored nothing, but did not fail — already known.
                 BatchItemOutcome {
                     memories: vec![],
                     error: None,
+                    status: Some(SaveStatus::AlreadyKnown),
                 },
                 BatchItemOutcome {
                     memories: vec![],
                     error: Some("provider down".to_string()),
+                    status: None,
                 },
             ],
         };
@@ -383,10 +481,12 @@ mod tests {
                 BatchItemOutcome {
                     memories: vec![],
                     error: None,
+                    status: Some(SaveStatus::NothingDurable),
                 },
                 BatchItemOutcome {
                     memories: vec![],
                     error: None,
+                    status: Some(SaveStatus::AlreadyKnown),
                 },
             ],
         };

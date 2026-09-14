@@ -105,7 +105,28 @@ pub struct MatchDetail {
 #[derive(Debug, Clone)]
 pub struct ScoredMemory {
     pub memory: Memory,
+    /// The fused rank score. Comparable *within* one result set, which is
+    /// all it was ever meant for: it is built from RRF positions, so it
+    /// says how a result ranks, never how well it matches. A query that
+    /// matches nothing still has a top result with a healthy-looking score.
     pub score: f32,
+    /// How relevant this memory is to the query in absolute terms, in
+    /// `0.0..=1.0`, measured from the index legs' own signals rather than
+    /// their positions.
+    ///
+    /// This is the number that can be thresholded, and the one a caller
+    /// should show. It is deliberately *not* the sort key — [`score`] is
+    /// that, and the calibration documented at the top of this module
+    /// depends on it — so relevance may be non-monotonic down the list. A
+    /// keyword leg that matched an exact identifier and a vector leg that
+    /// matched a paraphrase disagree about which is more relevant, and the
+    /// fusion is the tiebreak; both orderings are defensible, and RRF is
+    /// the one with a body of evidence behind it.
+    ///
+    /// `0.0` means no leg measured this at all — a memory that entered
+    /// recall through the graph, whose relevance is estimated rather than
+    /// measured.
+    pub relevance: f32,
     pub match_detail: MatchDetail,
 }
 
@@ -126,6 +147,10 @@ pub struct RecallRanker {
     /// still ranking ahead of weaker direct matches (staying in the top-k
     /// that recall is measured over). `0` disables the cap.
     graph_unanchored_floor: usize,
+    /// How the legs' raw signals are read as relevance. Used only for the
+    /// `relevance` field — the ranking above does not consult it, which is
+    /// what keeps this knob from being able to reorder anything.
+    relevance: RelevanceCalibration,
 }
 
 impl RecallRanker {
@@ -139,7 +164,27 @@ impl RecallRanker {
             },
             graph_rank_weight: DEFAULT_GRAPH_RANK_WEIGHT,
             graph_unanchored_floor: DEFAULT_GRAPH_UNANCHORED_FLOOR,
+            relevance: RelevanceCalibration::default(),
         }
+    }
+
+    /// Sets how the legs' raw signals are read as relevance.
+    ///
+    /// Defaults to a no-op for ranking: this field is consulted only when
+    /// computing [`ScoredMemory::relevance`], never when ordering, so a
+    /// recalibration cannot quietly change which memory comes first.
+    pub fn with_relevance_calibration(mut self, relevance: RelevanceCalibration) -> Self {
+        self.relevance = relevance;
+        self
+    }
+
+    /// How relevant a result is, given what each leg measured about it.
+    ///
+    /// Split out from [`rank`](Self::rank) because the two answer different
+    /// questions and only one of them is allowed to decide the order. See
+    /// [`RelevanceCalibration`].
+    pub fn relevance(&self, vector: Option<f32>, bm25: f32, graph_only: bool) -> f32 {
+        self.relevance.relevance(vector, bm25, graph_only)
     }
 
     /// Sets the graph-leg ranking knobs (Task 7.3.7 — precision recovery).
@@ -204,6 +249,12 @@ impl RecallRanker {
                 ScoredMemory {
                     memory,
                     score,
+                    // Computed by whoever supplied the leg scores — see the
+                    // field docs. Zero rather than a copy of `score`: a
+                    // rank position is not a relevance measurement, and
+                    // silently passing one off as the other is exactly the
+                    // confusion this field exists to remove.
+                    relevance: 0.0,
                     match_detail: detail,
                 }
             })
@@ -275,6 +326,141 @@ fn reciprocal_rank(rank: Option<usize>) -> f32 {
     match rank {
         Some(rank) => 1.0 / (RRF_K + rank as f32),
         None => 0.0,
+    }
+}
+
+/// The BM25 weight at which the keyword leg is considered to have fully
+/// matched.
+///
+/// BM25 is unbounded and its scale moves with the corpus, so it cannot be
+/// read as a probability directly. Saturating it with `x / (x + k)` maps
+/// `0..∞` onto `0..1` monotonically, which is all the fusion needs, and
+/// leaves the *ordering within* the leg exactly as it was. `k = 8` is picked
+/// from what tantivy actually produces here over short memories: a single
+/// distinctive term lands near `k`, so it reads as "half relevant", while a
+/// query whose rare terms all appear pushes past it.
+const BM25_SATURATION: f32 = 8.0;
+
+/// The relevance floor an agent-facing read applies unless configured
+/// otherwise.
+///
+/// Lives here rather than in the config defaults because the domain owns the
+/// scale it is a threshold on: the two have to move together, and a test
+/// below asserts that they still do against measured numbers.
+pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.25;
+
+/// The relevance credited to a memory that entered recall *only* through a
+/// graph hop.
+///
+/// Neither leg measured it — the hop reached it over a relation from a
+/// memory the query did match — so there is no similarity to report, only
+/// the strength of that indirect evidence. It has to sit above whatever
+/// floor is configured, or the floor would silently delete relational
+/// recall, which is the one thing the graph leg exists to add.
+pub const GRAPH_HOP_RELEVANCE: f32 = 0.35;
+
+/// Turns the two legs' raw signals into an absolute relevance in `0.0..=1.0`.
+///
+/// # Why the vector leg needs a baseline
+///
+/// Cosine similarity from a sentence-embedding model does not start at zero.
+/// Two *unrelated* English sentences routinely measure 0.4–0.55, because
+/// they share the same bag of function words, the same document-level
+/// statistics, and a great deal of the model's representational space. Only
+/// the top of the range means anything: measured against the default model,
+/// a genuinely unrelated query topped out at 0.54 while real answers started
+/// at 0.68.
+///
+/// Read raw, then, "0.5 relevant" is noise and "0.6 relevant" is a good
+/// answer, which is not a scale anyone can set a threshold on or read without
+/// a histogram beside them. Subtracting the baseline rescales so that
+/// *no-evidence* lands at zero:
+///
+/// ```text
+/// corrected = (similarity - baseline) / (1 - baseline)
+/// ```
+///
+/// That turns the measured spread into noise ≤ 0.09 and real matches
+/// 0.36–0.82 — a gap a floor can be placed inside with room on both sides.
+///
+/// # Why it is a constant rather than something measured per query
+///
+/// Because it belongs to the *model*, not to the query or the corpus: it is a
+/// property of how the embedding space is laid out. Measuring it at query
+/// time would make relevance depend on what else was in the result set, which
+/// reintroduces exactly the rank-relative meaning this field exists to
+/// remove.
+///
+/// It is configurable because it is not universal: a different embedding
+/// model has a different baseline, and one that adds a retrieval instruction
+/// to queries (`bge` models expect one) will shift it again. A deployment
+/// that changes `[embeddings].model` and finds recall dropping should look
+/// here before anywhere else.
+#[derive(Debug, Clone, Copy)]
+pub struct RelevanceCalibration {
+    /// The cosine at which the vector leg is treated as saying nothing.
+    pub similarity_baseline: f32,
+}
+
+impl Default for RelevanceCalibration {
+    fn default() -> Self {
+        Self {
+            similarity_baseline: DEFAULT_SIMILARITY_BASELINE,
+        }
+    }
+}
+
+/// See [`RelevanceCalibration`].
+pub const DEFAULT_SIMILARITY_BASELINE: f32 = 0.5;
+
+impl RelevanceCalibration {
+    /// Calibration at a given vector baseline. `0.0` reports raw cosine.
+    pub fn new(similarity_baseline: f32) -> Self {
+        Self {
+            similarity_baseline,
+        }
+    }
+
+    /// Fuses the legs into `0.0..=1.0`.
+    ///
+    /// `vector_similarity` is the leg's cosine in `0.0..=1.0`; `bm25` is its
+    /// raw, unbounded weight. They are combined with a noisy-OR —
+    /// `1 - (1 - v)·(1 - b)` — rather than averaged, because they are
+    /// independent evidence for the same claim: a memory both legs love
+    /// should be more relevant than either alone suggests, and a memory only
+    /// one leg loves keeps that leg's opinion at full strength instead of
+    /// having it halved by the other's silence. Averaging would cap a
+    /// vector-perfect paraphrase at 0.5 purely because it shares no words
+    /// with the query, which is the exact case hybrid search is for.
+    pub fn relevance(&self, vector_similarity: Option<f32>, bm25: f32, graph_only: bool) -> f32 {
+        let bm25 = bm25.max(0.0);
+        let keyword = bm25 / (bm25 + BM25_SATURATION);
+
+        let combined = match vector_similarity {
+            Some(similarity) => {
+                let similarity = self.correct(similarity);
+                1.0 - (1.0 - similarity) * (1.0 - keyword)
+            }
+            None => keyword,
+        };
+
+        // A hop is weak evidence, but it is *the* evidence for a memory
+        // nothing else found, so it raises a zero rather than competing with
+        // a real measurement.
+        if combined > 0.0 {
+            combined
+        } else if graph_only {
+            GRAPH_HOP_RELEVANCE
+        } else {
+            0.0
+        }
+    }
+
+    /// Subtracts the no-evidence baseline and stretches the remainder back
+    /// over `0.0..=1.0`.
+    fn correct(&self, similarity: f32) -> f32 {
+        let baseline = self.similarity_baseline.clamp(0.0, 0.99);
+        ((similarity - baseline) / (1.0 - baseline)).clamp(0.0, 1.0)
     }
 }
 
@@ -896,6 +1082,144 @@ mod tests {
         );
 
         assert_eq!(ordered(&result)[0], newer.id());
+    }
+
+    /// Calibration with the baseline switched off, for the tests that are
+    /// about how the two legs combine rather than where the floor of the
+    /// vector leg sits.
+    fn raw() -> RelevanceCalibration {
+        RelevanceCalibration::new(0.0)
+    }
+
+    #[test]
+    fn relevance_is_bounded_between_zero_and_one() {
+        // Everything that thresholds on relevance assumes this range,
+        // including the configured floor.
+        for calibration in [
+            raw(),
+            RelevanceCalibration::default(),
+            RelevanceCalibration::new(0.9),
+        ] {
+            for vector in [-1.0, 0.0, 0.3, 1.0, 5.0] {
+                for bm25 in [-2.0, 0.0, 1.0, 100.0, f32::MAX] {
+                    let relevance = calibration.relevance(Some(vector), bm25, false);
+                    assert!(
+                        (0.0..=1.0).contains(&relevance) && relevance.is_finite(),
+                        "combine({vector}, {bm25}) escaped the range: {relevance}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relevance_rises_with_evidence_from_either_leg() {
+        let mut previous = -1.0;
+        for similarity in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] {
+            let relevance = raw().relevance(Some(similarity), 0.0, false);
+            assert!(
+                relevance > previous,
+                "a better cosine {similarity} did not raise relevance ({relevance} vs {previous})"
+            );
+            previous = relevance;
+        }
+
+        let mut previous = -1.0;
+        for bm25 in [0.0, 2.0, 8.0, 20.0, 100.0] {
+            let relevance = raw().relevance(None, bm25, false);
+            assert!(
+                relevance > previous,
+                "a stronger BM25 {bm25} did not raise relevance ({relevance} vs {previous})"
+            );
+            previous = relevance;
+        }
+    }
+
+    #[test]
+    fn both_legs_agreeing_beats_either_alone() {
+        // Why noisy-OR rather than an average: averaging would let the
+        // keyword leg's silence about a pure paraphrase halve a
+        // vector-perfect match, which is the exact case hybrid exists for.
+        let vector_only = raw().relevance(Some(0.9), 0.0, false);
+        let keyword_only = raw().relevance(None, 20.0, false);
+        let both = raw().relevance(Some(0.9), 20.0, false);
+
+        assert!(both > vector_only, "{both} vs {vector_only}");
+        assert!(both > keyword_only, "{both} vs {keyword_only}");
+        assert!(
+            both > (vector_only + keyword_only) / 2.0,
+            "agreement should not be discounted to a mean"
+        );
+    }
+
+    #[test]
+    fn a_graph_hop_is_credited_without_erasing_a_real_measurement() {
+        // The hop number is an estimate, so it must never outvote evidence:
+        // it shows up only where nothing else measured anything.
+        assert_eq!(
+            raw().relevance(None, 0.0, true),
+            GRAPH_HOP_RELEVANCE,
+            "a hop with no other evidence should be credited the hop estimate"
+        );
+        assert!(
+            raw().relevance(Some(0.9), 0.0, true) > GRAPH_HOP_RELEVANCE,
+            "a measured match was overridden by the hop estimate"
+        );
+        assert_eq!(
+            raw().relevance(Some(0.0), 0.0, false),
+            0.0,
+            "no evidence and no hop is not relevance"
+        );
+    }
+
+    #[test]
+    fn similarity_at_the_baseline_is_no_evidence_at_all() {
+        // The whole point of the baseline: without it, "0.5 relevant" is
+        // what a completely unrelated memory scores, and no floor can be
+        // placed above that without cutting the real answers too.
+        let calibration = RelevanceCalibration::new(0.5);
+
+        assert_eq!(calibration.relevance(Some(0.5), 0.0, false), 0.0);
+        assert_eq!(calibration.relevance(Some(0.3), 0.0, false), 0.0);
+        assert_eq!(
+            calibration.relevance(Some(0.3), 0.0, true),
+            GRAPH_HOP_RELEVANCE,
+            "a sub-baseline similarity is no evidence, so the hop estimate still applies"
+        );
+        assert_eq!(raw().relevance(Some(0.5), 0.0, false), 0.5);
+    }
+
+    /// The numbers that set the default calibration, measured against the
+    /// real default model over a small working set. Every genuinely relevant
+    /// answer scored at or above the low end; every unrelated query —
+    /// including nonsense like "qqq xyzzy 12345 bloop" — topped out at the
+    /// high end. Pinned here so that a future change to the fusion, or a
+    /// silent change to the model's behaviour, fails a test instead of
+    /// quietly shifting every threshold in the system.
+    const MEASURED_NOISE_CEILING: f32 = 0.542;
+    const MEASURED_ANSWER_FLOOR: f32 = 0.681;
+
+    #[test]
+    fn the_default_calibration_separates_measured_noise_from_measured_answers() {
+        let calibration = RelevanceCalibration::default();
+
+        let noise = calibration.relevance(Some(MEASURED_NOISE_CEILING), 0.0, false);
+        let answer = calibration.relevance(Some(MEASURED_ANSWER_FLOOR), 0.0, false);
+
+        assert!(
+            noise < DEFAULT_RELEVANCE_FLOOR,
+            "the default floor of {DEFAULT_RELEVANCE_FLOOR} would return noise ({noise})"
+        );
+        assert!(
+            answer > DEFAULT_RELEVANCE_FLOOR,
+            "the default floor of {DEFAULT_RELEVANCE_FLOOR} would delete a real answer ({answer})"
+        );
+        // Room on both sides, not a hairline: a calibration this tight would
+        // flip on the next model update.
+        assert!(
+            DEFAULT_RELEVANCE_FLOOR - noise > 0.1 && answer - DEFAULT_RELEVANCE_FLOOR > 0.1,
+            "noise {noise}, floor {DEFAULT_RELEVANCE_FLOOR}, answer {answer}"
+        );
     }
 
     #[test]

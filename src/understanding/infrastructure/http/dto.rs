@@ -2,6 +2,7 @@
 
 use crate::shared::ids::MemoryId;
 use crate::understanding::domain::ingest_job::{IngestPayload, JobRecord, JobStatus};
+use crate::understanding::domain::ingest_pipeline::IngestStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +110,10 @@ pub struct BatchItemResult {
     pub job_id: String,
     pub status: &'static str,
     pub memory_ids: Vec<String>,
+    /// What this item did, including which kind of nothing it produced.
+    /// Absent on a failure, where `error` explains instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<IngestStatus>,
     /// Present only for an item that failed, carrying why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -130,6 +135,10 @@ pub struct IngestedResponse {
     pub job_id: String,
     pub status: &'static str,
     pub memory_ids: Vec<String>,
+    /// What the ingest did. An empty `memory_ids` is three different facts
+    /// — nothing durable, already known, or a change that stored nothing —
+    /// and a client told to guess between them will guess "saved".
+    pub outcome: IngestStatus,
     /// False when no provider is configured, so a caller can tell
     /// "extracted and reconciled" from "stored as sent".
     pub understanding: bool,

@@ -270,7 +270,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits.len(), 3, "every memory should have been re-embedded");
-        assert!(hits.contains(&memories[0].id()));
+        assert!(hits.iter().any(|(id, _)| *id == memories[0].id()));
 
         // And a normal save through the repo now succeeds — proving the
         // pin no longer blocks the new model.

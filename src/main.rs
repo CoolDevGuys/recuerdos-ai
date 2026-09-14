@@ -435,6 +435,7 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         understanding,
         consolidation,
         auth_mode: bootstrap::state::AuthMode::from_config(&config),
+        rate_limit: config.rate_limit.clone(),
         mcp_http: config.server.mcp.http,
         mcp_allowed_hosts: config.server.mcp.allowed_hosts.clone(),
         ingest_timeout: std::time::Duration::from_secs(config.server.ingest_timeout_secs),

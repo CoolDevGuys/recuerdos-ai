@@ -121,7 +121,7 @@ impl VectorIndex for SqliteVectorIndex {
         context: &UserContext,
         embedding: &[f32],
         limit: usize,
-    ) -> Result<Vec<MemoryId>> {
+    ) -> Result<Vec<(MemoryId, f32)>> {
         self.check_dimensions(embedding)?;
         if limit == 0 {
             return Ok(Vec::new());
@@ -130,7 +130,7 @@ impl VectorIndex for SqliteVectorIndex {
         self.database.with_connection(|connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT memory_id FROM vec_memories
+                    "SELECT memory_id, distance FROM vec_memories
                      WHERE embedding MATCH ?1 AND user_id = ?2 AND k = ?3
                      ORDER BY distance",
                 )
@@ -143,21 +143,38 @@ impl VectorIndex for SqliteVectorIndex {
                         context.user_id().to_string(),
                         limit as i64,
                     ],
-                    |row| row.get::<_, String>(0),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
                 )
                 .map_err(|e| map_sqlite_error(e, "vector search conflict"))?
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| map_sqlite_error(e, "vector search conflict"))?;
 
             rows.into_iter()
-                .map(|id| {
-                    MemoryId::from_str(&id).map_err(|e| {
-                        RaError::Internal(format!("indexed memory id {id:?} is not a uuid: {e}"))
-                    })
+                .map(|(id, distance)| {
+                    Ok((
+                        MemoryId::from_str(&id).map_err(|e| {
+                            RaError::Internal(format!(
+                                "indexed memory id {id:?} is not a uuid: {e}"
+                            ))
+                        })?,
+                        similarity_from_l2(distance as f32),
+                    ))
                 })
                 .collect()
         })
     }
+}
+
+/// Converts sqlite-vec's L2 (euclidean) distance into cosine similarity in
+/// `0.0..=1.0`.
+///
+/// Every embedder this service ships returns unit-length vectors, and for
+/// unit vectors `d² = 2 - 2·cos`, which inverts to the formula below. The
+/// clamp absorbs both floating-point drift at the ends and the case of a
+/// provider that hands back unnormalised vectors, where the arithmetic
+/// would otherwise wander outside a range the callers assume.
+fn similarity_from_l2(distance: f32) -> f32 {
+    (1.0 - distance * distance / 2.0).clamp(0.0, 1.0)
 }
 
 /// sqlite-vec takes a vector as a little-endian f32 blob. `pub(crate)`

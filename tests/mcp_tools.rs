@@ -45,6 +45,18 @@ impl McpClient {
     }
 
     async fn call(&self, tool: &str, arguments: Value) -> String {
+        self.call_raw(tool, arguments).await.0
+    }
+
+    /// The prose the model reads, plus the `structuredContent` a client is
+    /// meant to branch on. A save that reports only the first leaves the
+    /// caller parsing English to find out whether anything was written.
+    async fn call_structured(&self, tool: &str, arguments: Value) -> (String, Option<Value>) {
+        let (text, structured) = self.call_raw(tool, arguments).await;
+        (text, structured)
+    }
+
+    async fn call_raw(&self, tool: &str, arguments: Value) -> (String, Option<Value>) {
         let result = self
             .service
             .call_tool(
@@ -59,12 +71,14 @@ impl McpClient {
             "{tool} reported an error: {result:?}"
         );
 
-        result
+        let text = result
             .content
             .iter()
             .filter_map(|block| block.as_text().map(|text| text.text.clone()))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+
+        (text, result.structured_content)
     }
 }
 
@@ -385,4 +399,69 @@ async fn a_bad_api_key_stops_the_shim_from_starting() {
     let result = ().serve(TokioChildProcess::new(command).expect("spawn")).await;
 
     assert!(result.is_err(), "a bad key should not complete a handshake");
+}
+
+#[tokio::test]
+async fn a_save_reports_its_outcome_as_structured_content() {
+    // The prose tells a model what happened; this is what a client branches
+    // on. Without it, "Saved" and "the store already knew it" are the same
+    // byte sequence to anything that is not reading English.
+    let client = McpClient::connect().await;
+    let (text, structured) = client
+        .call_structured(
+            "memory_save",
+            json!({"content": "The backend deploys on Railway", "category": "fact.project"}),
+        )
+        .await;
+
+    let structured = structured.expect("a save must carry a machine-readable outcome");
+    assert_eq!(
+        structured["status"],
+        json!("stored"),
+        "a save that wrote a memory must say so: {structured}"
+    );
+
+    let stored = structured["stored"]
+        .as_array()
+        .expect("`stored` must be a list of what was written");
+    assert_eq!(stored.len(), 1, "{structured}");
+    assert!(
+        stored[0]["id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty() && !id.starts_with('-')),
+        "the client needs a usable id: {stored:?}"
+    );
+    assert_eq!(stored[0]["category"], json!("fact.project"));
+
+    // The two halves must not disagree, or the model is told one thing and
+    // the client another.
+    assert!(text.contains("Railway"), "{text}");
+    assert!(text.contains("Saved"), "prose and structure agree: {text}");
+}
+
+#[tokio::test]
+async fn a_batch_save_reports_one_status_per_item() {
+    // A batch that says "saved 2 memories" and hides which item did nothing
+    // is the single-save trap again, one level up.
+    let client = McpClient::connect().await;
+    let (_text, structured) = client
+        .call_structured(
+            "memory_save_batch",
+            json!({"items": [
+                {"content": "The API is written in Rust"},
+                {"content": "The migrations run with sqlx"}
+            ]}),
+        )
+        .await;
+
+    let structured = structured.expect("a batch save must carry a machine-readable outcome");
+    let items = structured["items"]
+        .as_array()
+        .expect("`items` must be a list, one per submitted item");
+    assert_eq!(items.len(), 2, "{structured:#}");
+    for item in items {
+        assert_eq!(item["status"], json!("stored"), "{structured:#}");
+        assert!(item["error"].is_null(), "no item failed: {structured:#}");
+        assert_eq!(item["stored"].as_array().expect("stored list").len(), 1);
+    }
 }
