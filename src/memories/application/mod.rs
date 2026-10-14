@@ -7,6 +7,7 @@ pub mod memory_forgetter;
 pub mod memory_recaller;
 pub mod memory_updater;
 pub mod profile_assembler;
+pub mod text_index_rebuilder;
 
 #[cfg(test)]
 pub mod fake_embedder;

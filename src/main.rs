@@ -82,12 +82,26 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Re-embed every memory under the current [embeddings] model, in place.
+    /// Rebuild derived indexes from the `memories` table.
     ///
-    /// Run this after changing the embedding model or provider: it lets
-    /// the store keep its memories instead of needing a fresh data
-    /// directory. Stop the daemon first — it rebuilds the vector index.
+    /// With no flags this is the vector reindex: re-embed every memory
+    /// under the current [embeddings] model, in place. Run it after
+    /// changing the embedding model or provider; it lets the store keep
+    /// its memories instead of needing a fresh data directory.
+    ///
+    /// `--text` rebuilds the keyword (BM25) index instead — no model
+    /// calls, seconds at personal scale; `--vectors` names the vector
+    /// pass explicitly, and both flags run both. Pass any flag at all
+    /// and the daemon must be *stopped* first (the keyword rebuild
+    /// needs the tantivy writer to itself, the vector pass holds the
+    /// SQLite write lock).
     Reindex {
+        /// Rebuild the keyword (BM25) index for every user.
+        #[arg(long)]
+        text: bool,
+        /// Re-embed the vector index (the default when no flag is given).
+        #[arg(long)]
+        vectors: bool,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -171,7 +185,11 @@ async fn main() {
             config.as_deref(),
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
-        Command::Reindex { config } => run_reindex(config.as_deref()),
+        Command::Reindex {
+            text,
+            vectors,
+            config,
+        } => run_reindex(text, vectors, config.as_deref()),
         Command::Consolidate { dry_run, config } => {
             run_consolidate(dry_run, config.as_deref()).await
         }
@@ -392,6 +410,32 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         consolidation,
     } = build_all(&config)?;
 
+    // The keyword index is versioned (reranking-plan.md Phase 1.4): a
+    // store from before an index-version bump has memories but no index
+    // directory, and serving it as-is would mean a silently dead keyword
+    // leg. Rebuild those users first — no model calls, seconds at
+    // personal scale, and a no-op check (one stat per user) every other
+    // start. A failure here fails the start rather than serving a
+    // crippled recall; the message says what to do about it.
+    let rebuilder = memories::application::text_index_rebuilder::TextIndexRebuilder::new(
+        std::sync::Arc::clone(&identity.users),
+        std::sync::Arc::clone(&memories.repository),
+        std::sync::Arc::clone(&memories.text_index),
+    );
+    let rebuild = rebuilder.rebuild_missing().map_err(|e| {
+        format!(
+            "the keyword index could not be rebuilt: {e}; \
+             stop the daemon and run `recuerdos-ai reindex --text` \
+             with the same config"
+        )
+    })?;
+    if rebuild.users_rebuilt > 0 {
+        println!(
+            "rebuilt the keyword index for {} users ({} memories)",
+            rebuild.users_rebuilt, rebuild.memories_indexed
+        );
+    }
+
     let identity = std::sync::Arc::new(identity);
     let understanding = std::sync::Arc::new(understanding);
 
@@ -526,8 +570,16 @@ fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
     Ok(())
 }
 
-fn run_reindex(config_path: Option<&Path>) -> Result<(), String> {
+/// Both indexes are derived from `memories`, but built by different
+/// machinery: vectors need the embedder (and the model), the keyword
+/// index needs nothing but the repository. Neither flag is the *old*
+/// command — vectors only — so scripts written before `--text` existed
+/// keep doing exactly what they did.
+fn run_reindex(text: bool, vectors: bool, config_path: Option<&Path>) -> Result<(), String> {
     bootstrap::server::init_tracing();
+
+    // No flag at all keeps today's behaviour: vectors only.
+    let do_vectors = vectors || !text;
 
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
 
@@ -538,29 +590,69 @@ fn run_reindex(config_path: Option<&Path>) -> Result<(), String> {
         bootstrap::memories_wiring::build_embedder(&config).map_err(|e| e.to_string())?;
     let database = bootstrap::wiring::open_database(&config).map_err(|e| e.to_string())?;
 
-    println!(
-        "re-embedding every memory with {} ({} dimensions)…",
-        embedder.model_id(),
-        embedder.dimensions()
-    );
+    if do_vectors {
+        println!(
+            "re-embedding every memory with {} ({} dimensions)…",
+            embedder.model_id(),
+            embedder.dimensions()
+        );
 
-    let report =
-        memories::infrastructure::sqlite_reindexer::SqliteReindexer::new(database, embedder)
-            .execute()
-            .map_err(|e| e.to_string())?;
+        let report = memories::infrastructure::sqlite_reindexer::SqliteReindexer::new(
+            std::sync::Arc::clone(&database),
+            std::sync::Arc::clone(&embedder),
+        )
+        .execute()
+        .map_err(|e| e.to_string())?;
 
-    match report.from {
-        Some((model, dims)) if (model.as_str(), dims) != (report.to.0.as_str(), report.to.1) => {
-            println!(
-                "reindexed {} memories: {model} ({dims}) → {} ({})",
+        match report.from {
+            Some((model, dims))
+                if (model.as_str(), dims) != (report.to.0.as_str(), report.to.1) =>
+            {
+                println!(
+                    "reindexed {} memories: {model} ({dims}) → {} ({})",
+                    report.reindexed, report.to.0, report.to.1
+                );
+            }
+            _ => println!(
+                "reindexed {} memories under {} ({})",
                 report.reindexed, report.to.0, report.to.1
-            );
+            ),
         }
-        _ => println!(
-            "reindexed {} memories under {} ({})",
-            report.reindexed, report.to.0, report.to.1
-        ),
     }
+
+    if text {
+        // The keyword index lives under the same data directory and is
+        // rebuilt from the same table — no model calls, so this half of
+        // the command works with the embedding provider unreachable.
+        // (The instance still needs the configured embedder to *open*
+        // the store; that is the model pin, not the rebuild.)
+        let identity = bootstrap::wiring::Identity::from_database(std::sync::Arc::clone(&database))
+            .map_err(|e| e.to_string())?;
+        let wired = bootstrap::memories_wiring::Memories::assemble(
+            &config,
+            std::sync::Arc::clone(&database),
+            std::sync::Arc::clone(&embedder),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let rebuilder = memories::application::text_index_rebuilder::TextIndexRebuilder::new(
+            std::sync::Arc::clone(&identity.users),
+            std::sync::Arc::clone(&wired.repository),
+            std::sync::Arc::clone(&wired.text_index),
+        );
+
+        println!("rebuilding the keyword index for every user…");
+        let report = rebuilder.rebuild_all().map_err(|e| e.to_string())?;
+
+        for user in &report.rebuilt {
+            println!("  {}: {} memories", user.handle, user.memories_indexed);
+        }
+        println!(
+            "rebuilt the keyword index for {} users ({} memories, {} users skipped)",
+            report.users_rebuilt, report.memories_indexed, report.users_skipped
+        );
+    }
+
     Ok(())
 }
 

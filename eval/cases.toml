@@ -378,6 +378,22 @@ expect = [
     "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem",
 ]
 
+# Two more, added with the analyzer change (reranking-plan.md Phase 1.5):
+# the stopword filter must not disturb identifiers — a dotted one and a
+# hyphenated one, which split on the punctuation exactly as they did
+# under tantivy's `default` tokenizer.
+[[case]]
+name = "exact token: index.ts"
+kind = "exact-token"
+query = "index.ts"
+expect = ["User forbids barrel files and index.ts re-exports"]
+
+[[case]]
+name = "exact token: Fly.io"
+kind = "exact-token"
+query = "Fly.io"
+expect = ["The backend deploys on Hetzner, migrated from Fly.io because of cost"]
+
 [[case]]
 name = "current fact: deployment target"
 kind = "current-fact"

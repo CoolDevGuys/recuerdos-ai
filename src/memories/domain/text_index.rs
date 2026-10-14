@@ -14,6 +14,33 @@ use crate::shared::ids::MemoryId;
 pub trait TextIndex: Send + Sync {
     fn upsert(&self, context: &UserContext, memory: &Memory) -> Result<()>;
 
+    /// Index every memory in `memories`, committing in bulk.
+    ///
+    /// Rebuild paths (the text-index rebuilder use case) call it in
+    /// chunks so a 10 000-memory rebuild is a handful of commits rather
+    /// than 10 000. The default loops over `upsert`, which is correct for
+    /// any implementation; implementations with a real batch path — one
+    /// commit per chunk — override it. Same per-memory semantics: an
+    /// existing document for the same id is replaced, not duplicated.
+    fn upsert_many(&self, context: &UserContext, memories: &[Memory]) -> Result<()> {
+        for memory in memories {
+            self.upsert(context, memory)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this user already has a *persisted* keyword index.
+    ///
+    /// The startup auto-rebuild uses it to tell "index predates the
+    /// current analyzer version" from "user saved nothing yet", without
+    /// opening the index. The default says *yes* — an implementation
+    /// without persistent per-user state (a test double) reports itself
+    /// as never needing a rebuild, which keeps the upgrade path tied to
+    /// the real adapter that has one.
+    fn is_populated(&self, _context: &UserContext) -> bool {
+        true
+    }
+
     fn remove(&self, context: &UserContext, id: MemoryId) -> Result<()>;
 
     /// Best matches for `query`, best first, scoped to this user.
