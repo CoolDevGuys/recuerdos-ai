@@ -486,7 +486,7 @@ the [CHANGELOG](docs/CHANGELOG.md#v020--graph-strategy-b-relational-recall).
 
 **On the roadmap:** a web dashboard, Postgres/Qdrant storage backends, and
 user-visible collections/workspaces. See
-[project-plan.md](project-plan.md) for where it's headed.
+[project-plan.md](ai-specs/project-plan.md) for where it's headed.
 
 ---
 

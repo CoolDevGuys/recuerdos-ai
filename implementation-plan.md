@@ -1,6 +1,6 @@
 # Recuerdos AI — Technical Implementation Plan
 
-**v0.2 · updated 2026-08-04 · companion to [project-plan.md](project-plan.md)**
+**v0.2 · updated 2026-08-04 · companion to [project-plan.md](ai-specs/project-plan.md)**
 
 Actionable, phased breakdown of the build. Every phase lives on its own git branch,
 ends in a **shippable, usable** state, and every task has a goal, step-by-step
@@ -15,14 +15,14 @@ procedure, examples where they apply, and a Definition of Done (DoD).
 > **planned and broken down** — its deferral condition is met, and Task 7.3.0 is the
 > eval that decides whether the rest of it gets built.
 >
-> **Why this file and [project-plan.md](project-plan.md) both exist.** They are not
-> merged on purpose: `project-plan.md` is the *product & architecture reference*
+> **Why this file and [project-plan.md](ai-specs/project-plan.md) both exist.** They are not
+> merged on purpose: `ai-specs/project-plan.md` is the *product & architecture reference*
 > (problem, competitive positioning, strategy choice, data model, the rationale
 > behind each decision) and stays a living document; this file is the *execution
 > record + forward task breakdown*. Combining them would produce a ~1,500-line
 > document and mix "why we chose SQLite" with "the DoD for the tantivy adapter."
 > Where they touch the same topic (architecture, data model, taxonomy), this file
-> links to `project-plan.md` rather than restating it.
+> links to `ai-specs/project-plan.md` rather than restating it.
 
 ---
 
@@ -1031,7 +1031,7 @@ retrieval precision gained*, never in cosine math.
      doesn't require re-running an LLM over the whole corpus. The framework plan's
      normalized `memory_entities` table ignored it — reconcile with the existing field
      instead of duplicating it.
-  3. **Budget the extraction.** `project-plan.md` flags that graph extraction *"burns
+  3. **Budget the extraction.** `ai-specs/project-plan.md` flags that graph extraction *"burns
      significantly more LLM tokens per ingest"* — "one-time cost" understates it. Reuse
      Phase 7.1's budget machinery; extract in the background job, not on the hot path.
   4. **SQLite-first, measured.** Start with SQLite edge tables + app-side PPR; only
@@ -1060,7 +1060,7 @@ would otherwise be re-litigated mid-build.
    one structured call per ingest that returns `entities` — adding an optional
    `relations` field to that same schema costs no additional round trip. A separate
    extraction pass per memory is the design the framework plan implied and the one
-   `project-plan.md` warns "burns significantly more LLM tokens per ingest."
+   `ai-specs/project-plan.md` warns "burns significantly more LLM tokens per ingest."
 3. **`memories.entities` (JSON) stays the source of truth; V8 adds a *derived* index.**
    This is guardrail 2 made concrete. `memory_entities` is a projection of the JSON
    column, rebuildable at any time with **zero** LLM calls — which is precisely what
@@ -1549,7 +1549,7 @@ would otherwise be re-litigated mid-build.
 - **Steps:** re-run `recuerdos-ai eval`; record the relational delta **and** that no other
   `by_kind` moved; update `docs/api.md` (`as_of`, `graph_rank`), `docs/mcp.md`,
   `docs/configuration.md` (`[graph]`), `docs/architecture.md` (third leg + the two
-  clocks); flip Strategy B's status in `project-plan.md` §4 and §15.
+  clocks); flip Strategy B's status in `ai-specs/project-plan.md` §4 and §15.
 - **DoD:**
   - [x] Relational recall@5 beats the 7.3.0 baseline by a **measured** margin — **71.4% →
         85.7%** (+14.3 points), recorded in the PR and in `eval/baseline.json`. The one
@@ -1655,7 +1655,7 @@ eval slice from 7.3.0 stays in the repo either way as the tripwire.
 |---|---|---|---|---|
 | 7.1 Budget + skip-unchanged | M | Low | ✅ Done | Fewer LLM merge calls; bounded run time — the honest version of the framework plan's Phase 1 |
 | 7.2 Optional sub-label | M | Low–Med | ✅ Done | Tighter clusters + a subcategory recall filter, exercised by the eval harness |
-| 7.3 Graph (Strategy B) | L | Med–High | ✅ Done | Relational recall — `project-plan.md`'s moat item, delivered across 7.3.0–7.3.6; the eval put relational recall@5 at 85.7% (vs 71.4% without the graph), so it ships on by default in `v0.2.0` |
+| 7.3 Graph (Strategy B) | L | Med–High | ✅ Done | Relational recall — `ai-specs/project-plan.md`'s moat item, delivered across 7.3.0–7.3.6; the eval put relational recall@5 at 85.7% (vs 71.4% without the graph), so it ships on by default in `v0.2.0` |
 
 Do **not** carry over the framework plan's cumulative "125× / 3×" projections. Each
 task above ships behind the Phase 4.6 eval gate and is described by the number it

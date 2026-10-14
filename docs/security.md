@@ -5,7 +5,7 @@ each phase, and gets its full write-up in Phase 6. Anything not stated
 here is not yet guaranteed.
 
 The central promise of Recuerdos AI is in
-[project-plan.md §11](../project-plan.md#11-multi-user-isolation--security):
+[project-plan.md §11](../ai-specs/project-plan.md#11-multi-user-isolation--security):
 **each user sees only their own memories.** This page explains how that is
 enforced and how you can check it.
 

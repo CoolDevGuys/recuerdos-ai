@@ -399,5 +399,5 @@ would otherwise produce a category nothing ever matches.
 
 `GET /metrics`.
 
-See [project-plan.md §9](../project-plan.md#9-api-design-rest--mcp) for the
+See [project-plan.md §9](../ai-specs/project-plan.md#9-api-design-rest--mcp) for the
 full design.

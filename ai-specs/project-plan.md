@@ -16,9 +16,9 @@ Agent, LangChain agents, custom bots — via **REST API** or **MCP**.
 > largely done**, and **Phase 3 (Scale & moat)** now has its Strategy B graph
 > half **shipped**, leaving alternate backends as the open frontier. The
 > task-level build record lives in
-> [implementation-plan.md](implementation-plan.md) (its Phases 0–6, all shipped,
+> [implementation-plan.md](../implementation-plan.md) (its Phases 0–6, all shipped,
 > plus Phase 7.3 graph); this document stays the *product & architecture
-> reference* — kept separate from `implementation-plan.md` on purpose (see that
+> reference* — kept separate from `../implementation-plan.md` on purpose (see that
 > file's header for the rationale).
 
 ---
@@ -187,7 +187,7 @@ reserves entity/relation tables and supersedence links so no migration pain late
 > **Status:** Strategy A is ✅ **shipped** (`v0.1.x`). Strategy B (graph) is
 > ✅ **shipped** (`v0.2.0`), built on the `Entity` value object already carried
 > on every `Memory` and the **bi-temporal** facts that are its whole point —
-> delivered as [implementation-plan.md Phase 7.3](implementation-plan.md#phase-7).
+> delivered as [implementation-plan.md Phase 7.3](../implementation-plan.md#phase-7).
 > The eval measured relational recall@5 at **85.7%**, up from **71.4%** without
 > the graph, with no other case kind regressing, so it ships on by default.
 > Strategy C (external backends) remains unbuilt.
@@ -269,7 +269,7 @@ reserves entity/relation tables and supersedence links so no migration pain late
 | Local embeddings | **fastembed-rs** (ONNX: bge-small-en-v1.5 / all-MiniLM-L6-v2, 384-dim) | Zero-config default — service works with NO external provider |
 | LLM providers | Provider trait: `anthropic`, `openai-compat` (covers OpenAI/OpenRouter/Groq), `ollama` | User-selected; all four requested options covered |
 | Job queue | SQLite-backed queue table + tokio workers (POC) → trait allows Redis/NATS later | No extra infra |
-| Config | TOML (`recuerdos-ai.toml`) + env-var overrides (`RECUERDOS_AI_*`) + hot-reload for provider keys | Requested: config-file driven |
+| Config | TOML (`../recuerdos-ai.toml`) + env-var overrides (`RECUERDOS_AI_*`) + hot-reload for provider keys | Requested: config-file driven |
 | Observability | `tracing` + optional Prometheus `/metrics` | SaaS-readiness |
 | CLI | `recuerdos-ai` binary: `serve`, `init`, `user add`, `key issue`, `export`, `import`, `consolidate` | Ops & onboarding |
 | Distribution | cargo, Homebrew tap, single-file installer, Docker image (optional, not required) | OSS adoption |
@@ -576,7 +576,7 @@ Honest list — also belongs in the future README:
 ## 15. Roadmap & possible upgrades
 
 > **Note on numbering.** This is the *product* roadmap (Phases 0–4).
-> [implementation-plan.md](implementation-plan.md) uses a finer *build* numbering
+> [implementation-plan.md](../implementation-plan.md) uses a finer *build* numbering
 > (Phases 0–6, all shipped, + a planned Phase 7). The two are intentionally
 > different granularities; the status tags below reconcile them.
 
@@ -594,7 +594,7 @@ session distillation hooks, opencode + Hermes recipes, retrieval eval harness.
 **Phase 2 — OSS launch — ◻ LARGELY DONE**
 Docs site, Homebrew/installer, Docker image, LangChain retriever, benchmark
 blog post (LongMemEval subset), README with the isolation test story.
-*Done: installer (`install.sh`), Docker/GHCR image, LangChain `BaseRetriever`,
+*Done: installer (`../install.sh`), Docker/GHCR image, LangChain `BaseRetriever`,
 `docs/performance.md` benchmarks, README isolation story. Remaining: the
 LongMemEval-subset benchmark write-up and any public "launch" push.*
 
@@ -602,7 +602,7 @@ LongMemEval-subset benchmark write-up and any public "launch" push.*
 Postgres/Qdrant backends, temporal graph layer (Strategy B: bi-temporal facts,
 entity graph, graph-hop retrieval), Redis cache, multi-node workers.
 *The temporal graph layer is ✅ **shipped** in `v0.2.0`
-([implementation-plan.md Phase 7.3](implementation-plan.md#phase-7)): bi-temporal
+([implementation-plan.md Phase 7.3](../implementation-plan.md#phase-7)): bi-temporal
 facts, an entity/relation graph, and graph-hop retrieval as a third recall leg,
 on by default (relational recall@5 85.7% vs 71.4% without it). The performance
 groundwork (consolidation budget, sub-labels) shipped as Phase 7.1–7.2. Still
@@ -640,7 +640,7 @@ sync between personal devices.
 
 1. **[OPEN]** Default remote extraction model: Haiku-class (cheap, good enough?) vs
    Sonnet-class (better labels, 5–10× cost) — decide with the eval harness (now built,
-   `recuerdos-ai eval` + `eval/baseline.json`).
+   `recuerdos-ai eval` + `../eval/baseline.json`).
 2. **[RESOLVED]** Should `memory://profile` be one digest or per-domain digests
    (coding vs personal)? Shipped as a per-domain LLM digest (`ProfileDigestWriter`,
    build Phase 5), with the caveat that memories can be interdomain, so a memory may
