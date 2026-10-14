@@ -47,6 +47,11 @@ pub struct Memories {
     /// other rather than against a query and so needs the vectors
     /// directly — see `consolidation::application::consolidation_runner`.
     pub embedder: Arc<dyn Embedder>,
+    /// Exposed for the startup text-index rebuild and `reindex --text`
+    /// (reranking-plan.md Phase 1.4): the rebuilder writes the keyword
+    /// index wholesale, which only the wiring layer — not the recall or
+    /// save paths — should be able to ask for.
+    pub text_index: Arc<dyn TextIndex>,
     /// The entity/relation graph, present only when `[graph].enabled`
     /// (implementation-plan.md Task 7.3). `None` is the default and the
     /// pre-graph behaviour: nothing writes edges, recall does not hop, and
@@ -88,7 +93,10 @@ impl Memories {
         Self::assemble(&config, database, embedder)
     }
 
-    fn assemble(
+    /// Wires the context over an already-built embedder, so commands
+    /// that construct one themselves (`reindex`) do not load the model
+    /// twice.
+    pub(crate) fn assemble(
         config: &AppConfig,
         database: Arc<SqliteDatabase>,
         embedder: Arc<dyn Embedder>,
@@ -164,6 +172,7 @@ impl Memories {
             )),
             repository,
             embedder,
+            text_index: text,
             graph,
             extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,
