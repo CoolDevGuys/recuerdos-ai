@@ -65,6 +65,21 @@ wiremock = "0.6"
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
 
+# `double_must_use` fires on every `#[async_trait]` trait, because the macro
+# expands an async method to a boxed `Future` (`Pin<Box<dyn …>>`, itself
+# `#[must_use]`) on a method the trait already marks `#[must_use]`. The lint
+# is therefore structurally unavoidable for `async_trait` traits: the double
+# is introduced by the macro, not by this code, and there is no attribute we
+# could add at the call site to satisfy it — the trait method's `#[must_use]`
+# is exactly what we want (a dropped `impl Future` is a bug). Clippy shipped
+# the lint after the pinned dev toolchain (1.99 vs the 1.85 `rust-version`)
+# so it surfaces as a `just check-native` failure on any newer `rust:1-slim`.
+# Allowed crate-wide rather than with 11 scattered `#[allow]`s on the traits;
+# revisit by grepping the lint name if a future `async-trait` fixes the
+# expansion. See ai-specs/reranking-plan.md §12 "Toolchain".
+[lints.clippy]
+double_must_use = "allow"
+
 # Debug builds carry full DWARF by default, which for this dependency tree
 # (tantivy, ONNX, rustls, axum) meant a ~10 GB `target/`. That is enough to
 # exhaust a CI runner's disk, and when it does the failure is a linker

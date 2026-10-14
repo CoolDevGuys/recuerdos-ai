@@ -233,13 +233,11 @@ reranker will cost, *before* any retrieval code changes.
 
 ### Definition of Done
 
-- [x] `just check-native` passes. *(Not literally as written: it passes as
-      `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings
-      -A clippy::double_must_use` + boundary script + `cargo test`. The 11
-      `double_must_use` errors in `#[async_trait]`-generated code were **verified
-      pre-existing**: with Phase 0 stashed, clippy 1.99 from the rebuilt `rust:1-slim`
-      fails on clean `main` with the same 11. Toolchain pin / lint carve-out deferred
-      to a separate chore — see the §12 toolchain caveat.)*
+- [x] `just check-native` passes — **as written** (`fmt --check` + `clippy --all-targets
+      -- -D warnings` + boundary script + `cargo test`), exit 0. The 11 `double_must_use`
+      errors in `#[async_trait]` code were verified pre-existing on clean `main` under the
+      rebuilt `rust:1-slim` (Rust 1.99); fixed in this branch with a documented
+      crate-level `[lints.clippy]` allowance — see the §12 toolchain note.
 - [x] `cargo run -q --bin recuerdos-ai -- eval` prints recall@5, precision@1, MRR, p50/p95 latency,
       and per-kind scores, including the new kinds.
 - [x] Old `eval/baseline.json` still loads; `eval --baseline eval/baseline.json` still runs
@@ -795,15 +793,17 @@ test (`the_config_passed_to_seed_reaches_the_wired_instance`, run with
 embedder reach the wired `Memories`; the printed `embedder:` line is the end-to-end
 proof per run.
 
-**Toolchain caveat (pre-existing, recorded per rule 0.8):** the dev image was rebuilt
-from `rust:1-slim`, which now ships Rust/clippy 1.99; clippy's newer `double_must_use`
-lint fires 11 times on `#[async_trait]`-generated trait code in files untouched by this
-phase. **Verified:** with Phase 0's changes stashed, clippy 1.99 fails on a clean
-`main` with the same 11 errors. `check-native` therefore passes here as
-`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings
--A clippy::double_must_use` + boundaries + `cargo test` — **all green** (753 unit +
-all integration suites, plus the ignored wiring test). A toolchain pin (or a
-Cargo.toml lint carve-out) is a follow-up chore, deliberately not folded into this phase.
+**Toolchain (resolved in this PR):** the dev image builds from unpinned `rust:1-slim`,
+which advanced to Rust/clippy 1.99 while the crate's `rust-version` is 1.85; clippy's
+newer `double_must_use` lint fires 11 times on `#[async_trait]`-generated trait code —
+**verified pre-existing**: with Phase 0's changes stashed, clippy 1.99 fails on clean
+`main` with the same 11 errors. CI hit exactly these on this branch, so the fix landed
+here: a crate-level `[lints.clippy] double_must_use = "allow"` in `Cargo.toml`, with the
+reason at the site (the double `#[must_use]` is introduced by the macro expansion and
+there is no call-site attribute that can satisfy it). `just check-native` now passes
+*as written* — `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` +
+boundary script + `cargo test` — **all green** (741 unit + all integration suites;
+the ignored wiring test passes under `--ignored`).
 
 **Latency reading notes (so these numbers are not over-read):** `latency_ms` wraps the
 whole `MemoryRecaller::execute` including the embedder call, so the Gemini p50 is
@@ -1017,9 +1017,11 @@ abstention (negatives returning nothing at the floor): 50.0%
 
 ### Phase 0 follow-ups recorded (not blocking any DoD)
 
-- **Toolchain:** pin the toolchain (e.g. `rust-toolchain.toml`) or add an explicit
-  `double_must_use` carve-out in `Cargo.toml` as a separate chore; every future phase's
-  `check-native` will otherwise re-litigate this.
+- **Toolchain:** resolved in this branch via a crate-level `[lints.clippy]` allowance
+  (see the §12 toolchain note). Still worth a separate follow-up: pin the toolchain
+  (`rust-toolchain.toml`) so `check-native` is reproducible instead of tracking whatever
+  `rust:1-slim` resolves to — the allowance means a future toolchain bump may enable new
+  lints silently.
 - **`compare()` skip rule:** a baseline legitimately recording `0.0` for
   `precision@1`/`MRR` is indistinguishable from "never recorded" and skips its gate.
   Accepted for now (documented at the code site); the clean fix is `Option<f64>` for
