@@ -8,6 +8,7 @@ pub mod sqlite_graph_backfill_state;
 pub mod sqlite_memory_repository;
 pub mod sqlite_reindexer;
 pub mod sqlite_vector_index;
+pub mod stopwords;
 pub mod tantivy_text_index;
 
 #[cfg(test)]

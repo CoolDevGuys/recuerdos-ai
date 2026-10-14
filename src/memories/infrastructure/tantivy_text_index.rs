@@ -2,7 +2,8 @@
 //!
 //! # One index per user
 //!
-//! Each user gets their own directory under `<data>/text-index/<user>/`.
+//! Each user gets their own directory under `<data>/text-index/v2/<user>/`
+//! (the versioned root — see below).
 //! A single shared index with a `user_id` field would work, but this way
 //! isolation is structural: a query opens one user's directory and
 //! physically cannot see another's postings, so there is no filter to
@@ -19,7 +20,29 @@
 //! The index is *derived* state. Its system of record is the `memories`
 //! table, and it can be rebuilt at any time. That is why a commit failure
 //! here is not fatal to a write that already reached SQLite.
+//!
+//! # The analyzer, and why the index directory is versioned
+//!
+//! Text fields use the `ra_text_v2` analyzer: simple tokenization, a
+//! length cap, lowercasing, and the project stopword list
+//! (`stopwords.rs`). Function words are removed from *indexed text and
+//! queries alike*, because the query parser tokenizes with the field's
+//! analyzer — which is the entire point (reranking-plan.md §1: the
+//! keyword leg was rewarding matches on "what", "do", "the").
+//!
+//! `Index::open_in_dir` reuses the *stored* schema, so an index created
+//! before the analyzer existed would keep referencing `default` no
+//! matter what this code registers. Rather than silently carrying that
+//! defect, each analyzer change lives under a versioned directory
+//! (`<root>/v2/<user>/`) and the old one is simply ignored; bump
+//! `TEXT_INDEX_VERSION` with the next schema or analyzer change. A user
+//! whose versioned directory is absent gets it from the startup
+//! rebuild or `reindex --text` (see the rebuilder use case).
+//!
+//! Tokenizer registrations are per-`Index`-instance, *not* persisted in
+//! the index, so `user_index` registers the analyzer on every open.
 
+use super::stopwords::STOP_WORDS;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::text_index::TextIndex;
@@ -31,12 +54,56 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
+use tantivy::schema::{
+    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
+};
+use tantivy::tokenizer::{
+    LowerCaser, RemoveLongFilter, SimpleTokenizer, StopWordFilter, TextAnalyzer,
+};
 use tantivy::{Index, IndexWriter, TantivyDocument, Term};
 
 /// tantivy wants a generous heap per writer; this is its documented
 /// minimum and is ample for memory-sized documents.
 const WRITER_HEAP_BYTES: usize = 15_000_000;
+
+/// Name of this adapter's analyzer, registered on every opened index
+/// and referenced by the schema's text fields.
+const TEXT_ANALYZER: &str = "ra_text_v2";
+
+/// The on-disk layout version, its own subdirectory under the index
+/// root. Bump it (and rename the analyzer) whenever the schema or the
+/// analyzer changes, so existing stores are ignored rather than
+/// silently misbehaving; the rebuilder then repopulates the new one
+/// from the `memories` table.
+///
+/// Bumping this is safe: the index is derived state, rebuilt on first
+/// start (see the rebuilder use case), and never read back into
+/// anything but keyword recall.
+pub const TEXT_INDEX_VERSION: &str = "v2";
+
+/// The indexing options every tokenised text field shares: the custom
+/// analyzer, positions kept (as with the `TEXT` default this replaced).
+fn text_options() -> TextOptions {
+    TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer(TEXT_ANALYZER)
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    )
+}
+
+/// The analyzer itself: `SimpleTokenizer` → length cap → lowercase →
+/// stopword removal. The order matters the way tantivy's own `default`
+/// chain orders it; the length cap keeps its documented 40-byte limit
+/// so long tokens behave exactly as they did before.
+fn text_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(RemoveLongFilter::limit(40))
+        .filter(LowerCaser)
+        .filter(StopWordFilter::remove(
+            STOP_WORDS.iter().map(|word| word.to_string()),
+        ))
+        .build()
+}
 
 struct Fields {
     memory_id: Field,
@@ -71,11 +138,13 @@ impl TantivyTextIndex {
         // STRING (not TEXT) for the id: it must match exactly, never be
         // tokenised.
         let memory_id = builder.add_text_field("memory_id", STRING | STORED);
-        let content = builder.add_text_field("content", TEXT);
+        // Custom analyzer instead of tantivy's `TEXT`: same tokenising,
+        // cap and positions, plus stopword removal (see module docs).
+        let content = builder.add_text_field("content", text_options());
         // Tags and category are tokenised too, so `category:decision`
         // style queries and bare tag words both hit.
-        let tags = builder.add_text_field("tags", TEXT);
-        let category = builder.add_text_field("category", TEXT);
+        let tags = builder.add_text_field("tags", text_options());
+        let category = builder.add_text_field("category", text_options());
         let schema = builder.build();
 
         Ok(Self {
@@ -101,7 +170,7 @@ impl TantivyTextIndex {
             return Ok(Arc::clone(existing));
         }
 
-        let directory = self.root.join(user_id.to_string());
+        let directory = self.user_directory(user_id);
         std::fs::create_dir_all(&directory).map_err(|e| {
             RaError::Internal(format!(
                 "failed to create the text index directory {}: {e}",
@@ -117,6 +186,10 @@ impl TantivyTextIndex {
                     directory.display()
                 ))
             })?;
+        // Registered per instance: tokenizer managers are not persisted
+        // in the index, so every open has to do it or the schema's
+        // fields reference an analyzer that isn't there.
+        index.tokenizers().register(TEXT_ANALYZER, text_analyzer());
 
         let writer = index
             .writer(WRITER_HEAP_BYTES)
@@ -127,6 +200,11 @@ impl TantivyTextIndex {
         Ok(user_index)
     }
 
+    /// Where a user's index of *this version* lives.
+    fn user_directory(&self, user_id: UserId) -> PathBuf {
+        self.root.join(TEXT_INDEX_VERSION).join(user_id.to_string())
+    }
+
     /// Removes any existing document for `id`. tantivy has no update:
     /// indexing the same id twice would return it twice.
     fn delete_term(&self, user_index: &mut UserIndex, id: MemoryId) {
@@ -135,16 +213,11 @@ impl TantivyTextIndex {
             &id.to_string(),
         ));
     }
-}
 
-impl TextIndex for TantivyTextIndex {
-    fn upsert(&self, context: &UserContext, memory: &Memory) -> Result<()> {
-        let user_index = self.user_index(context.user_id())?;
-        let mut user_index = user_index
-            .lock()
-            .map_err(|_| RaError::Internal("text index poisoned".to_string()))?;
-
-        self.delete_term(&mut user_index, memory.id());
+    /// Deletes any document for `memory` and appends its current text.
+    /// Not committed — callers decide when the batch is durable.
+    fn reindex_document(&self, user_index: &mut UserIndex, memory: &Memory) -> Result<()> {
+        self.delete_term(user_index, memory.id());
 
         let mut document = TantivyDocument::default();
         document.add_text(self.fields.memory_id, memory.id().to_string());
@@ -156,6 +229,18 @@ impl TextIndex for TantivyTextIndex {
             .writer
             .add_document(document)
             .map_err(|e| RaError::Internal(format!("failed to index memory text: {e}")))?;
+        Ok(())
+    }
+}
+
+impl TextIndex for TantivyTextIndex {
+    fn upsert(&self, context: &UserContext, memory: &Memory) -> Result<()> {
+        let user_index = self.user_index(context.user_id())?;
+        let mut user_index = user_index
+            .lock()
+            .map_err(|_| RaError::Internal("text index poisoned".to_string()))?;
+
+        self.reindex_document(&mut user_index, memory)?;
 
         // Committed synchronously: a memory that isn't immediately
         // recallable looks like a lost write to the agent that just saved
@@ -167,6 +252,40 @@ impl TextIndex for TantivyTextIndex {
             .map_err(|e| RaError::Internal(format!("failed to commit the text index: {e}")))?;
 
         Ok(())
+    }
+
+    fn upsert_many(&self, context: &UserContext, memories: &[Memory]) -> Result<()> {
+        if memories.is_empty() {
+            return Ok(());
+        }
+
+        let user_index = self.user_index(context.user_id())?;
+        let mut user_index = user_index
+            .lock()
+            .map_err(|_| RaError::Internal("text index poisoned".to_string()))?;
+
+        // No commit until the whole chunk is added: this is what makes a
+        // bulk rebuild O(chunks) commits rather than O(memories). If an
+        // add fails mid-chunk nothing is committed, so a retry (the same
+        // ids, deleted first) overwrites cleanly.
+        for memory in memories {
+            self.reindex_document(&mut user_index, memory)?;
+        }
+
+        user_index
+            .writer
+            .commit()
+            .map_err(|e| RaError::Internal(format!("failed to commit the text index: {e}")))?;
+
+        Ok(())
+    }
+
+    fn is_populated(&self, context: &UserContext) -> bool {
+        // Directory existence is the signal: it is only ever created
+        // alongside a real index of the current version (lazily, on the
+        // first write, or by the rebuilder), so a user who saved nothing
+        // since the version bump simply has none.
+        self.user_directory(context.user_id()).exists()
     }
 
     fn remove(&self, context: &UserContext, id: MemoryId) -> Result<()> {

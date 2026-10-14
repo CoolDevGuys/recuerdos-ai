@@ -7,6 +7,7 @@
 use super::sqlite_entity_graph::SqliteEntityGraph;
 use super::sqlite_memory_repository::SqliteMemoryRepository;
 use super::sqlite_vector_index::SqliteVectorIndex;
+use super::tantivy_text_index::TEXT_INDEX_VERSION;
 use super::tantivy_text_index::TantivyTextIndex;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::Category;
@@ -1084,17 +1085,288 @@ fn each_user_gets_their_own_index_directory() {
         .upsert(&fixture.sam, &memory_for(&fixture.sam, "sam"))
         .unwrap();
 
-    let alex_dir = fixture
-        ._index_dir
-        .path()
-        .join(fixture.alex.user_id().to_string());
-    let sam_dir = fixture
-        ._index_dir
-        .path()
-        .join(fixture.sam.user_id().to_string());
+    let version = fixture._index_dir.path().join(TEXT_INDEX_VERSION);
+    let alex_dir = version.join(fixture.alex.user_id().to_string());
+    let sam_dir = version.join(fixture.sam.user_id().to_string());
 
     assert!(alex_dir.is_dir(), "expected a per-user index directory");
     assert!(sam_dir.is_dir());
+}
+
+// ---- keyword analyzer and index rebuilding (reranking-plan.md Phase 1) ----
+
+#[test]
+fn a_stopword_only_query_yields_no_hits_and_no_error() {
+    // The defect from §1 of the reranking plan: `what and or the for do`
+    // matched five memories, because every one of those words is in
+    // almost every document. With the analyzer's stopword list applied to
+    // queries as well as text, the keyword leg has no terms left and
+    // goes silent — the vector leg is what answers such a query.
+    let fixture = fixture();
+    let memory = memory_for(
+        &fixture.alex,
+        "what the database does is and or the user does",
+    );
+    fixture.text.upsert(&fixture.alex, &memory).unwrap();
+
+    for query in ["what and or the for do", "how do I do it", "which is it"] {
+        let hits = fixture.text.search(&fixture.alex, query, 10).unwrap();
+        assert!(hits.is_empty(), "{query:?} matched {hits:?}");
+    }
+}
+
+#[test]
+fn a_natural_language_query_matches_on_its_content_words_only() {
+    // "what do I use for data storage" must reach the memory by its
+    // content words (`use`, `data`, `storage`), and must *not* be
+    // pulled towards a decoy that only shares the filler.
+    let fixture = fixture();
+    let target = memory_for(&fixture.alex, "data storage policy for the warehouse");
+    let decoy = memory_for(&fixture.alex, "what an extraordinary adventure");
+    fixture.text.upsert(&fixture.alex, &target).unwrap();
+    fixture.text.upsert(&fixture.alex, &decoy).unwrap();
+
+    let hits = fixture
+        .text
+        .search(&fixture.alex, "what do I use for data storage", 10)
+        .unwrap()
+        .into_ids();
+
+    assert_eq!(hits, vec![target.id()]);
+}
+
+#[test]
+fn identifiers_survive_the_analyzer_unchanged() {
+    // The exact-token contract, once with each punctuation an identifier
+    // might carry: `useQuery` (camel case), `RA-1234` (hyphen),
+    // `index.ts` (dot). SimpleTokenizer splits on punctuation as it
+    // always did — the analyzer adds only lowercase and stopword removal.
+    let fixture = fixture();
+    let query_hook = memory_for(&fixture.alex, "the useQuery hook wrapper sets staleTime");
+    let ticket = memory_for(&fixture.alex, "see RA-1234 for the migration decision");
+    let barrels = memory_for(&fixture.alex, "barrel files like index.ts are forbidden");
+    for memory in [&query_hook, &ticket, &barrels] {
+        fixture.text.upsert(&fixture.alex, memory).unwrap();
+    }
+
+    assert_eq!(
+        fixture
+            .text
+            .search(&fixture.alex, "useQuery", 10)
+            .unwrap()
+            .into_ids(),
+        vec![query_hook.id()]
+    );
+    assert_eq!(
+        fixture
+            .text
+            .search(&fixture.alex, "RA-1234", 10)
+            .unwrap()
+            .into_ids(),
+        vec![ticket.id()]
+    );
+    let barrel_hits = fixture
+        .text
+        .search(&fixture.alex, "index.ts", 10)
+        .unwrap()
+        .into_ids();
+    assert!(barrel_hits.contains(&barrels.id()));
+    assert!(!barrel_hits.contains(&query_hook.id()));
+
+    // And casing still matches regardless: the query was lowercased.
+    assert_eq!(
+        fixture
+            .text
+            .search(&fixture.alex, "USEQUERY", 10)
+            .unwrap()
+            .into_ids(),
+        vec![query_hook.id()]
+    );
+}
+
+#[test]
+fn a_legacy_index_directory_is_ignored_and_reported_unpopulated() {
+    // `Index::open_in_dir` reuses the *stored* schema — an old index
+    // would keep pointing at the `default` tokenizer forever. The version
+    // directory means there is nothing to reuse: opening with a legacy
+    // directory present yields an empty v2 index and says so.
+    let index_dir = tempfile::tempdir().unwrap();
+    let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+    let identity =
+        crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+    let alex = authenticate(&identity, "alex");
+
+    // A stand-in for the pre-version layout: `<root>/<user>/` with files.
+    let legacy = index_dir.path().join(alex.user_id().to_string());
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("fake-legacy-segment"), b"not a tantivy file").unwrap();
+
+    let text = TantivyTextIndex::open(index_dir.path().to_path_buf()).unwrap();
+    assert!(
+        !text.is_populated(&alex),
+        "a legacy directory must not count as a v2 index"
+    );
+    assert!(
+        text.search(&alex, "pnpm", 10)
+            .unwrap()
+            .into_ids()
+            .is_empty(),
+        "the legacy postings must not be readable"
+    );
+}
+
+/// Seeds a table with memories for two users — one memory soft-deleted —
+/// and gives back a rebuilder over a *fresh* tantivy directory, with the
+/// real adapters throughout.
+fn rebuild_fixture() -> (
+    Arc<crate::bootstrap::wiring::Identity>,
+    TantivyTextIndex,
+    Arc<SqliteMemoryRepository>,
+    tempfile::TempDir,
+    UserContext,
+    UserContext,
+) {
+    let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+    let identity =
+        Arc::new(crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap());
+    let index_dir = tempfile::tempdir().unwrap();
+    let text = TantivyTextIndex::open(index_dir.path().to_path_buf()).unwrap();
+    let repository = Arc::new(SqliteMemoryRepository::new(
+        Arc::clone(&database),
+        "test-model",
+        DIMENSIONS,
+    ));
+    let alex = authenticate(&identity, "alex");
+    let sam = authenticate(&identity, "sam");
+
+    for (context, content) in [
+        (&alex, "User prefers pnpm for packages"),
+        (&alex, "deploys on hetzner after the migration"),
+        (&sam, "sam also prefers pnpm"),
+    ] {
+        let memory = memory_for(context, content);
+        repository.insert(context, &memory, "test").unwrap();
+    }
+    let deleted = memory_for(&alex, "a forgotten note about pnpm");
+    repository.insert(&alex, &deleted, "test").unwrap();
+    repository
+        .delete(&alex, deleted.id(), "test", "gone")
+        .unwrap();
+
+    (identity, text, repository, index_dir, alex, sam)
+}
+
+#[test]
+fn the_rebuilder_populates_a_missing_index_from_the_table() {
+    let (identity, text, repository, _dir, alex, _sam) = rebuild_fixture();
+    assert!(!text.is_populated(&alex));
+
+    let rebuilder = crate::memories::application::text_index_rebuilder::TextIndexRebuilder::new(
+        Arc::clone(&identity.users),
+        repository as Arc<dyn MemoryRepository>,
+        Arc::new(text),
+    );
+    let report = rebuilder.rebuild_all().unwrap();
+
+    assert_eq!(report.users_examined, 2);
+    assert_eq!(report.users_rebuilt, 2);
+    assert_eq!(
+        report.memories_indexed, 3,
+        "the soft-deleted memory must not be indexed"
+    );
+}
+
+#[test]
+fn rebuild_then_search_hits_per_user_with_no_crossing() {
+    // The rebuild must produce an index that behaves like one built
+    // incrementally — including per-user isolation.
+    let (identity, text, repository, _dir, alex, sam) = rebuild_fixture();
+    let arc_text = Arc::new(text);
+    let rebuilder = crate::memories::application::text_index_rebuilder::TextIndexRebuilder::new(
+        Arc::clone(&identity.users),
+        Arc::clone(&repository) as Arc<dyn MemoryRepository>,
+        Arc::clone(&arc_text) as Arc<dyn TextIndex>,
+    );
+    rebuilder.rebuild_all().unwrap();
+
+    assert!(arc_text.is_populated(&alex));
+    assert!(arc_text.is_populated(&sam));
+
+    let alex_hits = arc_text.search(&alex, "pnpm", 10).unwrap().into_ids();
+    let sam_hits = arc_text.search(&sam, "pnpm", 10).unwrap().into_ids();
+    assert_eq!(alex_hits.len(), 1); // "prefers pnpm", not the deleted note
+    assert_eq!(sam_hits.len(), 1);
+    assert_ne!(
+        alex_hits[0], sam_hits[0],
+        "different users, different documents"
+    );
+
+    // hetzner is alex's only memory mentioning it.
+    assert_eq!(
+        arc_text
+            .search(&alex, "hetzner", 10)
+            .unwrap()
+            .into_ids()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn rebuilding_twice_is_idempotent_and_rebuild_missing_then_skips() {
+    let (identity, text, repository, _dir, alex, _sam) = rebuild_fixture();
+    let arc_text = Arc::new(text);
+    let rebuilder = crate::memories::application::text_index_rebuilder::TextIndexRebuilder::new(
+        Arc::clone(&identity.users),
+        Arc::clone(&repository) as Arc<dyn MemoryRepository>,
+        Arc::clone(&arc_text) as Arc<dyn TextIndex>,
+    );
+
+    let first = rebuilder.rebuild_all().unwrap();
+    let first_hits = arc_text.search(&alex, "pnpm", 10).unwrap().into_ids();
+
+    // Same run again: no duplicates (upsert deletes by id first).
+    rebuilder.rebuild_all().unwrap();
+    let second_hits = arc_text.search(&alex, "pnpm", 10).unwrap().into_ids();
+    assert_eq!(first_hits, second_hits);
+    assert_eq!(second_hits.len(), 1);
+    assert_eq!(first.users_rebuilt, 2);
+
+    // And the startup path on top of a populated store does nothing —
+    // that is the every-start-after-the-first guarantee.
+    let missing = rebuilder.rebuild_missing().unwrap();
+    assert_eq!(missing.users_rebuilt, 0);
+    assert_eq!(missing.users_skipped, 2);
+}
+
+#[test]
+fn upsert_many_matches_upsert_for_search_and_commits_once() {
+    // The batch path must be indistinguishable from the per-document one
+    // from the search side; its whole contract is "same index, fewer
+    // commits".
+    let index_dir = tempfile::tempdir().unwrap();
+    let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+    let identity =
+        crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+    let alex = authenticate(&identity, "alex");
+
+    let text = TantivyTextIndex::open(index_dir.path().to_path_buf()).unwrap();
+    let memories: Vec<Memory> = [
+        "pnpm package manager",
+        "pnpm workspace layout",
+        "vitest tests",
+    ]
+    .iter()
+    .map(|content| memory_for(&alex, content))
+    .collect();
+
+    text.upsert_many(&alex, &memories).unwrap();
+
+    let hits = text.search(&alex, "pnpm", 10).unwrap().into_ids();
+    assert_eq!(hits.len(), 2);
+    // Re-running the batch replaces rather than duplicates.
+    text.upsert_many(&alex, &memories).unwrap();
+    assert_eq!(text.search(&alex, "pnpm", 10).unwrap().into_ids().len(), 2);
 }
 
 #[test]
