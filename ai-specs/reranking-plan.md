@@ -329,13 +329,21 @@ existing deployments get a correct keyword index without data loss.
 
 ### Definition of Done
 
-- [ ] `just check-native` passes (including a boundary-check pass for any new module).
+- [x] `just check-native` passes (including a boundary-check pass for any new module).
 - [ ] `eval` has **no regression** in any pre-existing `by_kind` (notably `exact-token` stays 100 %,
       `needle`, `paraphrase`, `relational` within `--max-drop`), and the new `nl-question` /
       `nl-category` kinds improve vs the Phase 0 numbers (record both in §12).
-- [ ] Upgrading a copy of a real data directory (pre-change) → start daemon → keyword recall works with
+      *Not met as written — recorded per §0 rule 8, see "Noise-propped recall" in §12:
+      `relational` moved −14.3 within its kind (one of its seven cases, which Phase 0
+      passed only on function-word noise), and `nl-question` recall dropped on one
+      informational case, for the same reason. `exact-token` held 100 %, the overall
+      gate passed (recall@5 −3.2, precision@1 +2.9), and every ranking metric improved
+      or held. Phase 2 must not start until this entry is read.*
+- [x] Upgrading a copy of a real data directory (pre-change) → start daemon → keyword recall works with
       no manual step; `recuerdos-ai reindex --text` gives the same index. Documented procedure in §12.
-- [ ] Re-running the four queries from §1 against the upgraded copy: the right memory moves up
+      *(The real store was absent in this environment; rehearsed on a representative
+      pre-change store built with the pre-change binary — procedure and results in §12.)*
+- [x] Re-running the four queries from §1 against the upgraded copy: the right memory moves up
       or stays; record the new ranks.
 
 ### Expected state after this phase
@@ -1031,7 +1039,138 @@ abstention (negatives returning nothing at the floor): 50.0%
   one-case flake to be visible and re-run before believing a red.
 
 ### Phase 1 — keyword stopwords
-- `eval` output: _TBD_ · four-query re-run: _TBD_ · upgrade-copy procedure result: _TBD_
+
+**Branch:** `fix/keyword-stopwords` · commits `85c1df1` (analyzer + contract
+`upsert_many`/`is_populated` + versioned directory) and `71b52d4` (rebuilder
+use case, startup auto-rebuild, `reindex --text`/`--vectors`).
+
+**VERIFY resolved (task 1.2, §2 row 9):** tantivy 0.25 `StopWordFilter` exposes
+both `::new(Language)` (behind the crate's `stopwords` feature) and
+`::remove(Vec<String>)` (no feature needed — used). Its `Language::English`
+list is exactly the Lucene list quoted in §2 row 9 (`a, an, and, are, as, at,
+be, but, by, for, if, in, into, is, it, no, not, of, on, or, such, that, the,
+their, then, there, these, they, this, to, was, will, with`), confirming the
+question words are missing from it. The filter compares whole tokens after the
+`LowerCaser`, and the query parser tokenizes with each field's analyzer, so one
+registration covers indexing and querying. Tokenizers were confirmed to be
+per-`Index`-instance (registered in `user_index` on every open).
+
+**Analyzer** `ra_text_v2`: `SimpleTokenizer → RemoveLongFilter(40) → LowerCaser
+→ StopWordFilter(STOP_WORDS)`, set on `content`/`tags`/`category` with positions
+kept. The list lives in `memories/infrastructure/stopwords.rs` (module comment
+records the boundary: tantivy's list + question words + auxiliaries/modals +
+pronouns + glue; `use`/`user`/`prefer` deliberately kept). Index directories
+moved to `text-index/v2/<user>/` with `TEXT_INDEX_VERSION` as the bump site.
+
+**`just check-native`: passes** — fmt, clippy `-D warnings`, boundary script,
+`cargo test` (757 unit + all integration suites, +16 new tests).
+
+#### eval — Run 1, default config (bge-small, the committed baseline's embedder)
+
+`docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval`
+
+```
+recall@5: 86.5%   precision@1: 64.9%   MRR: 74.1%   latency p50: 10.5 ms p95: 16.2 ms   (37 scored, 4 negative)
+abstention (negatives returning nothing at the floor): 75.0%   (Phase 0: 25.0%)
+   category-filter: recall 100.0%   p@1 100.0%      (100/100 — unchanged)
+      current-fact: recall 100.0%   p@1 100.0%      (unchanged)
+       exact-token: recall 100.0%   p@1 100.0%      (unchanged, now 4 cases: useQuery, maintenance_work_mem, index.ts, Fly.io)
+            needle: recall 66.7%   p@1 66.7%        (unchanged)
+          negative: recall 75.0%   p@1 75.0%        (25.0% → 75.0%; only `hiking trails` still returns one 0.32-noise hit)
+       nl-category: recall 75.0%   p@1 75.0%        (recall 62.5% → 75.0%; `deployment and hosting` now recalls AND tops the Hetzner memory — the §1 defect, fixed under both embedders)
+       nl-question: recall 85.7%   p@1 57.1%        (recall 100% → 85.7%, p@1 unchanged — see "noise-propped recall" below)
+        paraphrase: recall 100.0%   p@1 50.0%       (unchanged)
+        relational: recall 71.4%   p@1 28.6%        (recall 85.7% → 71.4% — see below; p@1 unchanged)
+  subcategory-filter: recall 100.0%   p@1 100.0%    (unchanged)
+        tag-filter: recall 100.0%   p@1 0.0%        (unchanged)
+```
+
+Gate against the committed baseline (`eval --baseline eval/baseline.json --max-drop 5`):
+overall recall@5 91.7% → 88.5% (**−3.2, inside the 5-point gate**), precision@1
+62.5% → 65.4% (**+2.9**), exit 0; the per-kind warning `relational: 85.7% →
+71.4%` prints (by-kind drops are warn-only in `compare()`).
+
+#### eval — Run 2, production-like config
+
+`docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval --config recuerdos-ai.toml`
+(gemini-embedding-2; Phase 0 numbers in brackets)
+
+```
+recall@5: 83.8% [88.6]   precision@1: 75.7% [71.4]   MRR: 80.2% [78.9]   latency p50: 399.7 ms [332.6] p95: 852.5 ms [509.3]
+abstention: 75.0% [50.0]  — `stopword soup` passes on both embedders now (it was the bge-only failure)
+```
+
+The gemini recall drop is the same three cases as bge (below) plus
+`multi-hit` 100% → 50% (the Go table-driven memory); p@1 +4.3, MRR +1.3, and
+`tag-filter`, `storage decision`, `auth review` all gain their top-hit.
+
+#### Noise-propped recall — the two regressions, explained (do not re-derive)
+
+Both are cases whose expected memory **never shares a content word with the
+query** and reached the top 5 in Phase 0 *only* by collecting function-word
+keyword matches — the mechanism §1 calls the defect:
+
+- `relational: where a service's team sits` ("…travel to…billing service
+  maintainers…" → Lisbon office): the office memory matched the query's `the`
+  (`out of the Lisbon office`) and rode that k-leg vote into the top 5; with
+  `the` removed it has no keyword match and its vector rank (19) no longer
+  outweighs the other four fused results. Anchors and hops unchanged (graph
+  ranks 1–3 identical, `RA_EVAL_DEBUG=1`).
+- `nl-question: package manager` ("what do I use for installing project
+  dependencies" → pnpm preference): the preference matched `for` ("pnpm over
+  npm and yarn **for** package management"). Same on gemini, and same
+  mechanism as gemini's `multi-hit` drop: `testing` vs `tests` with no
+  stemming, so the Go memory's only keyword evidence was `the`/`does`.
+
+The fix is working as specified; the *recall metric* was partly inflated by the
+defect. Affects recall@5 only — p@1 and MRR improve on both embedders. The
+`testing/tests` split is the stemming follow-up (§11) in miniature.
+
+**DoD status (per §0 rule 8, recorded, not weakened):** the eval DoD item is
+**not met as written**: `relational` moved −14.3 within its kind (7 cases; one
+flip is 14.3 points) against the planned "within `--max-drop`", and
+`nl-question` recall dropped (informational kind). Overall gate, p@1, MRR,
+`exact-token` (still 100%), and every `nl-*`-and-negative *ranking* metric
+improved or held. **The next phase (2) should not start until the operator
+reads this entry and accepts the regression or asks for it to be addressed**
+— Phase 2's floor calibration re-records the baseline anyway, and Phase 3's
+gate reads these exact numbers.
+
+#### Upgrade procedure + four-query re-run
+
+The §1 live store is **not present in this environment** (the dev `data`
+volume is empty, no `~/.recuerdos-ai` on the host). The procedure was
+therefore rehearsed on a representative store: 7 memories (the §1 topics, the
+§1 decoys, and an exact-identifier memory) saved through the **pre-change
+binary** (`main` @ `363a2b4`, local bge-small), leaving a legacy
+`text-index/<user>/` directory. Volume `ra-upgrade-store` retained for
+inspection. Procedure and results:
+
+1. Start the **new** binary on the store. Before `listening`, one line:
+   `text index rebuilt users_rebuilt=1 memories_indexed=7 elapsed_ms=37`.
+   `text-index/v2/<user>/` appears; the legacy directory is left untouched and
+   never read. Keyword recall works with no manual step.
+2. Second start: zero rebuild log lines (the per-user check is one stat).
+3. With the daemon stopped, `recuerdos-ai reindex --text` printed per-user
+   counts (`default: 7 memories`, total 1 user, 7 memories, 0 skipped) and the
+   same search results on the next start (verified below).
+4. `reindex` with no flags still runs only the vector pass (flag semantics
+   pinned by the clap help text; `--vectors` names it explicitly).
+
+The four §1 queries against the upgraded rehearsal store (default floor;
+BEFORE = pre-change binary on the legacy index, AFTER = new binary):
+
+| query | BEFORE | AFTER |
+|---|---|---|
+| what do I use for data storage | pnpm preference #1 (0.251) — noise match | **nothing at the floor** (pnpm's noise gone; the database rule is still below floor — Phase 2's calibration, embedder-dependent) |
+| deployment and hosting | Dockerfile memory #1 (0.499), pnpm #2 (0.383, noise-inflated) | **Dockerfile memory #1 (0.498), pnpm #2 relevance 0.383 → 0.296** — right memory held #1, noise weakened |
+| health, fitness or family | nothing at the floor | nothing at the floor (unchanged; §1's version is the bge/gemini calibration gap, Phase 2) |
+| what and or the for do | pnpm #1 (0.296) | **nothing — 0 results** |
+| WidgetPool-7 (identifier guard) | #1, 0.758 | #1, 0.755 — identifier unchanged through the analyzer |
+
+`reindex --text` output on rehearsal copy: `rebuilt the keyword index for 1
+users (7 memories, 0 users skipped)`; search results identical to the
+auto-rebuild index.
 
 ### Phase 2 — calibration
 - Noise ceiling / signal floor per model: _TBD_ · chosen `gemini-embedding-2` baseline: _TBD_
@@ -1065,7 +1204,12 @@ abstention (negatives returning nothing at the floor): 50.0%
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
       used); fixed in Phase 0 so it does. Details in the Phase 0 log above.
-- [ ] tantivy 0.25 `StopWordFilter` API and the built-in English list (1.2, §2 row 9)
+- [x] tantivy 0.25 `StopWordFilter` API and the built-in English list (1.2, §2 row 9) —
+      `StopWordFilter::remove(Vec<String>)` exists without any crate feature and is what
+      `ra_text_v2` uses; `::new(Language)` is behind the `stopwords` feature and was not
+      needed. `Language::English` is exactly the Lucene list quoted in §2 row 9, confirming
+      none of `what/which/who/how/do/does/I/my/you/can/should` is in it. Details in the
+      Phase 1 log above.
 - [ ] Gemini embeddings unit-normalised at configured dimension (2.3)
 - [ ] fastembed rerank feature flag; `TextRerank::rerank` receiver (`&self`/`&mut self`) (5.1)
 - [ ] Dockerfile warm-models step (5.4)
