@@ -325,6 +325,20 @@ relations = [
 # `expect` names memories by their exact content. `kind` groups results in
 # the report, so a regression shows up as "paraphrase got worse" rather
 # than as one number moving.
+#
+# Two more keys exist (reranking-plan.md Phase 0):
+#
+#   `expect_empty = true` — the correct answer is *nothing*: the query has
+#   no answer in the corpus, and the case passes only when the recall
+#   returns an empty list at the configured `[retrieval].min_relevance`
+#   floor (the floor every agent-facing read applies). Such cases never
+#   list `expect`; they are excluded from the overall recall/precision/MRR
+#   means and scored by kind and by the run's abstention_rate instead.
+#
+#   `informational = true` — reported in every run but excluded from the
+#   numbers a committed baseline gates against, so a case that documents
+#   a known, deliberately-unfixed defect does not redden CI. Phase 2
+#   removes the flags and re-records the baseline with these kinds gated.
 # ─────────────────────────────────────────────────────────────────────
 
 [[case]]
@@ -632,13 +646,21 @@ expect = [
 
 # `nl-category`: abstract, category-style queries — "anything about X"
 # rather than a question about one memory. Two of them are the §1
-# queries almost verbatim.
+# queries almost verbatim. The gold labels are deliberately *complete*:
+# every corpus memory that genuinely answers the narrowed query is in
+# `expect`, so the kind measures retrieval rather than the reviewer's
+# disagreement with an ambiguous label ("deployment and hosting" also
+# wants the deployment runbook; "how I like my code organised" is
+# scoped to the structure preferences rather than to any coding taste).
 [[case]]
 name = "nl-category: deployment and hosting"
 kind = "nl-category"
 informational = true
 query = "deployment and hosting"
-expect = ["The backend deploys on Hetzner, migrated from Fly.io because of cost"]
+expect = [
+    "The backend deploys on Hetzner, migrated from Fly.io because of cost",
+    "Deployment runbook: tag the release, wait for CI, then run just deploy-prod",
+]
 
 [[case]]
 name = "nl-category: health, fitness or family"
@@ -648,13 +670,13 @@ query = "health, fitness or family"
 expect = ["Alex lives with a partner and a baby in Berlin"]
 
 [[case]]
-name = "nl-category: how I like to work"
+name = "nl-category: code organisation"
 kind = "nl-category"
 informational = true
-query = "anything about how I like to work"
+query = "anything about how I like my code organised"
 expect = [
-    "User prefers pnpm over npm and yarn for package management",
     "User forbids barrel files and index.ts re-exports",
+    "User requires one export per file in TypeScript projects",
 ]
 
 [[case]]

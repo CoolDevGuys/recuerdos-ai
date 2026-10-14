@@ -143,8 +143,15 @@ struct CaseResult {
     reciprocal_rank: Option<f64>,
     /// Wall-clock milliseconds of the one `MemoryRecaller::execute` this
     /// case made — the number the reranker's latency cost (Phase 5–7) is
-    /// measured against.
+    /// measured against. Includes the embedder call: for a remote
+    /// provider that is mostly network, so compare rerank-on against
+    /// rerank-off on the same machine and embedder, never across them.
     latency_ms: f64,
+    /// Whether this is an `expect_empty` case: excluded from the overall
+    /// recall/precision/MRR means (a negative measures abstention, not
+    /// ranking — the two must not move each other's gates), kept in
+    /// `by_kind` and averaged into `abstention_rate`.
+    expect_empty: bool,
     /// Expected memories that did not appear, for the report. For an
     /// `expect_empty` case that failed, the spurious results instead.
     missed: Vec<String>,
@@ -158,21 +165,34 @@ struct CaseResult {
 /// baseline never recorded (see the "absent reads as zero" comment there).
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
-    /// Mean recall@5 across all cases, 0–100.
+    /// Mean recall@5 across the *scored* (non-`expect_empty`) cases,
+    /// 0–100. Negatives are kept out of this mean on purpose: mixing
+    /// "did we rank the right memory first" with "did we abstain
+    /// correctly" would make the Phase 3 headroom figure and the Phase 7
+    /// ship gate move whenever a negative flips, for reasons that have
+    /// nothing to do with ranking.
     pub recall_at_k: f64,
-    /// Fraction of cases whose top result was correct, 0–100.
+    /// Fraction of *scored* cases whose top result was correct, 0–100.
     pub precision_at_1: f64,
     pub cases: usize,
     /// Mean recall@5 per `kind`, so a regression says *what* got worse.
+    /// `expect_empty` kinds appear here too (pass rate), which is where
+    /// negatives are read; the overall means above exclude them.
     pub by_kind: BTreeMap<String, f64>,
     /// Mean reciprocal rank of the first expected memory within the top K
-    /// across all cases, 0–100 (reranking-plan.md Phase 0.2). Unlike
-    /// recall@5, it notices "the right memory was in the top 5 but at #4"
-    /// — which is the defect the cross-encoder is proposed against.
+    /// across the *scored* cases, 0–100 (reranking-plan.md Phase 0.2).
+    /// Unlike recall@5, it notices "the right memory was in the top 5
+    /// but at #4" — which is the defect the cross-encoder is proposed
+    /// against.
     #[serde(default)]
     pub mrr: f64,
     /// Median / 95th-percentile wall-clock of a single recall, in
-    /// milliseconds. The budget the reranker must stay under.
+    /// milliseconds, across every case. Includes the embedder call (for
+    /// a remote provider, mostly network), so it is only meaningful
+    /// compared against a baseline recorded on the same embedder — which
+    /// is what the `embedder` field lets `compare` check. The reranker's
+    /// own cost (Phases 5–7) must be measured paired on/off, not out of
+    /// this absolute.
     #[serde(default)]
     pub latency_ms_p50: f64,
     #[serde(default)]
@@ -181,18 +201,28 @@ pub struct Report {
     /// way `by_kind` localises a recall regression.
     #[serde(default)]
     pub precision_at_1_by_kind: BTreeMap<String, f64>,
+    /// Fraction of `expect_empty` cases that returned nothing at the
+    /// floor, 0–100; 0.0 when the run had no negatives. The negative
+    /// cases' own number, kept off the ranking means above.
+    #[serde(default)]
+    pub abstention_rate: f64,
+    /// The embedder that produced these scores (model id). A baseline
+    /// recorded against one embedder and compared against another is
+    /// apples to oranges (reranking-plan.md Phase 0.1); `compare` warns
+    /// when the two differ. Empty in baselines recorded before the field
+    /// existed, which suppresses the check rather than the run.
+    #[serde(default)]
+    pub embedder: String,
 }
 
-/// What one `run` produced: the full report over every case, and the
-/// gated report over the non-`informational` ones. `write_baseline`
-/// records the full report; `compare` gates on the gated one, so the
-/// committed baseline never sees a case it was not recorded against.
-pub struct EvalOutcome {
-    pub report: Report,
-    pub gated: Report,
-}
-
-/// Runs the eval set and returns the report.
+/// Runs the eval set and returns the *gated* report — the non-
+/// `informational` subset that both `--baseline` and `--write-baseline`
+/// act on, so a committed baseline can only ever record, and be compared
+/// against, the cases the gate actually runs (reranking-plan.md Phase
+/// 0.5: recording the full report would pin the deliberately-failing
+/// cases into `baseline.json`). The full per-case picture, informational
+/// kinds included, is printed by `print_report`. Phase 2 removes the
+/// flags, collapsing the distinction.
 ///
 /// The `config` decides which embedder the eval runs against: the eval
 /// seeds its throwaway store itself, but otherwise assembles `Memories`
@@ -201,7 +231,7 @@ pub struct EvalOutcome {
 /// production retrieval tuning, not the built-in defaults. Measuring
 /// ranking against a different embedder than production does not
 /// transfer (reranking-plan.md Phase 0.1).
-pub fn run(cases_path: &Path, config: &AppConfig) -> Result<EvalOutcome> {
+pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
     let raw = std::fs::read_to_string(cases_path).map_err(|e| {
         RaError::Validation(format!("could not read {}: {e}", cases_path.display()))
     })?;
@@ -214,16 +244,25 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<EvalOutcome> {
             cases_path.display()
         )));
     }
+    validate(&set, cases_path)?;
 
     let (memories, context, _scratch) = seed(&set, config)?;
 
     // The scores mean nothing without knowing which model produced them:
     // baselines, floors and relevance all move with the embedder.
+    let embedder = memories.embedder.model_id().to_string();
     println!(
         "embedder: {} ({} dimensions)\n",
-        memories.embedder.model_id(),
+        embedder,
         memories.embedder.dimensions()
     );
+
+    // One untimed recall before timing any: the first call pays
+    // connection setup (remote providers), index open and cache misses,
+    // and with ~40 samples a single cold call lands straight in p95. The
+    // store is a throwaway, so the touch this one makes costs nothing.
+    let warmup = RecallQuery::new("warm up", 1)?;
+    memories.recaller.execute(&context, &warmup)?;
 
     let mut results = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
@@ -232,10 +271,38 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<EvalOutcome> {
 
     print_report(&results);
 
-    Ok(EvalOutcome {
-        report: summarise(&results),
-        gated: summarise(&gate(&results)),
-    })
+    let mut gated = summarise(&gate(&results));
+    gated.embedder = embedder;
+    Ok(gated)
+}
+
+/// Reject cases that cannot be scored as written, at load time rather
+/// than only in the committed-file parse test: an `expect`-less
+/// non-negative case divides by zero and poisons every mean as NaN, and
+/// an `expect_empty` case with expectations has contradicted itself.
+fn validate(set: &EvalSet, path: &Path) -> Result<()> {
+    let mut issues: Vec<String> = Vec::new();
+    for case in &set.cases {
+        match (case.expect_empty, case.expect.is_empty()) {
+            (true, false) => issues.push(format!(
+                "case {:?} is expect_empty but lists expectations — its expectation is emptiness",
+                case.name
+            )),
+            (false, true) => issues.push(format!(
+                "case {:?} lists no expectations and is not expect_empty — recall over zero expectations is NaN",
+                case.name
+            )),
+            _ => {}
+        }
+    }
+    if !issues.is_empty() {
+        return Err(RaError::Validation(format!(
+            "{} is invalid: {}",
+            path.display(),
+            issues.join("; ")
+        )));
+    }
+    Ok(())
 }
 
 /// The subset a committed baseline gates against: everything not marked
@@ -397,7 +464,9 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
 
     if case.expect_empty {
         // The pass condition is its own function: it is what a negative
-        // case means, and the DoD pins it.
+        // case means, and the DoD pins it. Its recall/top_hit carry the
+        // pass bit for the *kind-level* lines and `abstention_rate`; the
+        // overall ranking means skip this case entirely.
         let passed = nothing_returned_passes(returned.len());
         return Ok(CaseResult {
             name: case.name.clone(),
@@ -405,8 +474,9 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
             informational: case.informational,
             recall: if passed { 1.0 } else { 0.0 },
             top_hit: passed,
-            reciprocal_rank: if passed { Some(1.0) } else { None },
+            reciprocal_rank: None,
             latency_ms,
+            expect_empty: true,
             missed: if passed {
                 Vec::new()
             } else {
@@ -445,6 +515,7 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
             .is_some_and(|top| case.expect.iter().any(|wanted| wanted == top)),
         reciprocal_rank,
         latency_ms,
+        expect_empty: false,
         missed,
     })
 }
@@ -465,6 +536,10 @@ fn summarise(results: &[CaseResult]) -> Report {
         values.iter().sum::<f64>() / values.len() as f64 * 100.0
     };
 
+    // The ranking means cover the scored cases only (see `Report`);
+    // negatives get `abstention_rate`, and both appear in `by_kind`.
+    let scored: Vec<&CaseResult> = results.iter().filter(|r| !r.expect_empty).collect();
+
     let mut recall_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut precision_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for result in results {
@@ -479,11 +554,16 @@ fn summarise(results: &[CaseResult]) -> Report {
     }
 
     let latencies: Vec<f64> = results.iter().map(|r| r.latency_ms).collect();
+    let abstentions: Vec<f64> = results
+        .iter()
+        .filter(|r| r.expect_empty)
+        .map(|r| r.recall)
+        .collect();
 
     Report {
-        recall_at_k: mean(&results.iter().map(|r| r.recall).collect::<Vec<_>>()),
+        recall_at_k: mean(&scored.iter().map(|r| r.recall).collect::<Vec<_>>()),
         precision_at_1: mean(
-            &results
+            &scored
                 .iter()
                 .map(|r| if r.top_hit { 1.0 } else { 0.0 })
                 .collect::<Vec<_>>(),
@@ -494,7 +574,7 @@ fn summarise(results: &[CaseResult]) -> Report {
             .map(|(kind, values)| (kind, mean(&values)))
             .collect(),
         mrr: mean(
-            &results
+            &scored
                 .iter()
                 .map(|r| r.reciprocal_rank.unwrap_or(0.0))
                 .collect::<Vec<_>>(),
@@ -505,6 +585,8 @@ fn summarise(results: &[CaseResult]) -> Report {
             .into_iter()
             .map(|(kind, values)| (kind, mean(&values)))
             .collect(),
+        abstention_rate: mean(&abstentions),
+        embedder: String::new(),
     }
 }
 
@@ -546,15 +628,25 @@ fn print_report(results: &[CaseResult]) {
 
     let report = summarise(results);
     println!("{}", "─".repeat(76));
+    let scored_cases = results.iter().filter(|r| !r.expect_empty).count();
     println!(
-        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} cases)",
+        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} scored cases, {} negative)",
         report.recall_at_k,
         report.precision_at_1,
         report.mrr,
         report.latency_ms_p50,
         report.latency_ms_p95,
-        report.cases,
+        scored_cases,
+        report.cases - scored_cases,
     );
+    if report.cases > scored_cases {
+        // The negatives' own number, printed where a reader looks for
+        // them rather than hidden inside the ranking means above.
+        println!(
+            "abstention (negatives returning nothing at the floor): {:.1}%",
+            report.abstention_rate
+        );
+    }
     let informational = results.iter().filter(|r| r.informational).count();
     if informational > 0 {
         // Say it out loud: these numbers include cases the baseline does
@@ -602,6 +694,26 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
     let baseline: Report = serde_json::from_str(&raw).map_err(|e| {
         RaError::Validation(format!("{} is not valid: {e}", baseline_path.display()))
     })?;
+
+    // A baseline recorded against one embedder and gated against another
+    // is apples to oranges (reranking-plan.md Phase 0.1): the committed
+    // baseline is bge-small, CI runs `just eval-native` with no
+    // `--config`, and a production-like run is an ad-hoc measurement.
+    // Warn loudly rather than fail — cross-embedder comparisons are
+    // sometimes exactly what the operator means to do — but never let a
+    // silent mismatch pass as a verdict.
+    if baseline.embedder.is_empty() {
+        println!(
+            "note: the baseline records no embedder (it predates the field); \
+             re-record it to enable the embedder-match check"
+        );
+    } else if baseline.embedder != report.embedder {
+        println!(
+            "warning: baseline recorded with {:?}, this run used {:?} — these numbers \
+             are not comparable",
+            baseline.embedder, report.embedder
+        );
+    }
 
     let mut failures: Vec<String> = Vec::new();
 
@@ -695,7 +807,19 @@ mod tests {
             // A case with a top hit has its expected memory at rank 1.
             reciprocal_rank: if top_hit { Some(1.0) } else { None },
             latency_ms: 10.0,
+            expect_empty: false,
             missed: vec![],
+        }
+    }
+
+    /// A negative case's scored stand-in: pass/fail lives entirely in the
+    /// recall bit, as `score` writes it.
+    fn negative(passed: bool) -> CaseResult {
+        CaseResult {
+            expect_empty: true,
+            recall: if passed { 1.0 } else { 0.0 },
+            top_hit: passed,
+            ..result("negative", 0.0, false)
         }
     }
 
@@ -766,6 +890,174 @@ mod tests {
         // The defect this kind exists to reproduce: the stopword query
         // returned five confident results — every one a failure.
         assert!(!nothing_returned_passes(5));
+    }
+
+    #[test]
+    fn negatives_move_abstention_never_the_ranking_means() {
+        // Must-fix from review: a negative flipping must not move recall,
+        // precision@1 or MRR — otherwise the Phase 3 headroom and the
+        // Phase 7 ship gate read abstention as ranking. Both reports here
+        // have the same scored case; the negative differs.
+        let scored = result("paraphrase", 0.5, false);
+        let without = summarise(std::slice::from_ref(&scored));
+        let with_pass = summarise(&[scored.clone(), negative(true)]);
+        let with_fail = summarise(&[scored, negative(false)]);
+
+        assert_eq!(without.recall_at_k, with_pass.recall_at_k);
+        assert_eq!(without.recall_at_k, with_fail.recall_at_k);
+        assert_eq!(without.precision_at_1, with_pass.precision_at_1);
+        assert_eq!(without.precision_at_1, with_fail.precision_at_1);
+        assert_eq!(without.mrr, with_pass.mrr);
+        assert_eq!(without.mrr, with_fail.mrr);
+
+        assert_eq!(with_pass.abstention_rate, 100.0);
+        assert_eq!(with_fail.abstention_rate, 0.0);
+        // Still visible per kind, which is where a negative is read.
+        assert_eq!(with_pass.by_kind["negative"], 100.0);
+        assert_eq!(with_fail.by_kind["negative"], 0.0);
+    }
+
+    #[test]
+    fn a_run_of_pure_negatives_reports_no_ranking_mean_as_a_fake_zero() {
+        // A cases file of only negatives: means over the empty scored set
+        // are 0 by `mean`'s convention, and abstention carries the signal.
+        let report = summarise(&[negative(true), negative(true)]);
+        assert_eq!(report.recall_at_k, 0.0);
+        assert_eq!(report.abstention_rate, 100.0);
+        assert_eq!(report.cases, 2);
+    }
+
+    fn case(name: &str, expect: Vec<&str>, expect_empty: bool) -> Case {
+        Case {
+            name: name.to_string(),
+            kind: "k".to_string(),
+            query: "q".to_string(),
+            expect: expect.iter().map(|s| s.to_string()).collect(),
+            categories: vec![],
+            tags: vec![],
+            subcategories: vec![],
+            expect_empty,
+            informational: false,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_both_kinds_of_unscorable_case() {
+        // The `expect` field gained a serde default, so these reach run()
+        // rather than the parser; they must die there, not as NaN means.
+        let good = EvalSet {
+            memories: vec![],
+            cases: vec![
+                case("scored", vec!["m"], false),
+                case("negative", vec![], true),
+            ],
+        };
+        validate(&good, Path::new("x.toml")).expect("valid set");
+
+        let bad = EvalSet {
+            memories: vec![],
+            cases: vec![
+                case("no expect", Vec::new(), false),
+                case("contradictory", vec!["m"], true),
+            ],
+        };
+        let error = validate(&bad, Path::new("x.toml")).unwrap_err().to_string();
+        assert!(error.contains("\"no expect\""), "{error}");
+        assert!(error.contains("NaN"), "{error}");
+        assert!(error.contains("\"contradictory\""), "{error}");
+    }
+
+    #[test]
+    fn write_baseline_records_the_gated_subset_not_the_full_report() {
+        // Must-fix from review: `--write-baseline` writes outcome.gated.
+        // Prove the gated report this feeds is what a mixed run produces:
+        // informational cases never appear in its case count or kinds, so
+        // the deliberate-defect cases cannot be pinned into baseline.json.
+        let mixed = vec![
+            result("paraphrase", 1.0, true),
+            CaseResult {
+                informational: true,
+                ..result("nl-question", 0.0, false)
+            },
+            CaseResult {
+                informational: true,
+                ..negative(false)
+            },
+        ];
+        let report = summarise(&gate(&mixed));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(&report, file.path()).unwrap();
+        let raw = std::fs::read_to_string(file.path()).unwrap();
+        let back: Report = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(back.cases, 1);
+        assert_eq!(back.recall_at_k, 100.0);
+        assert!(!back.by_kind.contains_key("nl-question"));
+        assert!(!back.by_kind.contains_key("negative"));
+        // The full report, by contrast, sees all three — the shape that
+        // would have poisoned the baseline had it been written.
+        let full = summarise(&mixed);
+        assert_eq!(full.cases, 3);
+        assert!(full.recall_at_k < 100.0);
+    }
+
+    #[test]
+    fn compare_warns_across_embedders_without_failing() {
+        // The warning is printed, not asserted here (no output capture in
+        // this harness), but the gate must keep returning Ok across a
+        // mismatch — a cross-embedder comparison is sometimes intended.
+        let baseline = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                recall_at_k: 90.0,
+                embedder: "bge-small-en-v1.5".to_string(),
+                ..Report::default()
+            },
+            baseline.path(),
+        )
+        .unwrap();
+        let other = Report {
+            recall_at_k: 90.0,
+            embedder: "gemini-embedding-2".to_string(),
+            ..Report::default()
+        };
+        assert!(compare(&other, baseline.path(), 5.0).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires the ONNX model; run with --ignored"]
+    fn the_config_passed_to_seed_reaches_the_wired_instance() {
+        // Task 0.1's wiring, as opposed to the eval-set parse test (which
+        // only checks the committed file): the config decides the embedder
+        // and the floor, exactly what compare() checks the baseline
+        // against. Model-dependent, so ignored like the fastembed tests
+        // and reading the same cache path.
+        let cache = std::env::var("RECUERDOS_AI_MODEL_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/models"));
+        let config = AppConfig {
+            embeddings: crate::bootstrap::config::EmbeddingsConfig {
+                cache_dir: cache.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            retrieval: crate::bootstrap::config::RetrievalConfig {
+                min_relevance: 0.77,
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let set = EvalSet {
+            memories: vec![],
+            cases: vec![],
+        };
+
+        let (memories, _context, _scratch) = seed(&set, &config).expect("seed with config");
+        assert_eq!(memories.embedder.model_id(), "bge-small-en-v1.5");
+        assert_eq!(
+            memories.min_relevance, 0.77,
+            "the config's floor must reach the instance the eval scores with"
+        );
     }
 
     #[test]
@@ -934,6 +1226,8 @@ mod tests {
         .expect("eval/cases.toml should exist");
 
         let set: EvalSet = toml::from_str(&raw).expect("eval/cases.toml should parse");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/cases.toml");
+        validate(&set, &path).expect("the committed set must pass its own validation");
 
         assert!(
             set.memories.len() >= 10,
@@ -942,22 +1236,8 @@ mod tests {
         assert!(!set.cases.is_empty());
 
         // Every expectation must name a memory that is actually seeded,
-        // or the case can never pass and the score is a lie. A negative
-        // case expects nothing and must say nothing by hand.
+        // or the case can never pass and the score is a lie.
         for case in &set.cases {
-            if case.expect_empty {
-                assert!(
-                    case.expect.is_empty(),
-                    "negative case {:?} lists expectations; its expectation is emptiness",
-                    case.name
-                );
-                continue;
-            }
-            assert!(
-                !case.expect.is_empty(),
-                "case {:?} expects nothing but is not marked expect_empty",
-                case.name
-            );
             for wanted in &case.expect {
                 assert!(
                     set.memories.iter().any(|m| &m.content == wanted),

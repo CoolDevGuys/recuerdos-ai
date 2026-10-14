@@ -478,15 +478,17 @@ fn run_eval(
     // and discards, so the config's `[storage].path` is never touched.
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
 
-    let outcome = bootstrap::eval::run(cases, &config).map_err(|e| e.to_string())?;
+    // `run` yields the gated report — informational cases, which document
+    // known defects and fail on purpose, are excluded from both writing
+    // and comparison so a baseline only ever records the cases the gate
+    // runs (task 0.5).
+    let report = bootstrap::eval::run(cases, &config).map_err(|e| e.to_string())?;
 
     if let Some(path) = write_baseline {
-        return bootstrap::eval::write_baseline(&outcome.report, path).map_err(|e| e.to_string());
+        return bootstrap::eval::write_baseline(&report, path).map_err(|e| e.to_string());
     }
     if let Some(path) = baseline {
-        // The gated report: informational cases document known defects
-        // and fail on purpose until those defects are fixed.
-        return bootstrap::eval::compare(&outcome.gated, path, max_drop).map_err(|e| e.to_string());
+        return bootstrap::eval::compare(&report, path, max_drop).map_err(|e| e.to_string());
     }
     Ok(())
 }

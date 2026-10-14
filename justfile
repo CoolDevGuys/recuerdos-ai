@@ -46,6 +46,11 @@ eval-native:
     cargo run -q --bin recuerdos-ai -- \
         eval --baseline eval/baseline.json --max-drop 5
 
+# Re-record the baseline on the native toolchain, mirroring eval-record.
+eval-record-native:
+    cargo run -q --bin recuerdos-ai -- \
+        eval --write-baseline eval/baseline.json
+
 check-native:
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings
