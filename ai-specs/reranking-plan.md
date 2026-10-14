@@ -233,20 +233,24 @@ reranker will cost, *before* any retrieval code changes.
 
 ### Definition of Done
 
-- [x] `just check-native` passes. *(Green as `cargo fmt --check` + `cargo clippy
-      --all-targets -- -D warnings -A clippy::double_must_use` + boundary script +
-      `cargo test`: the 11 `double_must_use` errors in `#[async_trait]`-generated code
-      are pre-existing on a clean `main` under the rebuilt `rust:1-slim` (now 1.99)
-      image — see the Phase 0 toolchain caveat in §12.)*
+- [x] `just check-native` passes. *(Not literally as written: it passes as
+      `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings
+      -A clippy::double_must_use` + boundary script + `cargo test`. The 11
+      `double_must_use` errors in `#[async_trait]`-generated code were **verified
+      pre-existing**: with Phase 0 stashed, clippy 1.99 from the rebuilt `rust:1-slim`
+      fails on clean `main` with the same 11. Toolchain pin / lint carve-out deferred
+      to a separate chore — see the §12 toolchain caveat.)*
 - [x] `cargo run -q --bin recuerdos-ai -- eval` prints recall@5, precision@1, MRR, p50/p95 latency,
       and per-kind scores, including the new kinds.
 - [x] Old `eval/baseline.json` still loads; `eval --baseline eval/baseline.json` still runs
       (gated subset unchanged: 91.7% recall@5 / 62.5% precision@1).
-- [x] §12 contains the "before" numbers and states which embedder the eval used.
+- [x] §12 contains the "before" numbers and states which embedder the eval used
+      (full per-case tables for both embedders; `compare` now checks the recorded embedder too).
 - [x] The new `nl-question`, `nl-category`, `negative` cases exist, and at least the stopword-only
-      `negative` case demonstrably **fails** on this branch (5 results returned, relevance
-      0.28–0.32 baseline-corrected on bge-small; the live-store figures were 0.84–0.91 —
-      see §12).
+      `negative` case demonstrably **fails** on this branch — it fails under the default
+      (bge-small) eval with 5 results at relevance 0.28–0.32. *(Note, recorded as a Phase 2
+      input: the same case passes under the production-like gemini config on this corpus;
+      §1's live-store figures were 0.84–0.91 — see the negative-case table in §12.)*
 
 ### Expected state after this phase
 
@@ -784,57 +788,193 @@ the config only for `model_cache_dir`; `eval::seed` assembled `Memories` from
 `AppConfig::default()` — so before this phase every eval ran `local bge-small-en-v1.5`
 regardless of the production `gemini-embedding-2`. Fixed: `eval::run(cases, &AppConfig)`
 now builds the whole instance from the loaded config (embedder, floor, ranker tuning);
-only `[storage].path` (throwaway dir) and `[graph].enabled = true` are overridden.
-The run prints the embedder it used. Wiring test: the eval-set parse test pins the
-committed corpus/cases; full end-to-end proof is the printed `embedder:` line above.
+only `[storage].path` (throwaway dir) and `[graph].enabled = true` are overridden. The
+run prints the embedder it used. Coverage, stated precisely: an `#[ignore]d` wiring
+test (`the_config_passed_to_seed_reaches_the_wired_instance`, run with
+`RECUERDOS_AI_MODEL_CACHE=/models`, passing) asserts the config's `min_relevance` and
+embedder reach the wired `Memories`; the printed `embedder:` line is the end-to-end
+proof per run.
 
 **Toolchain caveat (pre-existing, recorded per rule 0.8):** the dev image was rebuilt
 from `rust:1-slim`, which now ships Rust/clippy 1.99; clippy's newer `double_must_use`
 lint fires 11 times on `#[async_trait]`-generated trait code in files untouched by this
-phase (all fail identically on a clean `main`). `check-native` therefore passes here as
+phase. **Verified:** with Phase 0's changes stashed, clippy 1.99 fails on a clean
+`main` with the same 11 errors. `check-native` therefore passes here as
 `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings
--A clippy::double_must_use` + boundaries + `cargo test` — **all green** (736 unit +
-all integration suites). A toolchain pin or a Cargo.toml lint carve-out is a candidate
-follow-up chore, deliberately not part of this phase.
+-A clippy::double_must_use` + boundaries + `cargo test` — **all green** (753 unit +
+all integration suites, plus the ignored wiring test). A toolchain pin (or a
+Cargo.toml lint carve-out) is a follow-up chore, deliberately not folded into this phase.
 
-Default config (`just eval-native`, bge-small, 24 gated + 15 informational = 39 cases):
+**Latency reading notes (so these numbers are not over-read):** `latency_ms` wraps the
+whole `MemoryRecaller::execute` including the embedder call, so the Gemini p50 is
+remote-API latency, not local inference. One untimed warm-up recall now runs before any
+timed one (cold connection/index-open otherwise lands in p95 of a ~40-sample run).
+Phase 5/7 must measure the reranker's cost **paired, on/off, same machine and
+embedder**, not as an absolute out of these tables.
+
+`compare()` now warns when the baseline's recorded `embedder` differs from the run's;
+the committed baseline predates the field, so every run against it prints the
+re-record note. `--write-baseline` writes the **gated** subset — informational
+(deliberately-failing) cases can never be pinned into `baseline.json` (task 0.5).
+`expect_empty` cases are excluded from the overall recall/precision/MRR means and
+reported as `abstention_rate` plus their `by_kind` line.
+
+#### Run 1 — default config (the committed baseline's embedder)
+
+`docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval`
+(bge-small-en-v1.5; 35 scored + 4 negative cases; the 15 informational cases marked
+`*` are excluded from the gate):
 
 ```
-recall@5: 82.1%   precision@1: 56.4%   MRR: 67.1%   latency p50: 10.5 ms p95: 12.2 ms   (39 cases)
+embedder: bge-small-en-v1.5 (384 dimensions)
+
+case                                                   kind  recall  top
+────────────────────────────────────────────────────────────────────────────
+paraphrase: package manager                      paraphrase    100%    ·
+paraphrase: import structure                     paraphrase    100%    ·
+paraphrase: why this database                    paraphrase    100%    ✓
+exact token: useQuery                           exact-token    100%    ✓
+exact token: maintenance_work_mem               exact-token    100%    ✓
+current fact: deployment target                current-fact    100%    ✓
+needle: who reviews auth                             needle    100%    ✓
+needle: dietary requirement                          needle      0%    ·
+    missed: User is vegetarian and does not eat fish
+needle: release process                              needle    100%    ✓
+category filter: coding preferences only    category-filter    100%    ✓
+category filter: decisions only             category-filter    100%    ✓
+tag filter: typescript                           tag-filter    100%    ·
+multi-hit: what does the user prefer for …       paraphrase    100%    ✓
+subcategory filter: tooling only           subcategory-filter    100%    ✓
+subcategory filter: structure only         subcategory-filter    100%    ✓
+subcategory filter: testing only           subcategory-filter    100%    ✓
+subcategory filter: excludes structure wh… subcategory-filter    100%    ✓
+relational: who owns a decision about a s…       relational      0%    ·
+    missed: Nadia is the tech lead of the Meridian team
+relational: where a service's team sits          relational    100%    ·
+relational: on-call for an app's dependen…       relational    100%    ·
+relational: compliance sign-off for a flow       relational    100%    ·
+relational: expert on a retired system           relational    100%    ·
+relational: database behind a team's serv…       relational    100%    ✓
+relational: what a pipeline ran on before        relational    100%    ✓
+nl-question: package manager                    nl-question    100%    · *
+nl-question: module exports                     nl-question    100%    ✓ *
+nl-question: storage decision                   nl-question    100%    · *
+nl-question: auth review                        nl-question    100%    · *
+nl-question: shipping a release                 nl-question    100%    ✓ *
+nl-question: testing tools                      nl-question    100%    ✓ *
+nl-question: the failed migration               nl-question    100%    ✓ *
+nl-category: deployment and hosting             nl-category     50%    ✓ *
+    missed: The backend deploys on Hetzner, migrated from Fly.io because of cost
+nl-category: health, fitness or family          nl-category    100%    ✓ *
+nl-category: code organisation                  nl-category      0%    · *
+    missed: User forbids barrel files and index.ts re-exports
+    missed: User requires one export per file in TypeScript projects
+nl-category: database rules                     nl-category    100%    ✓ *
+negative: stopword soup                            negative      0%    · *
+    missed: (expected no results at the 0.25 floor; got 5)
+negative: shape of a question                      negative      0%    · *
+    missed: (expected no results at the 0.25 floor; got 1)
+negative: hiking trails                            negative      0%    · *
+    missed: (expected no results at the 0.25 floor; got 1)
+negative: bouillabaisse                            negative    100%    ✓ *
+────────────────────────────────────────────────────────────────────────────
+recall@5: 90.0%   precision@1: 62.9%   MRR: 74.8%   latency p50: 10.7 ms p95: 13.3 ms   (35 scored cases, 4 negative)
+abstention (negatives returning nothing at the floor): 25.0%
   (15 marked * informational — excluded from the baseline gate)
    category-filter: recall 100.0%   p@1 100.0%
       current-fact: recall 100.0%   p@1 100.0%
        exact-token: recall 100.0%   p@1 100.0%
             needle: recall 66.7%   p@1 66.7%
           negative: recall 25.0%   p@1 25.0%
-       nl-category: recall 50.0%   p@1 50.0%
+       nl-category: recall 62.5%   p@1 75.0%
        nl-question: recall 100.0%   p@1 57.1%
         paraphrase: recall 100.0%   p@1 50.0%
         relational: recall 85.7%   p@1 28.6%
   subcategory-filter: recall 100.0%   p@1 100.0%
         tag-filter: recall 100.0%   p@1 0.0%
+```
+
+Gate against the committed baseline (`just eval-native`):
+
+```
+note: the baseline records no embedder (it predates the field); re-record it to enable the embedder-match check
 
 baseline recall@5: 91.7%   now: 91.7%   change: -0.0 points
 baseline precision@1: 62.5%   now: 62.5%   change: -0.0 points
 baseline MRR: not recorded — gate skipped (re-record the baseline to enable it)
 ```
 
-The gate is green: the gated subset (the original 24 cases) is **byte-identical to the
-committed baseline** — the two corpus memories added by 0.3 did not move any pre-existing
-`by_kind` number.
+Green: the gated 24-case subset is **byte-identical to the committed baseline** —
+neither the two corpus memories added by 0.3 nor the harness changes moved any
+pre-existing number.
 
-Production-like (`--config recuerdos-ai.toml`, gemini-embedding-2, same machine):
+#### Run 2 — production-like config
+
+`docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval --config recuerdos-ai.toml`
+(gemini-embedding-2, key from `GEMINI_API_KEY`; same 39 cases):
 
 ```
 embedder: gemini-embedding-2 (3072 dimensions)
-…
-recall@5: 83.3%   precision@1: 66.7%   MRR: 73.4%   latency p50: 356.6 ms p95: 558.6 ms   (39 cases)
+
+case                                                   kind  recall  top
+────────────────────────────────────────────────────────────────────────────
+paraphrase: package manager                      paraphrase    100%    ·
+paraphrase: import structure                     paraphrase    100%    ·
+paraphrase: why this database                    paraphrase    100%    ✓
+exact token: useQuery                           exact-token    100%    ✓
+exact token: maintenance_work_mem               exact-token    100%    ✓
+current fact: deployment target                current-fact    100%    ✓
+needle: who reviews auth                             needle    100%    ✓
+needle: dietary requirement                          needle      0%    ·
+    missed: User is vegetarian and does not eat fish
+needle: release process                              needle    100%    ✓
+category filter: coding preferences only    category-filter    100%    ✓
+category filter: decisions only             category-filter    100%    ✓
+tag filter: typescript                           tag-filter    100%    ✓
+multi-hit: what does the user prefer for …       paraphrase    100%    ✓
+subcategory filter: tooling only           subcategory-filter    100%    ✓
+subcategory filter: structure only         subcategory-filter    100%    ✓
+subcategory filter: testing only           subcategory-filter    100%    ✓
+subcategory filter: excludes structure wh… subcategory-filter    100%    ✓
+relational: who owns a decision about a s…       relational      0%    ·
+    missed: Nadia is the tech lead of the Meridian team
+relational: where a service's team sits          relational    100%    ·
+relational: on-call for an app's dependen…       relational    100%    ·
+relational: compliance sign-off for a flow       relational    100%    ·
+relational: expert on a retired system           relational    100%    ·
+relational: database behind a team's serv…       relational    100%    ✓
+relational: what a pipeline ran on before        relational    100%    ✓
+nl-question: package manager                    nl-question    100%    · *
+nl-question: module exports                     nl-question    100%    ✓ *
+nl-question: storage decision                   nl-question    100%    ✓ *
+nl-question: auth review                        nl-question    100%    ✓ *
+nl-question: shipping a release                 nl-question    100%    ✓ *
+nl-question: testing tools                      nl-question     50%    ✓ *
+    missed: User requires table-driven tests in Go, one table per behaviour
+nl-question: the failed migration               nl-question    100%    ✓ *
+nl-category: deployment and hosting             nl-category     50%    ✓ *
+    missed: The backend deploys on Hetzner, migrated from Fly.io because of cost
+nl-category: health, fitness or family          nl-category    100%    ✓ *
+nl-category: code organisation                  nl-category      0%    · *
+    missed: User forbids barrel files and index.ts re-exports
+    missed: User requires one export per file in TypeScript projects
+nl-category: database rules                     nl-category    100%    ✓ *
+negative: stopword soup                            negative    100%    ✓ *
+negative: shape of a question                      negative      0%    · *
+    missed: (expected no results at the 0.25 floor; got 1)
+negative: hiking trails                            negative      0%    · *
+    missed: (expected no results at the 0.25 floor; got 1)
+negative: bouillabaisse                            negative    100%    ✓ *
+────────────────────────────────────────────────────────────────────────────
+recall@5: 88.6%   precision@1: 71.4%   MRR: 78.9%   latency p50: 332.6 ms p95: 509.3 ms   (35 scored cases, 4 negative)
+abstention (negatives returning nothing at the floor): 50.0%
+  (15 marked * informational — excluded from the baseline gate)
    category-filter: recall 100.0%   p@1 100.0%
       current-fact: recall 100.0%   p@1 100.0%
        exact-token: recall 100.0%   p@1 100.0%
             needle: recall 66.7%   p@1 66.7%
           negative: recall 50.0%   p@1 50.0%
-       nl-category: recall 50.0%   p@1 50.0%
+       nl-category: recall 62.5%   p@1 75.0%
        nl-question: recall 92.9%   p@1 85.7%
         paraphrase: recall 100.0%   p@1 50.0%
         relational: recall 85.7%   p@1 28.6%
@@ -842,27 +982,51 @@ recall@5: 83.3%   precision@1: 66.7%   MRR: 73.4%   latency p50: 356.6 ms p95: 5
         tag-filter: recall 100.0%   p@1 100.0%
 ```
 
-(Gemini's p50 ≈ 357 ms is remote-API latency, not local inference; it is the honest
-production figure Phase 5–7 budgets against. `latency_ms_p50/p95` are measured around
-each `MemoryRecaller::execute` call.)
+#### Reconciled reading of the new kinds
 
-**Per-case ranks, new kinds (both embedders):**
+- `nl-question` (7): bge-small recall 100.0 / **p@1 57.1** — finds the memory but not
+  first on *package manager*, *storage decision* ("what do I use for data storage",
+  the §1 query), *auth review*. Gemini: recall 92.9 / p@1 85.7 — better ranking, but
+  the Go table-driven memory drops out of the top 5 under "testing tools".
+- `nl-category` (4): recall 62.5 / p@1 75.0 on both. **On both embedders the exact §1
+  query "deployment and hosting" misses the Hetzner memory** (the runbook answers it
+  first), and "anything about how I like my code organised" misses both structure
+  preferences. (Gold labels are complete per the review: the deployment case expects
+  both deploy memories; the organisation query is scoped to structure.)
+- `negative` (4, behind the 0.25 floor), per case on each embedder — this table is the
+  reconciliation of the two runs above:
 
-- `nl-question` (7 cases): recall 100.0% / p@1 57.1% on bge-small (misses #1 on
-  "package manager", "storage decision", "auth review"); recall 92.9% / p@1 85.7% on
-  Gemini (the Go table-driven memory missed top-5 under "testing tools").
-- `nl-category` (4 cases): recall 50% / p@1 50% on **both** embedders —
-  "deployment and hosting" misses the Hetzner memory entirely (top 5, no answer) and
-  "anything about how I like to work" misses both coding preferences, exactly the §1
-  symptom.
-- `negative` (4 cases, run behind the 0.25 floor): stopword-only
-  `what and or the for do` **fails as predicted** — bge-small returns **5 results**
-  ("…relevance=0.312 … relevance=0.283", top hit: the pnpm preference). `how do I do
-  it` (1 result, relevance 0.283) and `best hiking trails near the coast` (1 result,
-  relevance 0.323) also fail on both embedders; `bouillabaisse` passes on both. The
-  relevance values here are baseline-corrected for bge-small (the §1 live figures of
-  0.84–0.91 were the Gemini space); the defect — a question-shaped query with no
-  answer yielding confident results — reproduces on both.
+  | negative case | bge-small | gemini |
+  |---|---|---|
+  | `what and or the for do` | **FAIL — 5 results** (relevance 0.283–0.312, top: the pnpm preference) | pass — 0 results |
+  | `how do I do it` | FAIL — 1 result (0.283) | FAIL — 1 result (0.321) |
+  | `best hiking trails near the coast` | FAIL — 1 result (0.323) | FAIL — 1 result (0.323) |
+  | `french recipe for bouillabaisse` | pass — 0 results | pass — 0 results |
+  | abstention | **25.0%** | **50.0%** |
+
+  **Finding that Phase 2 must not lose:** the stopword-only query is the *only*
+  negative that splits — it fails on bge-small but passes on gemini at the current
+  floor. That means **the production-like eval on this corpus does not reproduce the
+  live-store §1 result (5 hits at relevance 0.84–0.91) for `gemini-embedding-2`.**
+  The live store's numbers came from its own corpus and the 0.5 baseline; the eval
+  corpus plus the 0.25 floor already suppresses that one query. Two negatives
+  (`how do I do it`, `hiking trails`) *do* fail on both embedders at 0.28–0.32 —
+  above the floor as noise — confirming cause 2 (miscalibration) generally, while
+  task 2.1's noise-ceiling measurement should be read against *this* table, not the
+  §1 anecdote.
+
+### Phase 0 follow-ups recorded (not blocking any DoD)
+
+- **Toolchain:** pin the toolchain (e.g. `rust-toolchain.toml`) or add an explicit
+  `double_must_use` carve-out in `Cargo.toml` as a separate chore; every future phase's
+  `check-native` will otherwise re-litigate this.
+- **`compare()` skip rule:** a baseline legitimately recording `0.0` for
+  `precision@1`/`MRR` is indistinguishable from "never recorded" and skips its gate.
+  Accepted for now (documented at the code site); the clean fix is `Option<f64>` for
+  the additive fields — cheap to do alongside Phase 2.5's re-record.
+- **Gate noise:** with 24 gated cases, one flipped case moves `precision_at_1` by
+  4.2 points and two exceed `--max-drop 5`. The plan's threshold stands; expect a
+  one-case flake to be visible and re-run before believing a red.
 
 ### Phase 1 — keyword stopwords
 - `eval` output: _TBD_ · four-query re-run: _TBD_ · upgrade-copy procedure result: _TBD_
