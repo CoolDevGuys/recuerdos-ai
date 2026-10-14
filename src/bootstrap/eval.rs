@@ -19,6 +19,7 @@
 //! and reports a score rather than a pass/fail. CI runs it as a gate with
 //! `--baseline`; a human runs it bare while changing the ranker.
 
+use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
@@ -94,6 +95,7 @@ struct Case {
     name: String,
     kind: String,
     query: String,
+    #[serde(default)]
     expect: Vec<String>,
     #[serde(default)]
     categories: Vec<String>,
@@ -101,23 +103,60 @@ struct Case {
     tags: Vec<String>,
     #[serde(default)]
     subcategories: Vec<String>,
+    /// The correct answer is *nothing*: no memory in the corpus is about
+    /// this query, so the recall must return an empty list at the
+    /// configured `[retrieval].min_relevance` floor. Counted as passed
+    /// only when nothing came back (reranking-plan.md Phase 0.3). Unlike
+    /// the scored kinds, these cases *do* apply the floor — they measure
+    /// exactly what an agent-facing read would show, floor included.
+    #[serde(default)]
+    expect_empty: bool,
+    /// Reported everywhere but excluded from the numbers a committed
+    /// baseline gates against, so a deliberately-failing regression case
+    /// (reranking-plan.md Phase 0.5: `nl-*` and `negative` before the fix)
+    /// documents the defect without reddening CI. Phase 2 removes the
+    /// flag once the defects are fixed and the baseline re-recorded.
+    #[serde(default)]
+    informational: bool,
 }
 
 /// What one case scored.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CaseResult {
     name: String,
     kind: String,
-    /// Fraction of expected memories that appeared in the top K.
+    /// Excluded from the gated summary a baseline is compared against;
+    /// see `Case::informational`.
+    informational: bool,
+    /// Fraction of expected memories that appeared in the top K. For an
+    /// `expect_empty` case this is 1.0 when nothing was returned, else 0.
     recall: f64,
     /// Whether the single best-ranked result was one of the expected ones.
+    /// For an `expect_empty` case: whether the list was empty — the top
+    /// result was "correct" exactly when there was no top result.
     top_hit: bool,
-    /// Expected memories that did not appear, for the report.
+    /// 1 / (rank of the first expected memory found in the top K), None
+    /// when none of them was found. Averaged into `Report::mrr`. For an
+    /// `expect_empty` case: Some(1.0) when nothing was returned (the
+    /// "answer" the case expected was found at the head of the empty list)
+    /// and None when something was.
+    reciprocal_rank: Option<f64>,
+    /// Wall-clock milliseconds of the one `MemoryRecaller::execute` this
+    /// case made — the number the reranker's latency cost (Phase 5–7) is
+    /// measured against.
+    latency_ms: f64,
+    /// Expected memories that did not appear, for the report. For an
+    /// `expect_empty` case that failed, the spurious results instead.
     missed: Vec<String>,
 }
 
 /// The machine-readable score, and the shape of `eval/baseline.json`.
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// Every field added after the first committed baseline carries
+/// `#[serde(default)]` so old baselines still deserialise (invariant I-5
+/// of reranking-plan.md), and `compare()` skips gating a field the old
+/// baseline never recorded (see the "absent reads as zero" comment there).
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
     /// Mean recall@5 across all cases, 0–100.
     pub recall_at_k: f64,
@@ -126,10 +165,43 @@ pub struct Report {
     pub cases: usize,
     /// Mean recall@5 per `kind`, so a regression says *what* got worse.
     pub by_kind: BTreeMap<String, f64>,
+    /// Mean reciprocal rank of the first expected memory within the top K
+    /// across all cases, 0–100 (reranking-plan.md Phase 0.2). Unlike
+    /// recall@5, it notices "the right memory was in the top 5 but at #4"
+    /// — which is the defect the cross-encoder is proposed against.
+    #[serde(default)]
+    pub mrr: f64,
+    /// Median / 95th-percentile wall-clock of a single recall, in
+    /// milliseconds. The budget the reranker must stay under.
+    #[serde(default)]
+    pub latency_ms_p50: f64,
+    #[serde(default)]
+    pub latency_ms_p95: f64,
+    /// precision@1 per `kind`, so a ranking regression localises the same
+    /// way `by_kind` localises a recall regression.
+    #[serde(default)]
+    pub precision_at_1_by_kind: BTreeMap<String, f64>,
+}
+
+/// What one `run` produced: the full report over every case, and the
+/// gated report over the non-`informational` ones. `write_baseline`
+/// records the full report; `compare` gates on the gated one, so the
+/// committed baseline never sees a case it was not recorded against.
+pub struct EvalOutcome {
+    pub report: Report,
+    pub gated: Report,
 }
 
 /// Runs the eval set and returns the report.
-pub fn run(cases_path: &Path, model_cache_dir: Option<&Path>) -> Result<Report> {
+///
+/// The `config` decides which embedder the eval runs against: the eval
+/// seeds its throwaway store itself, but otherwise assembles `Memories`
+/// from this config — so `--config recuerdos-ai.toml` measures the
+/// production embedding model, the production relevance floor, and
+/// production retrieval tuning, not the built-in defaults. Measuring
+/// ranking against a different embedder than production does not
+/// transfer (reranking-plan.md Phase 0.1).
+pub fn run(cases_path: &Path, config: &AppConfig) -> Result<EvalOutcome> {
     let raw = std::fs::read_to_string(cases_path).map_err(|e| {
         RaError::Validation(format!("could not read {}: {e}", cases_path.display()))
     })?;
@@ -143,7 +215,15 @@ pub fn run(cases_path: &Path, model_cache_dir: Option<&Path>) -> Result<Report> 
         )));
     }
 
-    let (memories, context, _scratch) = seed(&set, model_cache_dir)?;
+    let (memories, context, _scratch) = seed(&set, config)?;
+
+    // The scores mean nothing without knowing which model produced them:
+    // baselines, floors and relevance all move with the embedder.
+    println!(
+        "embedder: {} ({} dimensions)\n",
+        memories.embedder.model_id(),
+        memories.embedder.dimensions()
+    );
 
     let mut results = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
@@ -151,25 +231,39 @@ pub fn run(cases_path: &Path, model_cache_dir: Option<&Path>) -> Result<Report> 
     }
 
     print_report(&results);
-    Ok(summarise(&results))
+
+    Ok(EvalOutcome {
+        report: summarise(&results),
+        gated: summarise(&gate(&results)),
+    })
+}
+
+/// The subset a committed baseline gates against: everything not marked
+/// `informational`, so a case that documents a known defect cannot
+/// redden the pipeline (reranking-plan.md Phase 0.5).
+fn gate(results: &[CaseResult]) -> Vec<CaseResult> {
+    results
+        .iter()
+        .filter(|r| !r.informational)
+        .cloned()
+        .collect()
 }
 
 /// Builds a throwaway instance and fills it with the corpus.
 ///
 /// The `TempDir` comes back so the caller holds it: dropping it deletes
 /// the database and the tantivy indexes out from under the run.
-fn seed(
-    set: &EvalSet,
-    model_cache_dir: Option<&Path>,
-) -> Result<(Memories, UserContext, tempfile::TempDir)> {
+///
+/// The instance is assembled from the caller's `config` — embedder,
+/// relevance floor, ranker tuning and all — with exactly two overrides:
+/// the storage path, so the run can never touch a real store, and the
+/// graph (see below).
+fn seed(set: &EvalSet, config: &AppConfig) -> Result<(Memories, UserContext, tempfile::TempDir)> {
     let scratch = tempfile::tempdir()
         .map_err(|e| RaError::Internal(format!("could not create a scratch directory: {e}")))?;
 
-    let mut config = crate::bootstrap::config::AppConfig::default();
+    let mut config = config.clone();
     config.storage.path = scratch.path().to_string_lossy().to_string();
-    if let Some(cache) = model_cache_dir {
-        config.embeddings.cache_dir = cache.to_string_lossy().to_string();
-    }
     // The eval measures the graph leg's contribution, so it runs with the
     // graph on regardless of the shipped default — that is the whole point
     // of the `relational` cases and the entities/relations the corpus
@@ -262,12 +356,22 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
         .map(|raw| Category::parse(raw))
         .collect::<Result<Vec<_>>>()?;
 
-    let query = RecallQuery::new(&case.query, K)?
+    let mut query = RecallQuery::new(&case.query, K)?
         .with_categories(categories)
         .with_tags(case.tags.clone())
         .with_subcategories(case.subcategories.clone());
+    // A negative case asks "would an agent see anything here?", so it runs
+    // behind the same floor every agent-facing read applies. The scored
+    // kinds run floorless, as they always have: they measure what the
+    // indexes ranked, and dropping weak results would hide near-misses the
+    // report exists to show.
+    if case.expect_empty {
+        query = query.with_min_relevance(memories.min_relevance);
+    }
 
+    let started = std::time::Instant::now();
     let hits = memories.recaller.execute(context, &query)?;
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();
 
     // Ranker-tuning aid (added in Task 7.3.7): with RA_EVAL_DEBUG set, dump
@@ -279,15 +383,40 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
         for (i, hit) in hits.iter().take(3).enumerate() {
             let d = hit.match_detail;
             eprintln!(
-                "  {}. v={:?} k={:?} g={:?} score={:.5}  {}",
+                "  {}. v={:?} k={:?} g={:?} relevance={:.3} score={:.5}  {}",
                 i + 1,
                 d.vector_rank,
                 d.bm25_rank,
                 d.graph_rank,
+                hit.relevance,
                 hit.score,
                 truncate(hit.memory.content(), 60),
             );
         }
+    }
+
+    if case.expect_empty {
+        // The pass condition is its own function: it is what a negative
+        // case means, and the DoD pins it.
+        let passed = nothing_returned_passes(returned.len());
+        return Ok(CaseResult {
+            name: case.name.clone(),
+            kind: case.kind.clone(),
+            informational: case.informational,
+            recall: if passed { 1.0 } else { 0.0 },
+            top_hit: passed,
+            reciprocal_rank: if passed { Some(1.0) } else { None },
+            latency_ms,
+            missed: if passed {
+                Vec::new()
+            } else {
+                vec![format!(
+                    "(expected no results at the {:?} floor; got {})",
+                    memories.min_relevance,
+                    returned.len()
+                )]
+            },
+        });
     }
 
     let missed: Vec<String> = case
@@ -299,15 +428,33 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
 
     let found = case.expect.len() - missed.len();
 
+    // The first expected memory's rank, if any: reciprocal rank is 1 over
+    // how far down the *best* answer was buried.
+    let reciprocal_rank = returned
+        .iter()
+        .position(|got| case.expect.iter().any(|wanted| wanted == got))
+        .map(|index| 1.0 / (index as f64 + 1.0));
+
     Ok(CaseResult {
         name: case.name.clone(),
         kind: case.kind.clone(),
+        informational: case.informational,
         recall: found as f64 / case.expect.len() as f64,
         top_hit: returned
             .first()
             .is_some_and(|top| case.expect.iter().any(|wanted| wanted == top)),
+        reciprocal_rank,
+        latency_ms,
         missed,
     })
+}
+
+/// Whether an `expect_empty` case passed: the whole point of a negative
+/// case is that a query with no answer shows an agent *nothing*, so any
+/// returned result fails it. Kept as a named function because it is the
+/// definition of the `expect_empty` kind and the DoD pins its behaviour.
+fn nothing_returned_passes(returned: usize) -> bool {
+    returned == 0
 }
 
 fn summarise(results: &[CaseResult]) -> Report {
@@ -318,13 +465,20 @@ fn summarise(results: &[CaseResult]) -> Report {
         values.iter().sum::<f64>() / values.len() as f64 * 100.0
     };
 
-    let mut by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let mut recall_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let mut precision_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for result in results {
-        by_kind
+        recall_by_kind
             .entry(result.kind.clone())
             .or_default()
             .push(result.recall);
+        precision_by_kind
+            .entry(result.kind.clone())
+            .or_default()
+            .push(if result.top_hit { 1.0 } else { 0.0 });
     }
+
+    let latencies: Vec<f64> = results.iter().map(|r| r.latency_ms).collect();
 
     Report {
         recall_at_k: mean(&results.iter().map(|r| r.recall).collect::<Vec<_>>()),
@@ -335,11 +489,39 @@ fn summarise(results: &[CaseResult]) -> Report {
                 .collect::<Vec<_>>(),
         ),
         cases: results.len(),
-        by_kind: by_kind
+        by_kind: recall_by_kind
+            .into_iter()
+            .map(|(kind, values)| (kind, mean(&values)))
+            .collect(),
+        mrr: mean(
+            &results
+                .iter()
+                .map(|r| r.reciprocal_rank.unwrap_or(0.0))
+                .collect::<Vec<_>>(),
+        ),
+        latency_ms_p50: percentile(&latencies, 50.0).unwrap_or(0.0),
+        latency_ms_p95: percentile(&latencies, 95.0).unwrap_or(0.0),
+        precision_at_1_by_kind: precision_by_kind
             .into_iter()
             .map(|(kind, values)| (kind, mean(&values)))
             .collect(),
     }
+}
+
+/// Nearest-rank percentile over a sample, `p` in 0–100: the value at
+/// rank `ceil(p% of n)`, which makes p50 of `[1, 1, 2, 2]` the second
+/// `1` rather than an interpolation between the two — a latency figure a
+/// human can reproduce from the sorted list. `None` for an empty sample,
+/// so a summary line can say so instead of claiming a `0 ms` median.
+fn percentile(values: &[f64], p: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let n = sorted.len() as f64;
+    let rank = (p / 100.0 * n).ceil().clamp(1.0, n) as usize;
+    Some(sorted[rank - 1])
 }
 
 fn print_report(results: &[CaseResult]) {
@@ -348,11 +530,12 @@ fn print_report(results: &[CaseResult]) {
 
     for result in results {
         println!(
-            "{:<42} {:>16} {:>6.0}% {:>4}",
+            "{:<42} {:>16} {:>6.0}% {:>4}{}",
             truncate(&result.name, 42),
             result.kind,
             result.recall * 100.0,
             if result.top_hit { "✓" } else { "·" },
+            if result.informational { " *" } else { "" },
         );
         // Naming what was missed is the difference between "the score
         // dropped" and knowing which change to look at.
@@ -364,11 +547,24 @@ fn print_report(results: &[CaseResult]) {
     let report = summarise(results);
     println!("{}", "─".repeat(76));
     println!(
-        "recall@{K}: {:.1}%   precision@1: {:.1}%   ({} cases)",
-        report.recall_at_k, report.precision_at_1, report.cases
+        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} cases)",
+        report.recall_at_k,
+        report.precision_at_1,
+        report.mrr,
+        report.latency_ms_p50,
+        report.latency_ms_p95,
+        report.cases,
     );
+    let informational = results.iter().filter(|r| r.informational).count();
+    if informational > 0 {
+        // Say it out loud: these numbers include cases the baseline does
+        // not gate on, and a reader comparing against `baseline.json`
+        // must know which subset they are looking at.
+        println!("  ({informational} marked * informational — excluded from the baseline gate)");
+    }
     for (kind, score) in &report.by_kind {
-        println!("  {kind:>16}: {score:.1}%");
+        let precision = report.precision_at_1_by_kind.get(kind).unwrap_or(&0.0);
+        println!("  {kind:>16}: recall {score:.1}%   p@1 {precision:.1}%");
     }
 }
 
@@ -387,6 +583,18 @@ fn truncate(text: &str, limit: usize) -> String {
 /// A threshold rather than exact equality: these scores move a little
 /// with model versions and tokenizer changes, and a gate that fails on
 /// noise gets disabled within a week. `max_drop` is in percentage points.
+///
+/// The caller passes the *gated* report (reranking-plan.md Phase 0.5),
+/// so informational cases — deliberately-failing regression cases the
+/// baseline has never scored — can never redden the pipeline.
+///
+/// `precision_at_1` and `mrr` are gated too (Phase 0.2): recall says the
+/// right memory was in the list, these say it was *first*, which is what
+/// the cross-encoder is proposed to fix. An old baseline recorded before
+/// a field existed deserialises it as `0.0`; a `0.0` there means "never
+/// measured", not "the floor was reached", so an absent-and-zero baseline
+/// value skips that gate (and says so). A field old baselines always
+/// recorded — `precision_at_1` — is therefore still gated against them.
 pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<()> {
     let raw = std::fs::read_to_string(baseline_path).map_err(|e| {
         RaError::Validation(format!("could not read {}: {e}", baseline_path.display()))
@@ -395,11 +603,47 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
         RaError::Validation(format!("{} is not valid: {e}", baseline_path.display()))
     })?;
 
+    let mut failures: Vec<String> = Vec::new();
+
     let drop = baseline.recall_at_k - report.recall_at_k;
     println!(
         "\nbaseline recall@{K}: {:.1}%   now: {:.1}%   change: {:+.1} points",
         baseline.recall_at_k, report.recall_at_k, -drop
     );
+    if drop > max_drop {
+        failures.push(format!(
+            "recall@{K} dropped {drop:.1} points (limit {max_drop:.1})"
+        ));
+    }
+
+    for (metric, before, after) in [
+        (
+            "precision@1",
+            baseline.precision_at_1,
+            report.precision_at_1,
+        ),
+        ("MRR", baseline.mrr, report.mrr),
+    ] {
+        if before == 0.0 {
+            // An old baseline never recorded MRR; treating the deserialised
+            // zero as a score would either skip a real gate forever or fail
+            // an honest zero, so the skip is explicit and printed.
+            println!(
+                "baseline {metric}: not recorded — gate skipped (re-record the baseline to enable it)"
+            );
+            continue;
+        }
+        let drop = before - after;
+        println!(
+            "baseline {metric}: {before:.1}%   now: {after:.1}%   change: {:+.1} points",
+            -drop
+        );
+        if drop > max_drop {
+            failures.push(format!(
+                "{metric} dropped {drop:.1} points (limit {max_drop:.1})"
+            ));
+        }
+    }
 
     // Named per kind as well: an overall score that held steady while one
     // kind collapsed and another improved is exactly the regression a
@@ -413,11 +657,12 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
         }
     }
 
-    if drop > max_drop {
+    if !failures.is_empty() {
         return Err(RaError::Validation(format!(
-            "recall@{K} dropped {drop:.1} points (limit {max_drop:.1}). Either the change \
-             made retrieval worse, or the eval set needs updating — decide which, and if \
-             it is the latter, re-record the baseline with `--write-baseline`."
+            "{}. Either the change made retrieval worse, or the eval set needs \
+             updating — decide which, and if it is the latter, re-record the \
+             baseline with `--write-baseline`.",
+            failures.join("; ")
         )));
     }
 
@@ -444,8 +689,12 @@ mod tests {
         CaseResult {
             name: format!("{kind} case"),
             kind: kind.to_string(),
+            informational: false,
             recall,
             top_hit,
+            // A case with a top hit has its expected memory at rank 1.
+            reciprocal_rank: if top_hit { Some(1.0) } else { None },
+            latency_ms: 10.0,
             missed: vec![],
         }
     }
@@ -473,7 +722,152 @@ mod tests {
 
         assert_eq!(report.by_kind["paraphrase"], 100.0);
         assert_eq!(report.by_kind["exact-token"], 0.0);
+        assert_eq!(report.precision_at_1_by_kind["paraphrase"], 100.0);
+        assert_eq!(report.precision_at_1_by_kind["exact-token"], 0.0);
         assert_eq!(report.recall_at_k, 50.0, "the mean hides the collapse");
+    }
+
+    #[test]
+    fn mrr_credits_rank_one_and_punishes_a_buried_answer() {
+        // The number the reranker exists for: both cases found the memory,
+        // recall says 100 for both, MRR separates rank 1 from rank 3.
+        let first = CaseResult {
+            reciprocal_rank: Some(1.0),
+            ..result("paraphrase", 1.0, true)
+        };
+        let third = CaseResult {
+            reciprocal_rank: Some(1.0 / 3.0),
+            ..result("paraphrase", 1.0, false)
+        };
+        let missing = CaseResult {
+            reciprocal_rank: None,
+            ..result("paraphrase", 0.0, false)
+        };
+
+        let report = summarise(&[first, third, missing]);
+        let expected = (1.0 + 1.0 / 3.0 + 0.0) / 3.0 * 100.0;
+        assert!((report.mrr - expected).abs() < 1e-9, "{}", report.mrr);
+    }
+
+    #[test]
+    fn percentiles_never_invent_a_number_for_no_data() {
+        assert_eq!(percentile(&[], 50.0), None);
+        assert_eq!(percentile(&[42.0], 95.0), Some(42.0));
+        // Nearest rank: ties are values in the sample, never interpolated.
+        assert_eq!(percentile(&[2.0, 1.0, 1.0, 2.0], 50.0), Some(1.0));
+        assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 95.0), Some(4.0));
+        assert_eq!(percentile(&[1.0, 2.0, 3.0, 4.0], 0.0), Some(1.0));
+    }
+
+    #[test]
+    fn a_negative_case_passes_only_on_an_empty_result() {
+        assert!(nothing_returned_passes(0));
+        assert!(!nothing_returned_passes(1));
+        // The defect this kind exists to reproduce: the stopword query
+        // returned five confident results — every one a failure.
+        assert!(!nothing_returned_passes(5));
+    }
+
+    #[test]
+    fn informational_cases_are_excluded_from_the_gate() {
+        let known = result("paraphrase", 1.0, true);
+        let regression = CaseResult {
+            informational: true,
+            recall: 0.0,
+            top_hit: false,
+            reciprocal_rank: None,
+            ..result("nl-question", 0.0, false)
+        };
+
+        let all = summarise(&[known.clone(), regression.clone()]);
+        let gated = summarise(&gate(&[known, regression]));
+
+        assert_eq!(all.cases, 2);
+        assert_eq!(gated.cases, 1);
+        assert_eq!(gated.recall_at_k, 100.0);
+        assert_eq!(gated.precision_at_1, 100.0);
+        assert!(all.recall_at_k < 100.0);
+    }
+
+    #[test]
+    fn the_committed_old_baseline_still_deserialises() {
+        // Invariant I-5: `eval/baseline.json` predates mrr/latency/
+        // precision_at_1_by_kind, and `eval --baseline` must keep running.
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/baseline.json"),
+        )
+        .expect("eval/baseline.json should exist");
+
+        let baseline: Report =
+            serde_json::from_str(&raw).expect("the committed baseline must still deserialise");
+        assert!(baseline.recall_at_k > 0.0);
+        assert_eq!(baseline.mrr, 0.0, "absent in an old baseline");
+        assert_eq!(baseline.latency_ms_p50, 0.0);
+        assert!(baseline.precision_at_1_by_kind.is_empty());
+    }
+
+    #[test]
+    fn an_old_baseline_without_mrr_skips_that_gate_rather_than_failing_it() {
+        // MRR of 0.0 recorded as 0.0, and an mrr-less baseline over a
+        // non-zero report: "never measured", so no verdict either way.
+        let baseline = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                recall_at_k: 80.0,
+                precision_at_1: 70.0,
+                ..Report::default()
+            },
+            baseline.path(),
+        )
+        .unwrap();
+
+        let measured = Report {
+            recall_at_k: 80.0,
+            precision_at_1: 70.0,
+            mrr: 55.0,
+            ..Report::default()
+        };
+        assert!(
+            compare(&measured, baseline.path(), 5.0).is_ok(),
+            "an unrecorded metric must not fail the gate"
+        );
+    }
+
+    #[test]
+    fn a_precision_or_mrr_drop_fails_the_gate_once_recorded() {
+        let baseline = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                recall_at_k: 90.0,
+                precision_at_1: 62.5,
+                mrr: 75.0,
+                ..Report::default()
+            },
+            baseline.path(),
+        )
+        .unwrap();
+
+        // Recall holds, ranking collapses — exactly the regression the old
+        // recall-only gate let through, and the reason Phase 0.2 exists.
+        let re_ranked_worse = Report {
+            recall_at_k: 90.0,
+            precision_at_1: 50.0,
+            mrr: 60.0,
+            ..Report::default()
+        };
+        let error = compare(&re_ranked_worse, baseline.path(), 5.0).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("precision@1 dropped 12.5"), "{message}");
+        assert!(message.contains("MRR dropped 15.0"), "{message}");
+
+        // Within the threshold, tolerated like every other metric.
+        let slight = Report {
+            recall_at_k: 90.0,
+            precision_at_1: 59.0,
+            mrr: 71.0,
+            ..Report::default()
+        };
+        assert!(compare(&slight, baseline.path(), 5.0).is_ok());
     }
 
     #[test]
@@ -483,8 +877,7 @@ mod tests {
             &Report {
                 recall_at_k: 90.0,
                 precision_at_1: 80.0,
-                cases: 10,
-                by_kind: BTreeMap::new(),
+                ..Report::default()
             },
             baseline.path(),
         )
@@ -493,8 +886,7 @@ mod tests {
         let slightly_worse = Report {
             recall_at_k: 87.0,
             precision_at_1: 80.0,
-            cases: 10,
-            by_kind: BTreeMap::new(),
+            ..Report::default()
         };
         assert!(
             compare(&slightly_worse, baseline.path(), 5.0).is_ok(),
@@ -504,8 +896,7 @@ mod tests {
         let much_worse = Report {
             recall_at_k: 80.0,
             precision_at_1: 80.0,
-            cases: 10,
-            by_kind: BTreeMap::new(),
+            ..Report::default()
         };
         let error = compare(&much_worse, baseline.path(), 5.0).unwrap_err();
         assert!(error.to_string().contains("dropped 10.0 points"), "{error}");
@@ -518,8 +909,7 @@ mod tests {
             &Report {
                 recall_at_k: 80.0,
                 precision_at_1: 70.0,
-                cases: 10,
-                by_kind: BTreeMap::new(),
+                ..Report::default()
             },
             baseline.path(),
         )
@@ -528,8 +918,8 @@ mod tests {
         let better = Report {
             recall_at_k: 95.0,
             precision_at_1: 90.0,
-            cases: 10,
-            by_kind: BTreeMap::new(),
+            mrr: 90.0,
+            ..Report::default()
         };
         assert!(compare(&better, baseline.path(), 5.0).is_ok());
     }
@@ -552,8 +942,22 @@ mod tests {
         assert!(!set.cases.is_empty());
 
         // Every expectation must name a memory that is actually seeded,
-        // or the case can never pass and the score is a lie.
+        // or the case can never pass and the score is a lie. A negative
+        // case expects nothing and must say nothing by hand.
         for case in &set.cases {
+            if case.expect_empty {
+                assert!(
+                    case.expect.is_empty(),
+                    "negative case {:?} lists expectations; its expectation is emptiness",
+                    case.name
+                );
+                continue;
+            }
+            assert!(
+                !case.expect.is_empty(),
+                "case {:?} expects nothing but is not marked expect_empty",
+                case.name
+            );
             for wanted in &case.expect {
                 assert!(
                     set.memories.iter().any(|m| &m.content == wanted),
@@ -587,5 +991,30 @@ mod tests {
                 }
             }
         }
+
+        // The Phase 0 regression kinds exist and are marked informational
+        // while they still fail (reranking-plan.md Phase 0.5). Phase 2
+        // fixes the defects, clears the flags, and this assertion clears
+        // with them — hence it asserts presence, not the absence of the
+        // flags, and additionally that every negative case exists with
+        // `expect_empty`.
+        for kind in ["nl-question", "nl-category", "negative"] {
+            let cases: Vec<&Case> = set.cases.iter().filter(|c| c.kind == kind).collect();
+            assert!(
+                !cases.is_empty(),
+                "the {kind} kind from reranking-plan.md Phase 0.3 is missing"
+            );
+            assert!(
+                cases.iter().all(|c| c.informational),
+                "{kind} cases fail on purpose until Phases 1–2 land; they must be informational"
+            );
+        }
+        assert!(
+            set.cases
+                .iter()
+                .filter(|c| c.kind == "negative")
+                .all(|c| c.expect_empty),
+            "a negative case that expects memories is not a negative case"
+        );
     }
 }

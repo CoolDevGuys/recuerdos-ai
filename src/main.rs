@@ -55,7 +55,9 @@ enum Command {
     ///
     /// Hidden because it is a development and CI tool, not something an
     /// operator runs. Needs the embedding model on disk — the scores are
-    /// meaningless without the real one.
+    /// meaningless without the real one. `--config` decides *which*
+    /// embedder (and floor, and tuning) is measured: pass the production
+    /// config to measure production.
     #[command(hide = true)]
     Eval {
         #[arg(long, default_value = "eval/cases.toml")]
@@ -469,20 +471,22 @@ fn run_eval(
     write_baseline: Option<&Path>,
     config_path: Option<&Path>,
 ) -> Result<(), String> {
-    // The model cache is the one thing the eval needs from config; its
-    // data directory is a throwaway it creates itself, so that running
-    // the eval can never touch a real store.
-    let cache_dir = bootstrap::config::AppConfig::load(config_path)
-        .map(|config| config.model_cache_dir())
-        .map_err(|e| e.to_string())?;
+    // The eval runs against the config's embedder, floor and ranker
+    // tuning (reranking-plan.md Phase 0.1): production runs
+    // `gemini-embedding-2`, and scores measured on a different embedder
+    // do not transfer. The store itself stays a throwaway the eval seeds
+    // and discards, so the config's `[storage].path` is never touched.
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
 
-    let report = bootstrap::eval::run(cases, Some(&cache_dir)).map_err(|e| e.to_string())?;
+    let outcome = bootstrap::eval::run(cases, &config).map_err(|e| e.to_string())?;
 
     if let Some(path) = write_baseline {
-        return bootstrap::eval::write_baseline(&report, path).map_err(|e| e.to_string());
+        return bootstrap::eval::write_baseline(&outcome.report, path).map_err(|e| e.to_string());
     }
     if let Some(path) = baseline {
-        return bootstrap::eval::compare(&report, path, max_drop).map_err(|e| e.to_string());
+        // The gated report: informational cases document known defects
+        // and fail on purpose until those defects are fixed.
+        return bootstrap::eval::compare(&outcome.gated, path, max_drop).map_err(|e| e.to_string());
     }
     Ok(())
 }
