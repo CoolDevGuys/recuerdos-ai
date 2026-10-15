@@ -182,6 +182,44 @@ hybrid = true
 default_limit = 8
 recency_half_life_days = 90
 
+[rerank]
+# The optional second stage (reranking-plan.md): a local cross-encoder
+# re-scores the top of the fused result list, reading query and memory
+# *together* — the one thing the vector and keyword legs never do.
+#
+# "off" is the default and is a hard no-op: no model loads, nothing
+# downloads, no startup cost, and recall is byte-identical to a build
+# without this section. "shadow" scores and logs the comparison (ids and
+# ranks only) but serves the old order — how the stage is judged on real
+# traffic. "on" serves the reranked order.
+mode = "off"
+# One of: bge-reranker-base, bge-reranker-v2-m3,
+# jina-reranker-v1-turbo-en, jina-reranker-v2-base-multilingual
+# (or their HuggingFace repo ids), or a path to an .onnx file for a
+# bring-your-own model. The default is the plan's placeholder — the
+# smallest — until measurements (Phase 7) pick a winner. The model
+# downloads into [embeddings].cache_dir.
+model = "jina-reranker-v1-turbo-en"
+# How many fused candidates per recall the reranker judges. Its ceiling
+# on cost — and on how deep a correction it can make.
+depth = 30
+# "rrf": a fourth fusion leg, damped by weight (default; degrades
+# gently). "replace": the rerank score orders the head outright.
+strategy = "rrf"
+# rrf weight: 1 breaks ties against a single retrieval leg but cannot
+# overrule vector+BM25 agreement; >= 2 can (that is the point — see the
+# recall_ranker module docs). Tuned against the eval, range 0.5-4.
+weight = 1.0
+# Beyond this the rerank leg is dropped and the pre-rerank order served
+# with a warning — the request never fails because of the second stage.
+timeout_ms = 400
+# Concurrent rerank inferences. Each one is another copy of the model in
+# RAM; 1 on a small box.
+max_concurrency = 2
+# Candidates per forward pass (the forward pass pads to the longest
+# pair in the batch, so smaller batches keep the padding short).
+batch_size = 16
+
 # Results scoring below this relevance are dropped rather than returned.
 # Relevance is measured from what the indexes matched — not from where a
 # result ranked — so unlike the rank score it means something read on its
