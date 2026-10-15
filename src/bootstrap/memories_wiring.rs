@@ -11,7 +11,10 @@ use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
-use crate::memories::domain::recall_ranker::{RecallRanker, RelevanceCalibration};
+use crate::memories::domain::recall_ranker::{
+    DEFAULT_SIMILARITY_BASELINE, RecallRanker, RelevanceCalibration,
+    default_similarity_baseline_for,
+};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
@@ -145,7 +148,7 @@ impl Memories {
                 RecallRanker::new(config.retrieval.recency_half_life_days)
                     .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
                     .with_relevance_calibration(RelevanceCalibration::new(
-                        config.retrieval.similarity_baseline,
+                        resolve_similarity_baseline(config, embedder.model_id()),
                     )),
                 Arc::clone(&clock),
                 graph.clone(),
@@ -179,6 +182,33 @@ impl Memories {
             min_relevance: config.retrieval.min_relevance,
         })
     }
+}
+
+/// Resolve the vector-leg relevance baseline for one instance (task 2.2).
+///
+/// Precedence: an explicit `[retrieval].similarity_baseline` always wins;
+/// otherwise the per-model measurement from [`default_similarity_baseline_for`]
+/// applies; otherwise the fallback [`DEFAULT_SIMILARITY_BASELINE`] with a
+/// `warn!`, because every relevance threshold in the system reads this
+/// number and an uncalibrated model silently miscalibrates all of them.
+///
+/// Split out of [`Memories::assemble`] so the CLI calibration report can
+/// print the baseline it used with the exact precedence recall will use —
+/// two implementations would drift, and the whole point of task 2.2 is
+/// that the number a threshold sits inside is the number actually in force.
+pub(crate) fn resolve_similarity_baseline(config: &AppConfig, model_id: &str) -> f32 {
+    if let Some(baseline) = config.retrieval.similarity_baseline {
+        return baseline;
+    }
+    default_similarity_baseline_for(model_id).unwrap_or_else(|| {
+        tracing::warn!(
+            model = model_id,
+            "similarity_baseline not calibrated for model {model_id}; \
+             recall relevance may be miscalibrated. Measure it with \
+             `recuerdos-ai calibrate` and set [retrieval].similarity_baseline."
+        );
+        DEFAULT_SIMILARITY_BASELINE
+    })
 }
 
 pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
@@ -254,5 +284,57 @@ pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
         other => Err(RaError::Validation(format!(
             "[embeddings].provider {other:?} has no implementation"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bootstrap::config::RetrievalConfig;
+
+    fn config_with(baseline: Option<f32>) -> AppConfig {
+        AppConfig {
+            retrieval: RetrievalConfig {
+                similarity_baseline: baseline,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Precedence, spelled out across all four cells: the operator's
+    /// explicit number wins over the map, and the map wins over the
+    /// fallback, for every model combination. (The `warn!` on the
+    /// fallback path fires through `tracing`; its *value* is what the
+    /// relevance thresholds depend on, so that is what is pinned.)
+    #[test]
+    fn an_explicit_baseline_wins_and_unset_defers_to_the_model_map() {
+        assert_eq!(
+            resolve_similarity_baseline(&config_with(Some(0.7)), "bge-small-en-v1.5"),
+            0.7
+        );
+        assert_eq!(
+            resolve_similarity_baseline(&config_with(Some(0.7)), "gemini-embedding-2"),
+            0.7
+        );
+        assert_eq!(
+            resolve_similarity_baseline(&config_with(None), "bge-small-en-v1.5"),
+            0.5
+        );
+        assert_eq!(
+            resolve_similarity_baseline(&config_with(None), "gemini-embedding-2"),
+            0.46
+        );
+    }
+
+    /// The unknown-model row of the same table: the fallback keeps every
+    /// pre-map deployment byte-identical, which is what "no change, no
+    /// regression" required of Phase 2.
+    #[test]
+    fn an_uncalibrated_model_falls_back_to_the_historical_constant() {
+        assert_eq!(
+            resolve_similarity_baseline(&config_with(None), "text-embedding-004"),
+            DEFAULT_SIMILARITY_BASELINE
+        );
     }
 }

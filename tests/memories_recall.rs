@@ -209,6 +209,37 @@ async fn a_structural_filter_is_not_gated_behind_the_relevance_floor() {
 }
 
 #[tokio::test]
+async fn a_stopword_only_query_is_answered_with_nothing_at_the_default_floor() {
+    // reranking-plan.md §1's defect, end-to-end: "what and or the for do"
+    // used to return five confident memories. The keyword leg is silenced
+    // by the analyzer (Phase 1) and the vector leg's residue is subtracted
+    // by the baseline and dropped by the floor (Phases 0–2), so an
+    // agent-facing read of a function-word query is an empty list — the
+    // `negative` eval kind, in the real pipeline with the real model.
+    let client = Client::spawn().await;
+    for content in [
+        "User prefers pnpm over npm and yarn for package management",
+        "The Meridian team works out of the Lisbon office",
+        "Deployment runbook: tag the release, run migrations, watch the dashboards",
+    ] {
+        client.save(json!({"content": content})).await;
+    }
+
+    let results = client
+        .search(json!({"query": "what and or the for do"}))
+        .await;
+    assert_eq!(
+        results["min_relevance"].as_f64(),
+        Some(0.25),
+        "the default floor must be in force for a prose search: {results}"
+    );
+    assert!(
+        contents(&results).is_empty(),
+        "a stopword soup must not be answered with memories: {results}"
+    );
+}
+
+#[tokio::test]
 async fn search_filters_by_tag() {
     let client = Client::spawn().await;
     client

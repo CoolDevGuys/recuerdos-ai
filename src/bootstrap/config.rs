@@ -323,12 +323,15 @@ pub struct RetrievalConfig {
     /// every relevance number smaller and the floor stricter without touching
     /// the ranking; lowering it does the reverse.
     ///
-    /// `0.5` was measured against `bge-small-en-v1.5`, the default. Changing
-    /// `[embeddings].model` changes the answer — a model that expects a
-    /// retrieval instruction on queries has a lower baseline — so a
-    /// deployment that swaps models and then finds recall too strict or too
-    /// loose should retune here first. `0.0` reports raw cosine.
-    pub similarity_baseline: f32,
+    /// Unset (the default) takes the number measured for the *configured*
+    /// embedding model — see `SIMILARITY_BASELINES` in
+    /// `memories::domain::recall_ranker`; the baseline belongs to the model,
+    /// and one constant across models meant swapping `[embeddings].model`
+    /// silently miscalibrated every relevance number (reranking-plan.md
+    /// Phase 2). A model with no measured entry falls back to `0.5` with a
+    /// `warn!` at startup. Set a number explicitly to override the lookup —
+    /// `0.0` reports raw cosine.
+    pub similarity_baseline: Option<f32>,
 }
 
 impl Default for RetrievalConfig {
@@ -338,7 +341,9 @@ impl Default for RetrievalConfig {
             default_limit: 8,
             recency_half_life_days: 90,
             min_relevance: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_FLOOR,
-            similarity_baseline: 0.5,
+            // Unset means "look the baseline up per embedding model" — see
+            // the field docs and `SIMILARITY_BASELINES`.
+            similarity_baseline: None,
         }
     }
 }
@@ -581,11 +586,14 @@ impl AppConfig {
                 self.retrieval.min_relevance
             ));
         }
-        if !(0.0..=0.99).contains(&self.retrieval.similarity_baseline) {
-            issues.push(format!(
-                "[retrieval].similarity_baseline {} is out of range 0.0..=0.99",
-                self.retrieval.similarity_baseline
-            ));
+        // Only when set explicitly: `None` defers to the per-model map, and
+        // warning about a value the operator never wrote would be noise.
+        if let Some(baseline) = self.retrieval.similarity_baseline {
+            if !(0.0..=0.99).contains(&baseline) {
+                issues.push(format!(
+                    "[retrieval].similarity_baseline {baseline} is out of range 0.0..=0.99",
+                ));
+            }
         }
 
         // Only when the graph is on: a zero here would silently make the
@@ -863,6 +871,51 @@ mod tests {
 
             let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             assert!(err.0.iter().any(|m| m.contains("[storage].backend")));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn similarity_baseline_is_unset_by_default_so_the_model_map_decides() {
+        // Phase 2.2: the config ships *unset*; the baseline that reaches
+        // the ranker is the one measured for the configured model.
+        Jail::expect_with(|_jail| {
+            let config = AppConfig::load(None).expect("defaults must be valid");
+            assert_eq!(config.retrieval.similarity_baseline, None);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_explicit_similarity_baseline_still_wins() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[retrieval]\nsimilarity_baseline = 0.62\n",
+            )?;
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
+            assert_eq!(config.retrieval.similarity_baseline, Some(0.62));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_out_of_range_similarity_baseline_is_rejected() {
+        // Same range as before the map existed — the map is a default,
+        // not a relaxation of the knob.
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[retrieval]\nsimilarity_baseline = 1.5\n",
+            )?;
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0
+                    .iter()
+                    .any(|m| m.contains("[retrieval].similarity_baseline")),
+                "{:?}",
+                err.0
+            );
             Ok(())
         });
     }
