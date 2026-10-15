@@ -24,18 +24,29 @@ use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{RankedIds, RecallRanker, ScoredMemory};
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
-use crate::shared::error::Result;
+use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The longest entity name, in words, the query scanner will try to match.
 /// Entity names are short ("billing service", "Meridian team"); a longer
 /// window only manufactures n-grams that match nothing.
 const MAX_SEED_WORDS: usize = 3;
+
+/// The rerank head size assumed when no `[rerank]` config overrides it —
+/// see [`MemoryRecaller::with_reranker`]. Not a tuned number (Phase 7
+/// tunes against the eval grid); the plan's placeholder depth.
+const DEFAULT_RERANK_DEPTH: usize = 30;
+
+/// The fallback deadline, matching the planned `[rerank].timeout_ms`.
+const DEFAULT_RERANK_TIMEOUT: Duration = Duration::from_millis(400);
 
 pub struct MemoryRecaller {
     memories: Arc<dyn MemoryRepository>,
@@ -53,6 +64,27 @@ pub struct MemoryRecaller {
     /// `graph` is `None`.
     max_hops: usize,
     hop_limit: usize,
+    /// The second-stage ranker, present only when `[rerank].mode != "off"`
+    /// (reranking-plan.md Phase 4). `None` is the default and the pre-rerank
+    /// behaviour: no second stage runs, and recall is byte-identical to a
+    /// build without it — the same "no X, no change" pattern as `graph`.
+    reranker: Option<Arc<dyn Reranker>>,
+    /// What to do with a configured reranker: `Off` (the default) never
+    /// consults it; `Shadow` scores and logs but serves the pre-rerank
+    /// order; `On` serves the reranked order.
+    rerank_mode: RerankMode,
+    /// How many fused candidates the reranker judges per recall
+    /// (`[rerank].depth`, clamped to the candidate pool). The defaults on
+    /// this trio mirror the planned `[rerank]` block so Phase 5 wires
+    /// values through without changing this struct; all are inert while
+    /// `reranker` is `None`.
+    rerank_depth: usize,
+    /// Beyond this, the rerank leg is abandoned and the pre-rerank order
+    /// served (`[rerank].timeout_ms`). `Duration::ZERO` means "no
+    /// deadline"; a non-zero one runs the scoring on a detached thread so
+    /// expiry does not have to wait for it (Phase 5 bounds the thread
+    /// count, and the inference itself, with a semaphore).
+    rerank_timeout: Duration,
 }
 
 impl MemoryRecaller {
@@ -78,7 +110,32 @@ impl MemoryRecaller {
             graph,
             max_hops,
             hop_limit,
+            reranker: None,
+            rerank_mode: RerankMode::default(),
+            rerank_depth: DEFAULT_RERANK_DEPTH,
+            rerank_timeout: DEFAULT_RERANK_TIMEOUT,
         }
+    }
+
+    /// Attaches a second-stage reranker (reranking-plan.md Phase 4). Not
+    /// calling it — or calling it with `RerankMode::Off` — is the identity
+    /// guarantee: recall takes its pre-rerank path, and no model runs.
+    /// Wiring passes this only when `[rerank].mode != "off"` (Phase 5).
+    // Wired by Phase 5's `[rerank]` config; exercised in full by the
+    // Phase 4 tests in the meantime.
+    #[allow(dead_code)]
+    pub fn with_reranker(
+        mut self,
+        reranker: Arc<dyn Reranker>,
+        mode: RerankMode,
+        depth: usize,
+        timeout: Duration,
+    ) -> Self {
+        self.reranker = Some(reranker);
+        self.rerank_mode = mode;
+        self.rerank_depth = depth;
+        self.rerank_timeout = timeout;
+        self
     }
 
     pub fn execute(&self, context: &UserContext, query: &RecallQuery) -> Result<Vec<ScoredMemory>> {
@@ -163,6 +220,14 @@ impl MemoryRecaller {
         if floor > 0.0 {
             ranked.retain(|scored| scored.relevance >= floor);
         }
+
+        // The second stage (reranking-plan.md Phase 4.4): between filtering
+        // and truncation, so it never sees a memory the filters or the
+        // floor had already rejected, and its reordering is judged by the
+        // client-visible truncation rather than padded back in. `reranker:
+        // None` and `mode = Off` return `ranked` untouched — the identity
+        // path.
+        let mut ranked = self.rerank_leg(query, ranked, now);
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
@@ -212,6 +277,176 @@ impl MemoryRecaller {
             self.hop_limit,
         )
     }
+
+    /// Runs the rerank leg over the fused head, or nothing. Mirrors
+    /// [`graph_leg`](Self::graph_leg): a failure or an expired deadline
+    /// warns and returns `ranked` unchanged — three-quarters of a hybrid
+    /// search still answers. `Off` (and `reranker: None`) is checked
+    /// first and returns immediately, so the pre-existing path pays
+    /// nothing; `Shadow` scores, logs the comparison, and likewise
+    /// returns `ranked` — what every client sees is the pre-rerank
+    /// order, down to the absent `rerank_score` fields (Phase 6).
+    fn rerank_leg(
+        &self,
+        query: &RecallQuery,
+        mut ranked: Vec<ScoredMemory>,
+        now: DateTime<Utc>,
+    ) -> Vec<ScoredMemory> {
+        let Some(reranker) = &self.reranker else {
+            return ranked;
+        };
+        if self.rerank_mode == RerankMode::Off || ranked.len() < 2 {
+            // Reranking one candidate cannot reorder anything.
+            return ranked;
+        }
+
+        // Clamped both ways: never more than the caller's own candidate
+        // window justified, and never more than fusion actually produced.
+        let depth = self
+            .rerank_depth
+            .min(ranked.len())
+            .min(query.candidate_depth());
+        if depth < 2 {
+            return ranked;
+        }
+
+        let started = std::time::Instant::now();
+        let leg = match self.rerank_scores(reranker, query.text(), &ranked[..depth]) {
+            Ok(leg) => leg,
+            Err(error) => {
+                tracing::warn!(%error, "rerank leg failed; falling back to the pre-rerank order");
+                return ranked;
+            }
+        };
+        let rerank_ms = started.elapsed().as_millis() as u64;
+
+        if self.rerank_mode == RerankMode::Shadow {
+            self.log_shadow_comparison(query.text(), &ranked[..depth], &leg, rerank_ms);
+            return ranked;
+        }
+
+        self.ranker.apply_rerank(&mut ranked, &leg, now);
+        ranked
+    }
+
+    /// Asks the reranker to score the head, honouring
+    /// [`rerank_timeout`](Self::rerank_timeout). With a deadline set the
+    /// scoring runs on a detached thread, because the contract is
+    /// synchronous and a timed-out call must not make the request wait
+    /// for inference it has given up on; the runaway call is bounded
+    /// server-side by Phase 5's concurrency cap, not here.
+    fn rerank_scores(
+        &self,
+        reranker: &Arc<dyn Reranker>,
+        query: &str,
+        head: &[ScoredMemory],
+    ) -> Result<Vec<(MemoryId, f32)>> {
+        if self.rerank_timeout.is_zero() {
+            let candidates: Vec<RerankCandidate> = head
+                .iter()
+                .map(|scored| RerankCandidate {
+                    id: scored.memory.id(),
+                    text: scored.memory.content(),
+                })
+                .collect();
+            return align_rerank(head, reranker.score(query, &candidates)?);
+        }
+
+        let reranker = Arc::clone(reranker);
+        let query = query.to_string();
+        let texts: Vec<(MemoryId, String)> = head
+            .iter()
+            .map(|scored| (scored.memory.id(), scored.memory.content().to_string()))
+            .collect();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let candidates: Vec<RerankCandidate> = texts
+                .iter()
+                .map(|(id, text)| RerankCandidate { id: *id, text })
+                .collect();
+            // The receiver may have walked away (timeout): drop silently.
+            let _ = sender.send(reranker.score(&query, &candidates));
+        });
+
+        match receiver.recv_timeout(self.rerank_timeout) {
+            Ok(scores) => align_rerank(head, scores?),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RaError::Internal(format!(
+                "rerank exceeded its {} ms deadline",
+                self.rerank_timeout.as_millis()
+            ))),
+            // The scoring thread panicked (or died) rather than answering.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err(RaError::Internal("rerank thread died".to_string()))
+            }
+        }
+    }
+
+    /// The shadow-mode log (reranking-plan.md Phase 4.4): the comparison
+    /// between what fusion served and what the reranker *would* serve, in
+    /// ids and ranks only. Never memory content, never the raw query — a
+    /// short hash is enough to join a log line to the request that
+    /// provoked it, and these logs will outlive the memories they
+    /// describe. Event name `rerank_shadow` so Phase 6 can grep a
+    /// disagreement rate straight out of the daemon's log.
+    fn log_shadow_comparison(
+        &self,
+        query: &str,
+        head: &[ScoredMemory],
+        leg: &[(MemoryId, f32)],
+        rerank_ms: u64,
+    ) {
+        // The *tails* of the ids, not the heads: these are UUIDv7, whose
+        // leading bits are the creation timestamp — the head is identical
+        // for every memory saved in the same millisecond, which would make
+        // "which result moved" unreadable in the log.
+        let short = |id: MemoryId| {
+            let id = id.to_string();
+            id[id.len() - 8..].to_string()
+        };
+        let top1_before = short(head[0].memory.id());
+        let top1_after = short(leg[0].0);
+        tracing::info!(
+            name: "rerank_shadow",
+            query_hash = %query_hash(query),
+            depth = head.len(),
+            rerank_ms,
+            top1_before = %top1_before,
+            top1_after = %top1_after,
+            changed = top1_before != top1_after,
+            before = %head.iter().map(|s| short(s.memory.id())).collect::<Vec<_>>().join(","),
+            after = %leg.iter().map(|(id, _)| short(*id)).collect::<Vec<_>>().join(","),
+            "rerank_shadow",
+        );
+    }
+}
+
+/// Pairs each reranker score with the candidate it belongs to (the trait's
+/// alignment contract, enforced here) and orders the pairs best-first.
+/// Ties keep the incoming — fused — order, so the leg is deterministic in
+/// the same sense the fusion is.
+fn align_rerank(head: &[ScoredMemory], scores: Vec<f32>) -> Result<Vec<(MemoryId, f32)>> {
+    if scores.len() != head.len() {
+        return Err(RaError::Internal(format!(
+            "reranker returned {} scores for {} candidates",
+            scores.len(),
+            head.len()
+        )));
+    }
+    let mut leg: Vec<(MemoryId, f32)> = head
+        .iter()
+        .map(|scored| scored.memory.id())
+        .zip(scores)
+        .collect();
+    leg.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(leg)
+}
+
+/// A short, stable hash of the query for shadow logs: enough to correlate
+/// a log line with a request, not enough to read the query back.
+fn query_hash(query: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(query.as_bytes());
+    hex::encode(&digest[..8])
 }
 
 /// One leg's `(id, score)` answers in the rank order the fusion wants.
@@ -281,10 +516,11 @@ fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::U
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memories::application::test_doubles::{Fixture, new_memory, now};
+    use crate::memories::application::test_doubles::{Fixture, fixed_clock, new_memory, now};
     use crate::memories::domain::category::Category;
     use crate::memories::domain::entity_graph::{EntityGraph, Relation};
     use crate::memories::domain::memory::Entity;
+    use crate::memories::domain::recall_ranker::RerankStrategy;
 
     fn query(text: &str) -> RecallQuery {
         RecallQuery::new(text, 10).unwrap()
@@ -885,5 +1121,514 @@ mod tests {
                 .all(|s| s.match_detail.graph_rank.is_none()),
             "nothing should carry a graph rank when the query names no entity"
         );
+    }
+
+    // --- the rerank stage (reranking-plan.md Phase 4) -------------------
+
+    use crate::memories::application::test_doubles::{
+        FailingReranker, FakeReranker, SleepingReranker,
+    };
+    use std::sync::Mutex;
+
+    /// Everything a rerank decision may change, as a fingerprint: ids and
+    /// order, the exact `f32` bits of both numbers, and the rerank fields.
+    /// Two recalls with equal fingerprints are indistinguishable to every
+    /// client, which is the identity DoD.
+    type Fingerprint = Vec<(String, u32, u32, Option<usize>, Option<u32>)>;
+
+    fn fingerprint(results: &[ScoredMemory]) -> Fingerprint {
+        results
+            .iter()
+            .map(|s| {
+                (
+                    s.memory.id().to_string(),
+                    s.score.to_bits(),
+                    s.relevance.to_bits(),
+                    s.match_detail.rerank_rank,
+                    s.rerank_score.map(f32::to_bits),
+                )
+            })
+            .collect()
+    }
+
+    /// The plan's "captured via a tracing test layer": records every
+    /// `rerank_shadow` event's fields, flat, for string-level assertions
+    /// (including the ones about what must *not* be there).
+    #[derive(Clone, Default)]
+    struct ShadowLog(Arc<Mutex<Vec<String>>>);
+
+    impl ShadowLog {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl tracing::Subscriber for ShadowLog {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.name() == "rerank_shadow"
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Vec::new();
+            event.record(&mut CollectFields(&mut fields));
+            self.0.lock().unwrap().push(fields.join(" "));
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    struct CollectFields<'a>(&'a mut Vec<String>);
+
+    impl tracing::field::Visit for CollectFields<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(format!("{}={:?}", field.name(), value));
+        }
+    }
+
+    fn reranker(fake: FakeReranker) -> Arc<FakeReranker> {
+        Arc::new(fake)
+    }
+
+    #[test]
+    fn an_absent_or_off_reranker_leaves_recall_byte_identical() {
+        // The phase's anchor test: *no* reranker and `Off` with one loaded
+        // must both return the pre-change results — ids, order, scores,
+        // relevance, and every rerank field absent — and the loaded
+        // reranker must never run.
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let fake = reranker(FakeReranker::reversing());
+        let off = fixture
+            .recaller_with_reranker(
+                fake.clone() as Arc<dyn Reranker>,
+                RerankMode::Off,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        assert_eq!(
+            fingerprint(&plain),
+            fingerprint(&off),
+            "mode `Off` changed recall"
+        );
+        assert!(
+            plain
+                .iter()
+                .all(|s| s.rerank_score.is_none() && s.match_detail.rerank_rank.is_none()),
+            "the pre-change shape includes rerank fields"
+        );
+        assert_eq!(fake.calls(), 0, "mode `Off` consulted the reranker");
+    }
+
+    /// A recaller over the `Replace` rerank strategy: with the reversing
+    /// fake it makes "the rerank order was served" an *exact* assertion.
+    /// (The default weight-1 RRF leg by design cannot fully invert a fused
+    /// head — that is the strategy's arithmetic, tested on its own in
+    /// `recall_ranker`; asserting an inversion through it would be testing
+    /// the wrong thing.)
+    fn replace_recaller(
+        fixture: &Fixture,
+        reranker: Arc<dyn Reranker>,
+        mode: RerankMode,
+        depth: usize,
+        timeout: Duration,
+    ) -> MemoryRecaller {
+        MemoryRecaller::new(
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&fixture.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&fixture.text) as Arc<dyn TextIndex>,
+            Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
+            RecallRanker::new(90).with_rerank_strategy(RerankStrategy::Replace),
+            fixed_clock(),
+            None,
+            2,
+            50,
+        )
+        .with_reranker(reranker, mode, depth, timeout)
+    }
+
+    #[test]
+    fn on_mode_returns_the_reversed_head_and_reports_the_scores() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+
+        let before = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        assert!(
+            before.len() >= 2,
+            "the fixture should offer several results"
+        );
+
+        let after = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute(&fixture.alex, &question)
+        .unwrap();
+
+        let mut expected = ids(&before);
+        expected.reverse();
+        assert_eq!(
+            ids(&after),
+            expected,
+            "mode `On` did not serve the rerank order"
+        );
+        assert!(
+            after
+                .iter()
+                .all(|s| s.match_detail.rerank_rank.is_some() && s.rerank_score.is_some()),
+            "reranked results must carry their rerank fields"
+        );
+    }
+
+    #[test]
+    fn a_zero_timeout_scores_inline_and_still_reorders() {
+        // The no-deadline branch of `rerank_scores`: same outcome, no
+        // thread hop.
+        let fixture = Fixture::new();
+        for index in 0..3 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let before = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let after = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::ZERO,
+        )
+        .execute(&fixture.alex, &question)
+        .unwrap();
+
+        let mut expected = ids(&before);
+        expected.reverse();
+        assert_eq!(ids(&after), expected);
+    }
+
+    #[test]
+    fn shadow_returns_the_pre_rerank_order_and_logs_only_ids_and_a_hash() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let log = ShadowLog::default();
+        let recaller = fixture.recaller_with_reranker(
+            reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+            RerankMode::Shadow,
+            30,
+            Duration::from_secs(5),
+        );
+        let after = tracing::subscriber::with_default(log.clone(), || {
+            recaller.execute(&fixture.alex, &question).unwrap()
+        });
+
+        assert_eq!(
+            fingerprint(&plain),
+            fingerprint(&after),
+            "shadow mode changed what the client sees"
+        );
+
+        let lines = log.lines();
+        assert_eq!(lines.len(), 1, "shadow mode should log exactly once");
+        let line = &lines[0];
+        for expected_field in [
+            "query_hash=",
+            "depth=",
+            "rerank_ms=",
+            "top1_before=",
+            "top1_after=",
+            "changed=",
+        ] {
+            assert!(
+                line.contains(expected_field),
+                "missing {expected_field} in: {line}"
+            );
+        }
+        assert!(
+            line.contains("changed=true"),
+            "the reversing fake must produce a disagreement worth logging: {line}"
+        );
+        // The plan's privacy rule, spelled out as an assertion: the log
+        // carries ids and a hash — never memory content, never the query.
+        assert!(
+            !line.contains("pnpm") && !line.contains("note number"),
+            "shadow log leaked memory content or the raw query: {line}"
+        );
+    }
+
+    #[test]
+    fn a_failing_reranker_warns_and_serves_the_pre_rerank_order() {
+        let fixture = Fixture::new();
+        for index in 0..3 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let before = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let after = fixture
+            .recaller_with_reranker(
+                Arc::new(FailingReranker) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        assert_eq!(ids(&before), ids(&after), "a failed leg must not reorder");
+    }
+
+    #[test]
+    fn an_expired_deadline_falls_back_to_the_pre_rerank_order() {
+        let fixture = Fixture::new();
+        for index in 0..3 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let before = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let after = fixture
+            .recaller_with_reranker(
+                Arc::new(SleepingReranker::new(Duration::from_millis(500))) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_millis(20),
+            )
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(ids(&before), ids(&after), "an expired leg must not reorder");
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "the deadline was honoured only in the result, not in the time: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pools_and_heads_under_two_candidates_are_left_to_fusion() {
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "one memory about pnpm");
+
+        // A pool of one: nothing to reorder, so nothing to pay for.
+        let fake = reranker(FakeReranker::reversing());
+        let single = fixture
+            .recaller_with_reranker(
+                fake.clone() as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &query("pnpm"))
+            .unwrap();
+        assert_eq!(single.len(), 1);
+        assert_eq!(fake.calls(), 0, "a single candidate should not be reranked");
+
+        // A head smaller than two: same conclusion.
+        fixture.save(&fixture.alex, "a second memory about pnpm");
+        let fake = reranker(FakeReranker::reversing());
+        let both = fixture
+            .recaller()
+            .execute(&fixture.alex, &query("pnpm"))
+            .unwrap();
+        let shallow = fixture
+            .recaller_with_reranker(
+                fake.clone() as Arc<dyn Reranker>,
+                RerankMode::On,
+                1,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &query("pnpm"))
+            .unwrap();
+        assert_eq!(fake.calls(), 0, "depth 1 should not call the reranker");
+        assert_eq!(ids(&both), ids(&shallow));
+
+        // An empty store: the request succeeds with nothing, reranker or not.
+        let empty = Fixture::new();
+        let none = empty
+            .recaller_with_reranker(
+                reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(&empty.alex, &query("anything"))
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn depth_deeper_than_the_pool_reranks_the_whole_result_set() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+
+        let fake = reranker(FakeReranker::reversing());
+        fixture
+            .recaller_with_reranker(
+                fake.clone() as Arc<dyn Reranker>,
+                RerankMode::On,
+                1_000,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &query("pnpm"))
+            .unwrap();
+
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(
+            fake.seen()[0].len(),
+            4,
+            "the clamp is to the pool, not to the requested depth"
+        );
+    }
+
+    #[test]
+    fn the_filters_run_first_so_the_reranker_never_sees_a_rejected_memory() {
+        let fixture = Fixture::new();
+        let mut first = new_memory("we chose pnpm over npm");
+        first.category = Category::Decision;
+        fixture
+            .saver()
+            .execute(&fixture.alex, first, "test")
+            .unwrap();
+        let mut second = new_memory("we chose vitest over jest");
+        second.category = Category::Decision;
+        fixture
+            .saver()
+            .execute(&fixture.alex, second, "test")
+            .unwrap();
+        // Same keyword hits, outside the filtered slice: it must never
+        // reach the reranker — only the two survivors are candidates.
+        let rejected = fixture.save(&fixture.alex, "we chose the cat over the mat");
+
+        let fake = reranker(FakeReranker::by_token_overlap());
+        let results = fixture
+            .recaller_with_reranker(
+                fake.clone() as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(
+                &fixture.alex,
+                &query("chose").with_categories(vec![Category::Decision]),
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let seen = fake.seen();
+        assert_eq!(seen.len(), 1, "the reranker ran exactly once");
+        assert_eq!(seen[0].len(), 2, "only the survivors are rerank candidates");
+        assert!(
+            !seen[0].contains(&rejected.id()),
+            "the reranker saw a memory the category filter had already rejected"
+        );
+    }
+
+    #[test]
+    fn reranking_leaves_relevance_alone_and_the_floor_still_applies() {
+        // Invariant I-4 and the plan's filter-interaction case: `relevance`
+        // is computed exactly as today (so `min_relevance` filters exactly
+        // as today) whatever the reranker thinks.
+        let fixture = Fixture::new();
+        let answering = fixture.save(&fixture.alex, "User prefers pnpm as their package manager");
+        let distraction = fixture.save(&fixture.alex, "The cat sat on the mat");
+        let question = query("which package manager does the user prefer");
+
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        let on = fixture
+            .recaller_with_reranker(
+                reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let relevance_of = |results: &[ScoredMemory], wanted: MemoryId| -> f32 {
+            results
+                .iter()
+                .find(|s| s.memory.id() == wanted)
+                .unwrap()
+                .relevance
+        };
+        assert_eq!(
+            relevance_of(&plain, answering.id()).to_bits(),
+            relevance_of(&on, answering.id()).to_bits(),
+        );
+        assert_eq!(
+            relevance_of(&plain, distraction.id()).to_bits(),
+            relevance_of(&on, distraction.id()).to_bits(),
+        );
+
+        // With the floor between the two, both modes drop the weak one —
+        // the floor sees the unchanged relevance, in both modes.
+        let between =
+            (relevance_of(&plain, answering.id()) + relevance_of(&plain, distraction.id())) / 2.0;
+        let floored = fixture
+            .recaller_with_reranker(
+                reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute(
+                &fixture.alex,
+                &query("which package manager does the user prefer").with_min_relevance(between),
+            )
+            .unwrap();
+        assert_eq!(ids(&floored), vec![answering.id()]);
     }
 }

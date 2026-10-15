@@ -16,6 +16,7 @@ use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
 use crate::memories::domain::recall_ranker::RecallRanker;
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::{Clock, FixedClock};
@@ -23,8 +24,9 @@ use crate::shared::error::{RaError, Result};
 use crate::shared::ids::{MemoryId, UserId};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::fake_embedder::FakeEmbedder;
@@ -148,6 +150,20 @@ impl Fixture {
             2,
             50,
         )
+    }
+
+    /// A recaller whose second stage is `reranker`, run in `mode` over
+    /// `depth` candidates and abandoned past `timeout`
+    /// (reranking-plan.md Phase 4).
+    pub fn recaller_with_reranker(
+        &self,
+        reranker: Arc<dyn Reranker>,
+        mode: RerankMode,
+        depth: usize,
+        timeout: std::time::Duration,
+    ) -> MemoryRecaller {
+        self.recaller()
+            .with_reranker(reranker, mode, depth, timeout)
     }
 
     pub fn finder(&self) -> MemoryFinder {
@@ -625,5 +641,116 @@ impl Embedder for FallibleEmbedder {
 
     fn dimensions(&self) -> usize {
         self.inner.dimensions()
+    }
+}
+
+/// Deterministic stand-ins for a second-stage reranker (reranking-plan.md
+/// Phase 4.2). Like the other doubles these exist to make *failure* and
+/// *timing* testable, and they record what they were asked to score so a
+/// test can prove the filters ran first: the leg must never see a memory
+/// the request had already excluded.
+#[derive(Default)]
+pub struct FakeReranker {
+    /// `false` (the default) scores by query/token overlap; `true` scores
+    /// by descending position, which reverses the incoming order — the
+    /// `reversing` fake's whole trick.
+    reverse: bool,
+    calls: AtomicUsize,
+    /// The candidate ids of every call, in call order.
+    seen: Mutex<Vec<Vec<MemoryId>>>,
+}
+
+impl FakeReranker {
+    /// Scores each candidate by how many of the query's word tokens it
+    /// contains — the cross-encoder's crude cousin, enough for a test to
+    /// say "the memory that shares the query's words should move up".
+    pub fn by_token_overlap() -> Self {
+        Self::default()
+    }
+
+    /// Strictly *reverses* the candidate order it is given. Deterministic
+    /// and obvious to assert against: `mode = On` must produce the exact
+    /// reverse of the fused head, and `Shadow` must not.
+    pub fn reversing() -> Self {
+        Self {
+            reverse: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn seen(&self) -> Vec<Vec<MemoryId>> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl Reranker for FakeReranker {
+    fn score(&self, query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen
+            .lock()
+            .unwrap()
+            .push(candidates.iter().map(|c| c.id).collect());
+
+        if self.reverse {
+            let n = candidates.len();
+            // Ascending with position: once the caller orders the leg by
+            // score (descending), the candidates come out reversed.
+            return Ok((1..=n).map(|i| i as f32).collect());
+        }
+
+        let tokens: Vec<String> = query
+            .to_ascii_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_string())
+            .collect();
+        Ok(candidates
+            .iter()
+            .map(|candidate| {
+                candidate_text_tokens(candidate.text)
+                    .into_iter()
+                    .filter(|word| tokens.contains(word))
+                    .count() as f32
+            })
+            .collect())
+    }
+}
+
+fn candidate_text_tokens(text: &str) -> Vec<String> {
+    text.to_ascii_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Always fails — the "the model blew up" path of a best-effort leg.
+pub struct FailingReranker;
+
+impl Reranker for FailingReranker {
+    fn score(&self, _query: &str, _candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        Err(RaError::Internal("injected rerank failure".to_string()))
+    }
+}
+
+/// Sleeps, then scores everything zero: the deadline path. Pair it with a
+/// `timeout` below the sleep to prove the leg expires, above it to prove
+/// the leg also *succeeds* over a thread boundary.
+pub struct SleepingReranker(Duration);
+
+impl SleepingReranker {
+    pub fn new(sleep: Duration) -> Self {
+        Self(sleep)
+    }
+}
+
+impl Reranker for SleepingReranker {
+    fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        std::thread::sleep(self.0);
+        Ok(vec![0.0; candidates.len()])
     }
 }

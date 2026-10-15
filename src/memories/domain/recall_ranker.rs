@@ -55,6 +55,53 @@
 //!
 //! Relevance leads; recency and quality break ties among comparably
 //! relevant results. All of it is pinned by tests below.
+//!
+//! # Second stage: the rerank leg (reranking-plan.md Phase 4)
+//!
+//! When a [`Reranker`](super::reranker::Reranker) is wired, its scores
+//! over the fused head enter the ranking as a fourth input. Two strategies
+//! decide *how*, both implemented here and selected by
+//! [`RecallRanker::with_rerank_strategy`] (config arrives in Phase 5; the
+//! default is the RRF leg).
+//!
+//! ## `Rrf { weight }` — a fourth fusion leg
+//!
+//! The rerank list joins the RRF sum as `weight × 1/(k + rank)`, so the
+//! bounded recency/quality band applies to it exactly as to the other
+//! legs. The calibration of `weight` follows from the leg arithmetic:
+//!
+//! - one retrieval leg at rank 1 contributes `1/61 ≈ 0.0164`; two legs
+//!   agreeing at rank 1, `2/61 ≈ 0.0328`.
+//! - `weight = 0` is off — the leg contributes nothing and the fused order
+//!   survives untouched (pinned by test).
+//! - `weight = 1` lets the reranker break ties *against a single leg* but
+//!   never overrule vector+BM25 agreement.
+//! - `weight ≥ 2` overvotes that agreement — which is precisely the
+//!   failure this whole plan exists to fix ("right memory in the top 5
+//!   but not first"), so the tuned range *includes* values above 1 and
+//!   spans 0.5–4 (Phase 7 grid). Rejecting >1 a priori is the plan's
+//!   §2-row-4 mistake: at low weight a *good* rerank is muted exactly
+//!   when vector and BM25 agree on a wrong answer.
+//!
+//! ## `Replace` — the rerank score becomes the head's head
+//!
+//! The reranked candidates are re-ordered by their raw scores multiplied
+//! by the *same* [`MULTIPLIER_FLOOR`]-bounded recency/quality band, and
+//! form the head; every memory the reranker never saw keeps its fused
+//! relative order directly behind it. Because the band spans only 1.25×
+//! ([`MULTIPLIER_FLOOR`] = 0.8), recency and quality can decide ties and
+//! gaps under 25%, and cannot bury a clear rerank-score winner — the
+//! identical argument that bounds the other multipliers, applied to a new
+//! signal instead of a new band (invariant from §"Why importance shares
+//! confidence's band"). The raw scores must therefore be non-negative and
+//! comparable across candidates of one call — adapters on logit-scale
+//! models must squash them first; that is a Phase 5 obligation, and Phase
+//! 7's grid decides whether `Replace` survives at all.
+//!
+//! Neither strategy touches `relevance`: the cross-encoder value is
+//! reported beside it as [`ScoredMemory::rerank_score`] (invariant I-4 —
+//! see `memories::domain::reranker` for why a cross-encoder probability
+//! must not silently *become* relevance on an unmeasured distribution).
 
 use super::memory::Memory;
 use crate::shared::ids::MemoryId;
@@ -83,6 +130,39 @@ const DEFAULT_GRAPH_RANK_WEIGHT: f32 = 1.0;
 /// [`RecallRanker::with_graph_ranking`] for what a non-zero value does.
 const DEFAULT_GRAPH_UNANCHORED_FLOOR: usize = 0;
 
+/// The rerank stage's reordering strategy (reranking-plan.md Phase 4.3).
+/// See the module docs for the calibration argument behind each variant.
+#[derive(Debug, Clone, Copy)]
+pub enum RerankStrategy {
+    /// The rerank list joins the RRF sum as a fourth leg, damped by
+    /// `weight`. `weight = 0` is off; the interesting tuned range runs
+    /// from 0.5 to 4 (module docs — and note *why* it runs above 1).
+    Rrf { weight: f32 },
+    /// The reranked head is ordered by raw score × the bounded
+    /// recency/quality band; everything the reranker never saw follows
+    /// in its fused order. Assumes non-negative, mutually comparable
+    /// raw scores.
+    // Selected only by `[rerank].strategy` (Phase 5); pinned by tests here.
+    #[allow(dead_code)]
+    Replace,
+}
+
+/// The un-tuned default: a full-weight fourth RRF leg. `1.0` lets the
+/// reranker break ties against a single retrieval leg without ever
+/// overruling vector+keyword agreement — the conservative choice while
+/// there are no measurements; Phase 7's grid replaces it, above *and*
+/// below 1, and this constant exists only so the default is stated in
+/// the calibrated style rather than inline.
+const DEFAULT_RERANK_WEIGHT: f32 = 1.0;
+
+impl Default for RerankStrategy {
+    fn default() -> Self {
+        Self::Rrf {
+            weight: DEFAULT_RERANK_WEIGHT,
+        }
+    }
+}
+
 /// One leg's opinion: memory ids in rank order, best first.
 #[derive(Debug, Clone, Default)]
 pub struct RankedIds(pub Vec<MemoryId>);
@@ -100,6 +180,12 @@ pub struct MatchDetail {
     /// earn a place here, reachable only over the relations it shares with
     /// the query's entities.
     pub graph_rank: Option<usize>,
+    /// 1-based rank in the rerank stage, if it scored this memory
+    /// (reranking-plan.md Phase 4). The rank lives here while its raw
+    /// score rides beside it on [`ScoredMemory`]: this type derives `Eq`,
+    /// and a model's raw `f32` is not ours to promise equality semantics
+    /// for — a position is.
+    pub rerank_rank: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +213,13 @@ pub struct ScoredMemory {
     /// recall through the graph, whose relevance is estimated rather than
     /// measured.
     pub relevance: f32,
+    /// The rerank stage's own score for this memory, present only when a
+    /// reranker scored it (reranking-plan.md Phase 4). Deliberately *not*
+    /// folded into `relevance`: the value is on the model's scale —
+    /// probabilities or logits, uncalibrated on this corpus — so it is a
+    /// ranker's input and an operator's diagnostic, never a threshold
+    /// (see the `reranker` module docs and invariant I-4 of the plan).
+    pub rerank_score: Option<f32>,
     pub match_detail: MatchDetail,
 }
 
@@ -147,6 +240,11 @@ pub struct RecallRanker {
     /// still ranking ahead of weaker direct matches (staying in the top-k
     /// that recall is measured over). `0` disables the cap.
     graph_unanchored_floor: usize,
+    /// How the rerank stage reorders the fused list (reranking-plan.md
+    /// Phase 4.3). Inert while no rerank scores are supplied — which is
+    /// every path until a reranker is wired — so the knob alone changes
+    /// nothing today.
+    rerank_strategy: RerankStrategy,
     /// How the legs' raw signals are read as relevance. Used only for the
     /// `relevance` field — the ranking above does not consult it, which is
     /// what keeps this knob from being able to reorder anything.
@@ -164,6 +262,7 @@ impl RecallRanker {
             },
             graph_rank_weight: DEFAULT_GRAPH_RANK_WEIGHT,
             graph_unanchored_floor: DEFAULT_GRAPH_UNANCHORED_FLOOR,
+            rerank_strategy: RerankStrategy::default(),
             relevance: RelevanceCalibration::default(),
         }
     }
@@ -198,6 +297,50 @@ impl RecallRanker {
         self.graph_rank_weight = rank_weight;
         self.graph_unanchored_floor = unanchored_floor;
         self
+    }
+
+    /// Sets how the rerank stage reorders the fused list, once scores are
+    /// supplied to [`rank_with_legs`](Self::rank_with_legs) or
+    /// [`apply_rerank`](Self::apply_rerank). Defaults to
+    /// [`RerankStrategy::default()`] — a full-weight fourth RRF leg. The
+    /// module docs carry the calibration argument for the weight range and
+    /// for the band's interaction with `Replace`.
+    // Selected by Phase 5's `[rerank].strategy`; both strategies are
+    // tested here in Phase 4.
+    #[allow(dead_code)]
+    pub fn with_rerank_strategy(mut self, strategy: RerankStrategy) -> Self {
+        self.rerank_strategy = strategy;
+        self
+    }
+
+    /// Fuses the retrieval legs and returns memories best-first, then
+    /// applies the rerank stage (reranking-plan.md Phase 4.3). This is
+    /// the general entry point; [`rank`](Self::rank) and
+    /// [`rank_with_graph`](Self::rank_with_graph) are thin wrappers over
+    /// it that pass no rerank scores — an empty rerank list, which
+    /// [`apply_rerank`](Self::apply_rerank) ignores outright, leaving
+    /// the pre-rerank behaviour byte-for-byte intact.
+    ///
+    /// `rerank` is the reranker's output reduced to a *ranked list*: ids
+    /// best-first, each with its raw score, over (a subset of) the
+    /// candidates. Sorting it is the caller's job — it belongs to the
+    /// model's scale, and the ranker's contract is to rank candidates,
+    /// not to re-adjudicate the ranker's own ordering.
+    // Phase 5's wiring calls it with the reranker's scores; until then the
+    // ranker tests are its callers.
+    #[allow(dead_code)]
+    pub fn rank_with_legs(
+        &self,
+        vector: &RankedIds,
+        keyword: &RankedIds,
+        graph: &RankedIds,
+        rerank: &[(MemoryId, f32)],
+        candidates: Vec<Memory>,
+        now: DateTime<Utc>,
+    ) -> Vec<ScoredMemory> {
+        let mut scored = self.rank_with_graph(vector, keyword, graph, candidates, now);
+        self.apply_rerank(&mut scored, rerank, now);
+        scored
     }
 
     /// Fuses the vector and keyword legs and returns memories best-first.
@@ -244,6 +387,10 @@ impl RecallRanker {
                     vector_rank: rank_of(vector, memory.id()),
                     bm25_rank: rank_of(keyword, memory.id()),
                     graph_rank: rank_of(graph, memory.id()),
+                    // Set by the rerank stage alone: an id the model never
+                    // scored, and a ranker that never ran, are the same fact
+                    // to the reader, and both mean "no second stage here".
+                    rerank_rank: None,
                 };
                 let score = self.score(&memory, detail, now);
                 ScoredMemory {
@@ -255,6 +402,7 @@ impl RecallRanker {
                     // silently passing one off as the other is exactly the
                     // confusion this field exists to remove.
                     relevance: 0.0,
+                    rerank_score: None,
                     match_detail: detail,
                 }
             })
@@ -265,18 +413,99 @@ impl RecallRanker {
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                // Ties must not depend on the order rows came back from
-                // SQLite, or the same query would paginate differently
-                // between calls. Newest first, then id.
-                .then_with(|| b.memory.created_at().cmp(&a.memory.created_at()))
-                .then_with(|| a.memory.id().to_string().cmp(&b.memory.id().to_string()))
-        });
+        sort_ranked(&mut scored);
 
         scored
+    }
+
+    /// Applies the rerank stage to an already-fused list
+    /// (reranking-plan.md Phase 4.3/4.4).
+    ///
+    /// `rerank` is the same best-first `(id, raw score)` list
+    /// [`rank_with_legs`](Self::rank_with_legs) takes; it is expected to
+    /// cover the head of `ranked`, though any ids it names are honoured
+    /// wherever they sit. Empty — the reranker absent, off, failed, or
+    /// past its deadline — is a *hard no-op*: the list is returned
+    /// untouched, not re-sorted or re-validated, which is what makes the
+    /// "no reranker, no change" guarantee a code path rather than an
+    /// arithmetic coincidence.
+    ///
+    /// Under both strategies the bounded recency/quality band survives:
+    /// `Rrf` recomputes the sum inside the same band, and `Replace`
+    /// multiplies the raw score by that same band, so the rerank stage
+    /// adds a signal without opening a multiplier of its own.
+    pub fn apply_rerank(
+        &self,
+        ranked: &mut Vec<ScoredMemory>,
+        rerank: &[(MemoryId, f32)],
+        now: DateTime<Utc>,
+    ) {
+        if rerank.is_empty() {
+            return;
+        }
+
+        match self.rerank_strategy {
+            RerankStrategy::Rrf { weight } => {
+                for (index, (id, raw)) in rerank.iter().enumerate() {
+                    let Some(scored) = ranked.iter_mut().find(|scored| scored.memory.id() == *id)
+                    else {
+                        continue;
+                    };
+                    let detail = scored.match_detail;
+                    scored.match_detail.rerank_rank = Some(index + 1);
+                    scored.rerank_score = Some(*raw);
+
+                    // The stored score is `(leg sum) × band`; rebuild the
+                    // sum from the recorded ranks to recover that band and
+                    // add the new leg *inside* it, exactly where the other
+                    // legs' terms sit. A degenerate sum (a memory carried
+                    // only by a zero-weighted graph term) has no band to
+                    // recover; leave its score alone rather than divide.
+                    let base = reciprocal_rank(detail.vector_rank)
+                        + reciprocal_rank(detail.bm25_rank)
+                        + self.graph_relevance(detail);
+                    if base > 0.0 {
+                        let band = scored.score / base;
+                        scored.score = (base + weight * reciprocal_rank(Some(index + 1))) * band;
+                    }
+                }
+                sort_ranked(ranked);
+            }
+            RerankStrategy::Replace => {
+                let all = std::mem::take(ranked);
+                let mut head = Vec::new();
+                let mut tail = Vec::new();
+                for mut scored in all {
+                    match rerank.iter().position(|(id, _)| *id == scored.memory.id()) {
+                        Some(index) => {
+                            let raw = rerank[index].1;
+                            scored.match_detail.rerank_rank = Some(index + 1);
+                            scored.rerank_score = Some(raw);
+                            // The band the whole module calibrates, applied
+                            // to the model's own number: ties and gaps
+                            // under 1.25× are for recency and quality,
+                            // anything wider is the reranker's call.
+                            scored.score = raw
+                                * self.recency_multiplier(scored.memory.created_at(), now)
+                                * quality(&scored.memory);
+                            head.push(scored);
+                        }
+                        // The tail keeps its fused relative order — the
+                        // reranker never judged it, and `Replace` claims
+                        // only to reorder the head.
+                        None => tail.push(scored),
+                    }
+                }
+                // Stable sort: an exact tie on the banded score keeps the
+                // pre-rerank fusion order, which was already deterministic.
+                head.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                ranked.extend(head.into_iter().chain(tail));
+            }
+        }
     }
 
     fn score(&self, memory: &Memory, detail: MatchDetail, now: DateTime<Utc>) -> f32 {
@@ -320,6 +549,23 @@ impl RecallRanker {
         let decay = 0.5f32.powf(age_days / self.recency_half_life_days);
         floored(decay)
     }
+}
+
+/// The canonical result ordering: best score first, and ties broken by
+/// recency then id so the same inputs always produce the same list —
+/// pagination depends on it, whether the tie came from the fusion or from
+/// the rerank stage re-sorting it.
+fn sort_ranked(scored: &mut [ScoredMemory]) {
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            // Ties must not depend on the order rows came back from
+            // SQLite, or the same query would paginate differently
+            // between calls. Newest first, then id.
+            .then_with(|| b.memory.created_at().cmp(&a.memory.created_at()))
+            .then_with(|| a.memory.id().to_string().cmp(&b.memory.id().to_string()))
+    });
 }
 
 fn reciprocal_rank(rank: Option<usize>) -> f32 {
@@ -1387,6 +1633,224 @@ mod tests {
         );
 
         assert!(result.is_empty());
+    }
+
+    // --- the rerank stage (reranking-plan.md Phase 4) -------------------
+
+    fn reranked(a: &Memory, b: &Memory, c: &Memory) -> Vec<(MemoryId, f32)> {
+        // A leg that puts `c` first, then `b`, then `a` — arbitrary raw
+        // scores on a probability-like scale.
+        vec![(c.id(), 0.9), (b.id(), 0.5), (a.id(), 0.1)]
+    }
+
+    /// The empty-list identity: `rank_with_legs` over no rerank scores
+    /// must be the pre-rerank ranking — same order *and* the same
+    /// `score`s — which is what makes the old wrappers' guarantee a code
+    /// path rather than arithmetic.
+    #[test]
+    fn an_empty_rerank_leg_leaves_the_fused_ranking_identical() {
+        let a = memory_aged(0, 1.0);
+        let b = memory_aged(30, 0.5);
+        let vector = ids(&[&a, &b]);
+        let keyword = ids(&[&b, &a]);
+        let candidates = || vec![a.clone(), b.clone()];
+
+        let fused = ranker().rank(&vector, &keyword, candidates(), now());
+        let with_stage = ranker().rank_with_legs(
+            &vector,
+            &keyword,
+            &RankedIds::default(),
+            &[],
+            candidates(),
+            now(),
+        );
+
+        assert_eq!(ordered(&fused), ordered(&with_stage));
+        for (before, after) in fused.iter().zip(with_stage.iter()) {
+            assert_eq!(before.score, after.score, "an empty leg changed a score");
+            assert_eq!(after.match_detail.rerank_rank, None);
+            assert_eq!(after.rerank_score, None);
+        }
+    }
+
+    #[test]
+    fn a_zero_weight_rerank_leg_shows_its_work_but_moves_nothing() {
+        // `Rrf { weight: 0 }` ≡ off for the *ordering* — the leg records
+        // ranks and scores but contributes no term to the sum.
+        let (a, b, c) = (memory(), memory(), memory());
+        let vector = ids(&[&a, &b, &c]);
+        let keyword = ids(&[&a, &b, &c]);
+        let candidates = || vec![a.clone(), b.clone(), c.clone()];
+
+        let fused = ranker().rank(&vector, &keyword, candidates(), now());
+        let zero = RecallRanker::new(90)
+            .with_rerank_strategy(RerankStrategy::Rrf { weight: 0.0 })
+            .rank_with_legs(
+                &vector,
+                &keyword,
+                &RankedIds::default(),
+                &reranked(&a, &b, &c),
+                candidates(),
+                now(),
+            );
+
+        assert_eq!(
+            ordered(&fused),
+            ordered(&zero),
+            "a zero-weight leg reordered the results"
+        );
+        for (before, after) in fused.iter().zip(zero.iter()) {
+            assert!(
+                (before.score - after.score).abs() < 1e-6,
+                "a zero-weight leg changed a score: {} → {}",
+                before.score,
+                after.score
+            );
+        }
+        // And the stage's work is visible: b was ranked 2nd *by the leg*,
+        // between the leg's top pick c and its last pick a.
+        let b_in_stage = zero.iter().find(|s| s.memory.id() == b.id()).unwrap();
+        assert_eq!(b_in_stage.match_detail.rerank_rank, Some(2));
+        assert_eq!(b_in_stage.rerank_score, Some(0.5));
+    }
+
+    #[test]
+    fn a_weight_above_one_lets_the_reranker_overrule_both_retrieval_legs() {
+        // `answer` is rank 1 in both retrieval legs — their agreement.
+        // `promoted` sits deep in one leg. At weight 1 the rerank leg adds
+        // exactly one leg-rank-1's worth, lifting `promoted` at best to a
+        // single-leg's standing, never over two-leg agreement; at weight 4
+        // it overrules it — which is the point of allowing weights above
+        // 1 (reranking-plan.md §2 row 4).
+        let answer = memory();
+        let promoted = memory();
+        let mut vector = vec![answer.id()];
+        vector.extend(std::iter::repeat_with(MemoryId::new).take(28));
+        vector.push(promoted.id());
+        let vector = RankedIds(vector);
+        let keyword = ids(&[&answer]);
+        let candidates = || vec![answer.clone(), promoted.clone()];
+        // The leg covers only `promoted` — the recaller's own head shape,
+        // and what keeps the arithmetic unambiguous: `answer` gets no rerank
+        // term of its own to trade against.
+        let leg = vec![(promoted.id(), 0.9)];
+
+        let one = RecallRanker::new(90) // Rrf weight 1.0
+            .rank_with_legs(
+                &vector,
+                &keyword,
+                &RankedIds::default(),
+                &leg,
+                candidates(),
+                now(),
+            );
+        assert_eq!(
+            ordered(&one)[0],
+            answer.id(),
+            "weight 1 must not overrule two-leg agreement"
+        );
+
+        let four = RecallRanker::new(90)
+            .with_rerank_strategy(RerankStrategy::Rrf { weight: 4.0 })
+            .rank_with_legs(
+                &vector,
+                &keyword,
+                &RankedIds::default(),
+                &leg,
+                candidates(),
+                now(),
+            );
+        assert_eq!(
+            ordered(&four)[0],
+            promoted.id(),
+            "weight 4 must be able to overrule vector+BM25 agreement"
+        );
+        // Precision, not recall: the demoted answer is still returned.
+        assert!(four.iter().any(|s| s.memory.id() == answer.id()));
+    }
+
+    #[test]
+    fn replace_reorders_the_head_by_score_and_leaves_the_tail_in_fused_order() {
+        // The leg covers only two of the four candidates; the other two
+        // keep their fused relative order directly behind the head.
+        let a = memory();
+        let b = memory();
+        let c = memory();
+        let d = memory();
+        let vector = ids(&[&a, &b, &c, &d]);
+        let candidates = || vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        let leg = vec![(c.id(), 0.1), (b.id(), 0.9)]; // ranks: c 1st, b 2nd — scores say otherwise
+
+        let result = RecallRanker::new(90)
+            .with_rerank_strategy(RerankStrategy::Replace)
+            .rank_with_legs(
+                &vector,
+                &RankedIds::default(),
+                &RankedIds::default(),
+                &leg,
+                candidates(),
+                now(),
+            );
+
+        assert_eq!(
+            ordered(&result),
+            vec![b.id(), c.id(), a.id(), d.id()],
+            "Replace must order the head by score (b's 0.9 beats c's 0.1 despite the leg's own order) and preserve the tail"
+        );
+        let for_b = result.iter().find(|s| s.memory.id() == b.id()).unwrap();
+        assert_eq!(for_b.rerank_score, Some(0.9));
+        assert_eq!(for_b.match_detail.rerank_rank, Some(2)); // position in the leg, not the final place
+        assert_eq!(
+            result
+                .iter()
+                .find(|s| s.memory.id() == a.id())
+                .unwrap()
+                .rerank_score,
+            None
+        );
+    }
+
+    #[test]
+    fn replace_bands_the_score_so_recency_decides_ties_but_cannot_bury_gaps() {
+        // Same mechanism as the module's other multipliers: fresh and old
+        // share the rerank score, recency decides; a clear score gap the
+        // 1.25× band cannot cross stays with the clear winner.
+        let fresh = memory_aged(0, 1.0);
+        let old = memory_aged(730, 1.0);
+        let vector = ids(&[&old, &fresh]);
+        let candidates = || vec![old.clone(), fresh.clone()];
+
+        let tie = RecallRanker::new(90)
+            .with_rerank_strategy(RerankStrategy::Replace)
+            .rank_with_legs(
+                &vector,
+                &RankedIds::default(),
+                &RankedIds::default(),
+                &[(old.id(), 1.0), (fresh.id(), 1.0)],
+                candidates(),
+                now(),
+            );
+        assert_eq!(
+            ordered(&tie)[0],
+            fresh.id(),
+            "the band should let recency decide a rerank-score tie"
+        );
+
+        let gap = RecallRanker::new(90)
+            .with_rerank_strategy(RerankStrategy::Replace)
+            .rank_with_legs(
+                &vector,
+                &RankedIds::default(),
+                &RankedIds::default(),
+                &[(old.id(), 2.0), (fresh.id(), 1.0)],
+                candidates(),
+                now(),
+            );
+        assert_eq!(
+            ordered(&gap)[0],
+            old.id(),
+            "a 2× rerank-score gap must not be inverted by a 1.25× band"
+        );
     }
 
     #[test]
