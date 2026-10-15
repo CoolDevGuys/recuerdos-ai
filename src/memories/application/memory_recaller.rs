@@ -121,9 +121,6 @@ impl MemoryRecaller {
     /// calling it — or calling it with `RerankMode::Off` — is the identity
     /// guarantee: recall takes its pre-rerank path, and no model runs.
     /// Wiring passes this only when `[rerank].mode != "off"` (Phase 5).
-    // Wired by Phase 5's `[rerank]` config; exercised in full by the
-    // Phase 4 tests in the meantime.
-    #[allow(dead_code)]
     pub fn with_reranker(
         mut self,
         reranker: Arc<dyn Reranker>,

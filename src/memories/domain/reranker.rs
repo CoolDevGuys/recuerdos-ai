@@ -52,8 +52,10 @@ use crate::shared::ids::MemoryId;
 /// scored on. The id lets [`Reranker::score`] answers be aligned by
 /// position without the adapter having to echo anything back.
 // The fields are read by the model adapters that *implement* this
-// contract — none ships until Phase 5 — while the recaller on this side
-// already constructs and scores over them.
+// contract (the Phase 5 fastembed adapter scores on `text`; the test
+// doubles record `id`), while the recaller on this side constructs and
+// aligns over them — `id` has no *production* reader until the Phase 6
+// audit command echoes candidates back.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct RerankCandidate<'a> {
@@ -96,8 +98,5 @@ pub enum RerankMode {
     /// before any client sees it change (Phase 6).
     Shadow,
     /// Score and return the reranked ordering.
-    // Constructed by Phase 5's config parsing; every other variant is
-    // already reachable from the recaller.
-    #[allow(dead_code)]
     On,
 }
