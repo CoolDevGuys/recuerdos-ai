@@ -74,7 +74,8 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Download the local embedding model into the cache directory.
+    /// Download the local embedding model (and the rerank model, when
+    /// `[rerank].mode` is not `off`) into the cache directory.
     ///
     /// Run at image build time so a container never downloads at
     /// runtime, or before taking a host offline.
@@ -565,7 +566,7 @@ fn run_calibrate(cases: &Path, config_path: Option<&Path>) -> Result<(), String>
 }
 
 fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
-    use memories::domain::embedder::Embedder;
+    use memories::domain::{embedder::Embedder, reranker::Reranker};
 
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
     let cache_dir = config.model_cache_dir();
@@ -579,7 +580,7 @@ fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
     let embedder =
         providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder::load(
             &config.embeddings.model,
-            cache_dir,
+            cache_dir.clone(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -594,7 +595,77 @@ fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     println!("model ready ({} dimensions)", embedder.dimensions());
+
+    // The rerank model joins the bake-in only when the feature is
+    // enabled in the config being warmed (reranking-plan.md Phase 5.4):
+    // the default config has no rerank model, and the release image
+    // should not carry one nobody asked for. The same proof applies as
+    // above — score a pair so a truncated download fails the build, not
+    // the first recall. One session is enough to prove the files; the
+    // daemon loads its own `max_concurrency` pool at boot.
+    if config.rerank.mode != "off" {
+        println!(
+            "\ndownloading rerank model {} (mode {}) into {}",
+            config.rerank.model,
+            config.rerank.mode,
+            cache_dir.display()
+        );
+        // The phase's documented measurements (reranking-plan.md §12):
+        // cold-start is the load itself; the RSS delta around it is what
+        // one session's weights add to a serving process at idle. Linux
+        // reports this from procfs; elsewhere the line says so plainly.
+        let before_rss = process_memory_kib();
+        let started = std::time::Instant::now();
+        let reranker =
+            providers::infrastructure::rerank::fastembed_reranker::FastembedReranker::load(
+                &config.rerank.model,
+                cache_dir,
+                1,
+                config.rerank.batch_size,
+            )
+            .map_err(|e| e.to_string())?;
+        let load_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let candidates = [
+            memories::domain::reranker::RerankCandidate {
+                id: shared::ids::MemoryId::new(),
+                text: "warm",
+            },
+            memories::domain::reranker::RerankCandidate {
+                id: shared::ids::MemoryId::new(),
+                text: "cold",
+            },
+        ];
+        let started = std::time::Instant::now();
+        let scores = reranker
+            .score("warm", &candidates)
+            .map_err(|e| e.to_string())?;
+        let score_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let after_rss = process_memory_kib();
+        println!(
+            "rerank model ready ({} candidates scored in {:.1} ms)",
+            scores.len(),
+            score_ms
+        );
+        println!(
+            "measurements: load {:.0} ms · RSS {} -> {} KiB ({})",
+            load_ms,
+            before_rss.unwrap_or(0),
+            after_rss.unwrap_or(0),
+            match (before_rss, after_rss) {
+                (Some(b), Some(a)) if a > b => format!("+{} KiB", a - b),
+                _ => "delta unavailable".to_string(),
+            }
+        );
+    }
+
     Ok(())
+}
+
+/// Resident set of this process in KiB, where the OS reports it.
+fn process_memory_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Both indexes are derived from `memories`, but built by different
@@ -739,6 +810,27 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         println!("  enabled ({})", config.consolidation.schedule);
     } else {
         println!("  disabled");
+    }
+
+    // The rerank stage prints in every mode: `off` is its effective
+    // state as much as `on` is, and the whole point of this report is
+    // answering "what is the daemon actually doing" without opening the
+    // config file (reranking-plan.md Phase 5.2).
+    let rerank = &config.rerank;
+    println!("\nrerank");
+    println!("  mode       {}", rerank.mode);
+    if rerank.mode != "off" {
+        println!("  model      {}", rerank.model);
+        // The model lands in the embeddings cache dir — shared by
+        // convention, so showing it here would duplicate that section.
+        println!("  depth      {}", rerank.depth);
+        println!(
+            "  strategy   {} (weight {})",
+            rerank.strategy, rerank.weight
+        );
+        println!("  timeout    {} ms", rerank.timeout_ms);
+        println!("  concurrent {}", rerank.max_concurrency);
+        println!("  batch      {}", rerank.batch_size);
     }
 
     println!("\nserver");
