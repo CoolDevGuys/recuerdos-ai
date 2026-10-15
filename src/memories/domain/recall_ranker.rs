@@ -393,9 +393,11 @@ pub const GRAPH_HOP_RELEVANCE: f32 = 0.35;
 ///
 /// It is configurable because it is not universal: a different embedding
 /// model has a different baseline, and one that adds a retrieval instruction
-/// to queries (`bge` models expect one) will shift it again. A deployment
-/// that changes `[embeddings].model` and finds recall dropping should look
-/// here before anywhere else.
+/// to queries (`bge` models expect one) will shift it again. Because it
+/// belongs to the model, the shipping default is looked up per model
+/// ([`SIMILARITY_BASELINES`]) rather than hardcoded to one model's number;
+/// a deployment that changes `[embeddings].model` and finds recall too
+/// strict or too loose should still look here before anywhere else.
 #[derive(Debug, Clone, Copy)]
 pub struct RelevanceCalibration {
     /// The cosine at which the vector leg is treated as saying nothing.
@@ -410,8 +412,80 @@ impl Default for RelevanceCalibration {
     }
 }
 
-/// See [`RelevanceCalibration`].
+/// The fallback baseline: used for a model that is not in
+/// [`SIMILARITY_BASELINES`], and the historical default — measured
+/// against `bge-small-en-v1.5`, which the map pins at the same number.
+///
+/// See [`RelevanceCalibration`] for what the number means; see the map
+/// for why one constant cannot serve every model.
 pub const DEFAULT_SIMILARITY_BASELINE: f32 = 0.5;
+
+/// The measured no-evidence baseline per embedding model, as
+/// `(model_id, cosine)`, matched against [`Embedder::model_id`].
+///
+/// # Why a map rather than one constant
+///
+/// The baseline is a property of the *model* — how its embedding space
+/// spreads unrelated text — not of the query or the corpus (see the
+/// [`RelevanceCalibration`] docs). Measured once with the same method the
+/// `MEASURED_NOISE_CEILING` test constants pin for bge-small (the maximum
+/// raw cosine of the eval set's `negative` queries against the corpus, and
+/// the minimum raw cosine of each case's expected memory), it differs by
+/// more than `0.15` between the two shipped models: what reads as noise
+/// in Gemini space would be subtracting away most of a real answer's
+/// relevance under bge-small's constant, and vice versa — noise would
+/// sail past the floor. So `[retrieval].similarity_baseline` gained per-model
+/// defaults (reranking-plan.md Phase 2.2); an explicit config value
+/// still wins over the map.
+///
+/// The rows, measured by `recuerdos-ai calibrate` over `eval/cases.toml`
+/// (reranking-plan.md Phase 2.1/2.2):
+///
+/// - `bge-small-en-v1.5` → `0.5`, the historical constant. The larger
+///   eval corpus puts this model's noise ceiling at `0.599` — above the
+///   `0.542` the constant was originally measured against (a smaller
+///   working set; the `MEASURED_*` tests below pin that older
+///   measurement, which the shipped floor still agrees with). The
+///   corpus shows an infeasible gap here too (floor-gated answers down
+///   to `0.528`), but `0.5` stands: it is every existing pin's
+///   calibration, and changing the default model's number on a thin
+///   eval corpus is noisier than keeping it.
+/// - `gemini-embedding-2` → `0.46`, measured noise ceiling `0.580` (two
+///   `negative` queries reach it). Suppressing that noise under the
+///   shipped `0.25` floor requires `> 0.44`; answers down to raw
+///   `0.611` survive it while `b ≤ 0.481`, so `0.46` sits mid-window:
+///   noise corrects to `0.222`, a `0.611` answer to `0.280`.
+///
+/// What the measurement *also* says, and `0.46` cannot fix: two
+/// floor-gated answers sit **below** the noise ceiling — raw `0.562` for
+/// *"health, fitness or family"*, and `0.572` for the already-
+/// recall-failing dietary needle (reranking-plan.md §12, Phase 2). No
+/// baseline can both suppress every negative case and keep those answers
+/// above the floor; `0.46` chooses the negatives' side. Those weak
+/// answers then land below the floor — which is where §1's third row
+/// really lives too (there they were noise-*inflated* to `0.33` and
+/// ranked #5; now they are honestly sub-floor instead). The thin gemini
+/// gap is itself one of the numbers Phase 3 weighs. (Earlier live-store
+/// relevances of `0.84–0.91` under this model were BM25-inflated noise,
+/// not raw cosine — §12.)
+///
+/// Re-measure and add a row when adding a model row to the embedder,
+/// with `recuerdos-ai calibrate --config <that config>`; an unknown
+/// model falls back to [`DEFAULT_SIMILARITY_BASELINE`] with a `warn!` at
+/// startup, which is deliberately loud because every relevance threshold
+/// in the system silently shifts if this number is wrong.
+pub const SIMILARITY_BASELINES: &[(&str, f32)] =
+    &[("bge-small-en-v1.5", 0.5), ("gemini-embedding-2", 0.46)];
+
+/// The measured baseline for `model_id`, or `None` when the model has
+/// never been calibrated (the caller falls back to
+/// [`DEFAULT_SIMILARITY_BASELINE`] and warns).
+pub fn default_similarity_baseline_for(model_id: &str) -> Option<f32> {
+    SIMILARITY_BASELINES
+        .iter()
+        .find(|(calibrated, _)| *calibrated == model_id)
+        .map(|(_, baseline)| *baseline)
+}
 
 impl RelevanceCalibration {
     /// Calibration at a given vector baseline. `0.0` reports raw cosine.
@@ -1189,6 +1263,28 @@ mod tests {
         assert_eq!(raw().relevance(Some(0.5), 0.0, false), 0.5);
     }
 
+    /// Lookup on the map (reranking-plan.md Phase 2.2): the default
+    /// model's entry must equal the fallback constant, so the fallback
+    /// stays exactly the pre-map behaviour for that model.
+    #[test]
+    fn the_baseline_map_holds_the_default_model_at_the_default_constant() {
+        assert_eq!(
+            default_similarity_baseline_for("bge-small-en-v1.5"),
+            Some(DEFAULT_SIMILARITY_BASELINE)
+        );
+    }
+
+    /// A model nobody measured has *no* entry — the absence is what the
+    /// startup `warn!` in the wiring keys on. Inventing "close enough"
+    /// defaults for unmeasured models is how miscalibration gets shipped.
+    #[test]
+    fn an_uncalibrated_model_is_absent_from_the_map() {
+        assert_eq!(default_similarity_baseline_for("text-embedding-004"), None);
+        assert_eq!(default_similarity_baseline_for(""), None);
+        // Not a prefix/fuzzy match: the map is exact ids only.
+        assert_eq!(default_similarity_baseline_for("bge-small"), None);
+    }
+
     /// The numbers that set the default calibration, measured against the
     /// real default model over a small working set. Every genuinely relevant
     /// answer scored at or above the low end; every unrelated query —
@@ -1220,6 +1316,65 @@ mod tests {
             DEFAULT_RELEVANCE_FLOOR - noise > 0.1 && answer - DEFAULT_RELEVANCE_FLOOR > 0.1,
             "noise {noise}, floor {DEFAULT_RELEVANCE_FLOOR}, answer {answer}"
         );
+    }
+
+    /// The Gemini numbers behind the map row, measured by
+    /// `recuerdos-ai calibrate --config recuerdos-ai.toml` (reranking-plan.md
+    /// Phase 2.1/2.4):
+    ///
+    /// - noise ceiling `0.580` — the largest raw cosine any `negative`
+    ///   query reaches against the corpus;
+    /// - cluster floor `0.611` — the weakest raw cosine among the
+    ///   floor-gated kinds (filter kinds are excluded: the handler lifts
+    ///   the floor for them; relational targets arrive over a hop with
+    ///   `GRAPH_HOP_RELEVANCE`);
+    /// - weak answers `0.562` (`nl-category: health, fitness or family`)
+    ///   and `0.572` (the dietary needle, which fails recall at any
+    ///   threshold) — measured *below* the noise ceiling, which is what
+    ///   makes this model's gap genuinely infeasible: **no** baseline
+    ///   suppresses every negative case at `0.25` and keeps both of
+    ///   those above it. The map row chooses silencing the negatives;
+    ///   these assertions pin both halves of the trade-off, so any
+    ///   future re-measure that changes who lands under the floor fails
+    ///   here and forces the choice to be re-recorded in §12 rather
+    ///   than quietly drifted into.
+    const GEMINI_MEASURED_NOISE_CEILING: f32 = 0.580;
+    const GEMINI_MEASURED_CLUSTER_FLOOR: f32 = 0.611;
+    const GEMINI_MEASURED_WEAK_ANSWERS: [f32; 2] = [0.562, 0.572];
+
+    #[test]
+    fn the_gemini_map_row_suppresses_measured_noise_and_pins_its_tradeoff() {
+        let baseline = default_similarity_baseline_for("gemini-embedding-2")
+            .expect("gemini-embedding-2 is in the baseline map");
+        let calibration = RelevanceCalibration::new(baseline);
+
+        let noise = calibration.relevance(Some(GEMINI_MEASURED_NOISE_CEILING), 0.0, false);
+        assert!(
+            noise < DEFAULT_RELEVANCE_FLOOR,
+            "a baseline of {baseline} would report noise as relevance ({noise})"
+        );
+        assert!(
+            DEFAULT_RELEVANCE_FLOOR - noise > 0.02,
+            "noise {noise} is a hair under the floor — re-measure"
+        );
+
+        let cluster = calibration.relevance(Some(GEMINI_MEASURED_CLUSTER_FLOOR), 0.0, false);
+        assert!(
+            cluster - DEFAULT_RELEVANCE_FLOOR > 0.02,
+            "the weakest cluster answer ({cluster}) no longer clears the floor with room — re-measure"
+        );
+
+        // And the chosen trade-off itself: both measured weak answers sit
+        // under the corrected noise, i.e. they are below the floor
+        // wherever it sensibly sits. Pinning `below the noise` rather than
+        // `below the floor` says the actual reason they fall.
+        for weak in GEMINI_MEASURED_WEAK_ANSWERS {
+            let relevance = calibration.relevance(Some(weak), 0.0, false);
+            assert!(
+                relevance < noise,
+                "measured weak answer {weak} corrected to {relevance}, expected under noise {noise}"
+            );
+        }
     }
 
     #[test]
