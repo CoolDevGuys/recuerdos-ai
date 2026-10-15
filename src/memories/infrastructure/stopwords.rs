@@ -54,6 +54,17 @@ pub const STOP_WORDS: &[&str] = &[
     "you", "your",
     // Connective glue.
     "about", "all", "any", "from", "over", "some", "so", "than", "under",
+    // Added against the measured `negative: hiking trails` case
+    // (reranking-plan.md Phase 2): "best hiking trails near the coast"
+    // reached relevance 0.287 on both embedders because one corpus memory
+    // ends "…knows its schema *best*" — the word is corpus-rare enough for
+    // a high BM25 score, and there is no vector evidence underneath. On
+    // the query side "best" is praise attached to a real subject ("best
+    // practice", "the best way"), never the subject itself, so a memory
+    // matching on *best* alone is the noise this list exists to remove.
+    // The module rule — the `negative` kind guards the boundary — is what
+    // asked for it.
+    "best",
 ];
 
 #[cfg(test)]
