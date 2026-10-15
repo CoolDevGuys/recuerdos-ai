@@ -395,13 +395,13 @@ is configured; a swap of `[embeddings].model` can no longer silently break the f
 
 ### Definition of Done
 
-- [ ] `just check-native` passes.
-- [ ] Every `negative` eval case passes (empty result at the default floor) under the
+- [x] `just check-native` passes.
+- [x] Every `negative` eval case passes (empty result at the default floor) under the
       production-like config.
-- [ ] No pre-existing `by_kind` regresses; recorded in §12.
-- [ ] The four queries from §1, re-run live: irrelevant memories no longer show relevance ≥ 0.5
+- [x] No pre-existing `by_kind` regresses; recorded in §12.
+- [x] The four queries from §1, re-run live: irrelevant memories no longer show relevance ≥ 0.5
       (record the numbers).
-- [ ] New `eval/baseline.json` committed with p@1, MRR and latency fields populated.
+- [x] New `eval/baseline.json` committed with p@1, MRR and latency fields populated.
 
 ### Expected state after this phase
 
@@ -1172,9 +1172,158 @@ BEFORE = pre-change binary on the legacy index, AFTER = new binary):
 users (7 memories, 0 users skipped)`; search results identical to the
 auto-rebuild index.
 
-### Phase 2 — calibration
-- Noise ceiling / signal floor per model: _TBD_ · chosen `gemini-embedding-2` baseline: _TBD_
-- `eval` output + new `baseline.json`: _TBD_ · four-query re-run: _TBD_
+### Phase 2 — relevance calibration (`fix/relevance-calibration`)
+
+The method is now reproducible: `recuerdos-ai calibrate [--config …]`
+(hidden, like `eval`) embeds the eval corpus as `Document` and every case
+query as `Query` with *the config's own embedder*, compares true cosines
+(nothing is indexed or stored), and reports vector norms, the noise
+ceiling, the signal floor per case and overall, and the floor's room at
+the baseline actually in force (same precedence recall resolves).
+Numbers below are from runs on this branch, model cache warm, both
+embedders.
+
+**VERIFY 2.3 resolved: Gemini embeddings are unit-length at the
+configured 3072 dimensions** — `gemini-embedding-2` norms over the whole
+eval corpus (documents and queries): min/max/mean all `1.0000`, as are
+bge's. `similarity_from_l2`'s assumption holds as shipped; no
+normalisation change in `gemini_embedder.rs`, **no reindex needed**.
+
+**Noise ceiling** (max raw cosine of each `negative` query over the corpus):
+
+| `negative` query | bge-small | gemini |
+|---|---|---|
+| what and or the for do | 0.599 | 0.578 |
+| how do I do it | 0.577 | **0.580** |
+| best hiking trails near the coast | 0.438 | 0.510 |
+| french recipe for bouillabaisse | 0.503 | 0.519 |
+
+**Signal floor** (min raw cosine of each case's *expected* memory, full
+per-case table in the tool output; the load-bearing minima):
+
+| | bge-small | gemini |
+|---|---|---|
+| floor-gated kinds, all | 0.459 → 0.528 (excl. filter kinds) | 0.511 → **0.562** (excl. filter kinds) |
+| floor-gated, cluster (excl. the stragglers below) | 0.621 | **0.611** |
+| weakest floor-gated answers | dietary needle 0.528, code-org nl-category 0.533, health nl-category 0.550, storage-decision nl-question 0.596 | health nl-category **0.562**, dietary needle **0.572** |
+
+**The honest finding (task 2.4):** measured *strictly* — weakest
+floor-gated answer vs noise ceiling — there is **no gap on this corpus
+for either model**: gemini noise 0.580 > its weakest prose answers 0.562/0.572; bge noise 0.599 > four answers from 0.528–0.596. So
+`DEFAULT_RELEVANCE_FLOOR` (0.25) was *confirmed but not by a wide
+margin*: it sits inside the gap between the noise ceiling and the
+**cluster** of answers (gemini ≥ 0.611, bge ≥ 0.621), and the stragglers
+above sit below the noise wherever the floor goes. No
+baseline value can suppress every negative and keep those answers;
+the measurement does not justify moving 0.25 (no single value fixes
+the stragglers either way), so it stands. The thin gap is itself
+Phase 3's evidence.
+
+**Chosen `gemini-embedding-2` baseline: 0.46** (`SIMILARITY_BASELINES`
+map in `recall_ranker.rs`; bge keeps 0.5 — pre-existing paths
+byte-identical, pinned by `the_baseline_map_holds_the_default_model_at_the_default_constant`).
+Window math: suppressing corrected noise 0.580 at floor
+0.25 needs `b > 0.44`; keeping the 0.611 cluster answer above the floor
+needs `b ≤ 0.481`; 0.46 corrects noise to **0.222** (0.028 under the
+floor) and a 0.611 answer to **0.280** (0.03 over) — margins pinned by
+`the_gemini_map_row_suppresses_measured_noise_and_pins_its_tradeoff`,
+which *also* pins the stragglers staying under the corrected noise, so
+any re-measure that shifts who lands below the floor fails a test
+instead of drifting.
+
+Config: `[retrieval].similarity_baseline` is now `Option<f32>` (unset =
+per-model map; explicit value still wins, same `0.0..=0.99` validation);
+unknown model → 0.5 with a startup `warn!`
+(`resolve_similarity_baseline`, precedence pinned by wiring tests).
+
+#### eval — Run 1, default config (bge-small, the committed baseline's embedder)
+
+Informational flags removed (task 2.5): the gated subset grew 24 → 41
+cases, so overall numbers move by construction. `negative` now gates
+and passes **4/4** on bge too — the last failure (`hiking trails`) was
+keyword-leg noise on the word *best* (one corpus memory ends "…knows
+its schema **best**", BM25 rank 1, no vector evidence; debug
+`v=17 k=1 relevance=0.287`) — stopworded, and the negative kind is the
+guard the stopword module's own rule names.
+
+```
+recall@5: 86.5%   precision@1: 64.9%   MRR: 74.1%   latency p50: 10.3 ms p95: 12.4 ms   (37 scored cases, 4 negative)
+abstention: 100.0%
+  category-filter 100.0/100.0   current-fact 100.0/100.0   exact-token 100.0/100.0
+  needle 66.7/66.7   negative 100.0/100.0   nl-category 75.0/75.0   nl-question 85.7/57.1
+  paraphrase 100.0/50.0   relational 71.4/28.6   subcategory-filter 100.0/100.0   tag-filter 100.0/0.0
+```
+
+Against the *old* committed baseline: recall −5.2 (fails the 5-point
+gate — purely the gated-subset expansion; the pre-existing kinds are
+identical to Phase 1's bge run), precision +2.4, old baseline MRR
+unrecorded → skipped. **New `eval/baseline.json` recorded** (defaults,
+per the deviation note below): `bge-small-en-v1.5`, 41 cases,
+recall 86.5 / p@1 64.9 / MRR 74.1 / p50 10.3 ms / abstention 100,
+`precision_at_1_by_kind` populated; CI's `just eval-native` gate re-run
+against it: all deltas −0.0.
+
+#### eval — Run 2, production-like config (`--config recuerdos-ai.toml`)
+
+```
+recall@5: 83.8%   precision@1: 75.7%   MRR: 80.2%   latency p50: 310.0 ms p95: 421.6 ms   (37 scored cases, 4 negative)
+abstention: 100.0%   (was 75.0% in Phase 1 — all four negatives pass)
+  category-filter 100/100   current-fact 100/100   exact-token 100/100   needle 66.7/66.7
+  negative 100.0/100.0   nl-category 75.0/75.0   nl-question 78.6/85.7   paraphrase 87.5/75.0
+  relational 71.4/28.6   subcategory-filter 100/100   tag-filter 100.0/100.0
+```
+
+**No pre-existing `by_kind` regressed**: every number above matches
+Phase 1's production-like run for the original kinds (scored cases never
+apply the floor, so the 0.5→0.46 change moves only relevance/negatives;
+`hiking trails`' fix is the stopword). The `compare()` warnings
+(baseline recorded bge, run gemini) are expected and documented in the
+deviation note.
+
+#### Four-query re-run (§1, production-like rehearsal)
+
+Same 7 rehearsal memories as the Phase 1 rehearsal (the §1 topics,
+decoys and the WidgetPool-7 identifier), re-saved through the **new**
+binary under `recuerdos-ai.toml` (fresh store, gemini-pinned; volume
+`ra-calib-store`). Column **0.5** = new binary with an explicit
+`[retrieval].similarity_baseline = 0.5` override (isolates the
+calibration from the analyzer fixes); column **0.46** = the shipped
+per-model default.
+
+| query | §1 (live, pre-plan) | 0.5 override | **0.46 (shipped)** |
+|---|---|---|---|
+| what do I use for data storage | rule #3; noise at 0.89/0.87 | snake_case only, 0.262 | snake_case only, **0.316** — no irrelevant ≥ 0.5; the rule itself stays below floor (as in Phase 1, bge too) |
+| deployment and hosting | Dockerfile #2 | Dockerfile #1, 0.406 | Dockerfile **#1, 0.450** |
+| health, fitness or family | Berlin #5 at 0.33 under four noise at 0.84–0.86 | nothing | **nothing** — the Berlin memory's raw cosine (0.562-class) is below the noise ceiling; honest abstention, §1's complaint (noise at 0.84–0.91) fully gone |
+| what and or the for do | 5 results at 0.84–0.91 | nothing | **nothing — 0 results** |
+| WidgetPool-7 (guard) | — | #1, 0.659 | #1, **0.684** — identifier intact |
+
+**DoD:** every irrelevant memory that *appears* is < 0.5; §1's 0.84–0.91
+band no longer exists on this store.
+
+#### Deviation and reading notes (no DoD weakened)
+
+- **Task 2.5 wording** says record the baseline on the production-like
+  config; the committed `eval/baseline.json` was recorded on **defaults**
+  instead, because CI's eval job gates `eval --baseline` *without* a
+  config and has no `GEMINI_API_KEY` — a gemini-recorded baseline would
+  make every CI run a cross-embedder comparison. The production-like
+  run is fully recorded above (all its DoD-relevant claims hold), and
+  the baseline's DoD ("p@1, MRR and latency fields populated") is met
+  by the committed file.
+- Phase 1's §12 gate-mark ("Phase 2 must not start until this entry is
+  read") — the entry was read; the operator acknowledged it and
+  directed this phase. The noise-propped `relational`/`nl-question`
+  regressions were held in mind above: none of Phase 2's numbers
+  restored them, and none of Phase 2's choices depend on them.
+- The `calibrate` verdict line prints "NOT inside the gap" for both
+  models under the strict all-kinds reading. That is the tool telling
+  the truth about this corpus (see the honest finding), not a defect:
+  the per-case table and the cluster/straggler split above are what
+  decisions read.
+- One hidden-subcommand addition (`calibrate`) and one user-visible
+  config-semantics change (`similarity_baseline` unset ≠ 0.5 for
+  gemini — it is 0.46; deployments that *want* 0.5 pin it explicitly).
 
 ### Phase 3 — gate
 | Metric | Value |
@@ -1210,7 +1359,10 @@ auto-rebuild index.
       needed. `Language::English` is exactly the Lucene list quoted in §2 row 9, confirming
       none of `what/which/who/how/do/does/I/my/you/can/should` is in it. Details in the
       Phase 1 log above.
-- [ ] Gemini embeddings unit-normalised at configured dimension (2.3)
+- [x] Gemini embeddings unit-normalised at configured dimension (2.3) — **they are**:
+      `recuerdos-ai calibrate --config recuerdos-ai.toml` measured document and query
+      norms over the eval corpus at 3072 dims, min/max/mean all `1.0000`. No embedder
+      change, no reindex. Details in the Phase 2 log above.
 - [ ] fastembed rerank feature flag; `TextRerank::rerank` receiver (`&self`/`&mut self`) (5.1)
 - [ ] Dockerfile warm-models step (5.4)
 - [ ] Read-only open of SQLite/tantivy while the daemon runs (6.2)
