@@ -56,6 +56,15 @@ class MatchDetail(_Model):
     #: Rank in the graph leg, set only when an entity-graph hop reached this
     #: memory — the case where it answers a question it shares no words with.
     graph_rank: int | None = None
+    #: 1-based rank in the optional second-stage reranker
+    #: (``[rerank].mode = "on"``). ``None`` whenever the reranker is off,
+    #: in shadow mode, or never reached this result.
+    rerank_rank: int | None = None
+    #: The reranker's own score for the memory, present exactly when
+    #: ``rerank_rank`` is. It is on the *model's* scale (a probability for
+    #: one reranker, a logit for another): a diagnostic, never a threshold.
+    #: ``relevance`` keeps its meaning regardless.
+    rerank_score: float | None = None
 
 
 class SearchHit(Memory):

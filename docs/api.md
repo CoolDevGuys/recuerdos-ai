@@ -281,6 +281,15 @@ Here vector and BM25 both missed (the memory never mentions "billing"),
 and only the hop `billing service → Meridian team → Nadia` connected the
 query to it.
 
+With `[rerank].mode = "on"`, an optional second-stage ranker re-scores the
+top of the fused list query-to-memory, and each result it scored carries
+two more keys inside `matched`: `rerank_rank` (its position in the
+reranker's ordering) and `rerank_score` (the raw value, on the reranker's
+own scale — read it as a diagnostic; `relevance` keeps its calibrated
+meaning). Off by default, and never visible in `shadow` mode: a server
+without a reranker, or one running shadow mode, produces exactly the
+`matched` objects above.
+
 | Field | Notes |
 |---|---|
 | `query` | Required, 1–1000 characters |

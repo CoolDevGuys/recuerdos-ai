@@ -159,6 +159,19 @@ pub struct MatchResponse {
     /// memory (Task 7.3.4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_rank: Option<usize>,
+    /// 1-based rank in the rerank stage, present only when one scored this
+    /// result (reranking-plan.md Phase 4). `mode = off` — the default —
+    /// never emits it, and neither does `shadow`, whose whole promise is
+    /// that the wire looks untouched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_rank: Option<usize>,
+    /// The reranker's own score for this memory, same presence rules as
+    /// `rerank_rank`. It is on the *model's* scale — a probability for one
+    /// reranker, a logit for another — so it is a diagnostic, never a
+    /// threshold. `relevance` keeps its meaning; this is additive beside it
+    /// (invariant I-4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 impl From<&ScoredMemory> for SearchHit {
@@ -171,6 +184,8 @@ impl From<&ScoredMemory> for SearchHit {
                 vector_rank: scored.match_detail.vector_rank,
                 bm25_rank: scored.match_detail.bm25_rank,
                 graph_rank: scored.match_detail.graph_rank,
+                rerank_rank: scored.match_detail.rerank_rank,
+                rerank_score: scored.rerank_score,
             },
         }
     }
@@ -312,6 +327,8 @@ mod tests {
                 vector_rank: Some(1),
                 bm25_rank: None,
                 graph_rank: None,
+                rerank_rank: None,
+                rerank_score: None,
             },
         };
 
@@ -319,7 +336,48 @@ mod tests {
         assert_eq!(json["matched"]["vector_rank"], 1);
         assert!(json["matched"].get("bm25_rank").is_none());
         assert!(json["matched"].get("graph_rank").is_none());
+        // The rerank stage is absent by default and must stay invisible to
+        // old clients, not arrive as `null` (reranking-plan.md Phase 4.5).
+        assert!(json["matched"].get("rerank_rank").is_none());
+        assert!(json["matched"].get("rerank_score").is_none());
         // `flatten` should inline the memory fields, not nest them.
         assert_eq!(json["id"], "m1");
+    }
+
+    #[test]
+    fn a_reranked_result_carries_its_rerank_fields() {
+        // Only `mode = on` populates them, and when it does they ride
+        // inside `matched` beside the leg ranks.
+        let scored = ScoredMemory {
+            memory: Memory::create(
+                crate::shared::ids::UserId::new(),
+                NewMemory {
+                    content: "x".to_string(),
+                    category: Category::Decision,
+                    subcategory: None,
+                    tags: vec![],
+                    entities: vec![],
+                    confidence: 1.0,
+                    source: MemorySource::default(),
+                    expires_at: None,
+                },
+                Utc::now(),
+            )
+            .unwrap(),
+            score: 0.5,
+            relevance: 0.8,
+            rerank_score: Some(0.97),
+            match_detail: crate::memories::domain::recall_ranker::MatchDetail {
+                vector_rank: Some(3),
+                bm25_rank: None,
+                graph_rank: None,
+                rerank_rank: Some(1),
+            },
+        };
+
+        let json = serde_json::to_value(SearchHit::from(&scored)).unwrap();
+        assert_eq!(json["matched"]["rerank_rank"], 1);
+        let emitted = json["matched"]["rerank_score"].as_f64().unwrap() as f32;
+        assert!((emitted - 0.97).abs() < 1e-6, "{emitted}");
     }
 }
