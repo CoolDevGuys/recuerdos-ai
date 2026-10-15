@@ -433,8 +433,10 @@ second-stage ranker". This is the baseline the reranker must beat.
 
 ### Definition of Done
 
-- [ ] §12 contains the filled decision table with the measured numbers and the decision.
-- [ ] If NO-GO: plan marked closed in the header; Phases 4–8 are not implemented.
+- [x] §12 contains the filled decision table with the measured numbers and the decision.
+- [x] If NO-GO: plan marked closed in the header; Phases 4–8 are not implemented.
+      — N/A: the measured decision is **GO, cautiously** (see §12, Phase 3);
+      Phases 4–8 proceed.
 
 ### Expected state after this phase
 
@@ -1325,15 +1327,142 @@ band no longer exists on this store.
   config-semantics change (`similarity_baseline` unset ≠ 0.5 for
   gemini — it is 0.46; deployments that *want* 0.5 pin it explicitly).
 
-### Phase 3 — gate
+### Phase 3 — gate (`docs/rerank-gate`)
+
+No code changes on this branch (`just check-native` re-run: all green).
+Task 3.1 re-ran both eval passes and the four §1 queries; every number
+reproduces the Phase 2 record **exactly** — the committed `eval/baseline.json`
+(Phase 2.5, defaults) gates the default run at −0.0 on all three metrics.
+
+#### eval — Run 1, default config (bge-small, the committed baseline's embedder)
+
+`docker compose run --rm dev just eval-native`
+
+```
+recall@5: 86.5%   precision@1: 64.9%   MRR: 74.1%   latency p50: 10.7 ms p95: 12.3 ms   (37 scored cases, 4 negative)
+abstention: 100.0%
+   category-filter: recall 100.0%   p@1 100.0%
+      current-fact: recall 100.0%   p@1 100.0%
+       exact-token: recall 100.0%   p@1 100.0%
+            needle: recall 66.7%   p@1 66.7%
+          negative: recall 100.0%   p@1 100.0%
+       nl-category: recall 75.0%   p@1 75.0%
+       nl-question: recall 85.7%   p@1 57.1%
+        paraphrase: recall 100.0%   p@1 50.0%
+        relational: recall 71.4%   p@1 28.6%
+  subcategory-filter: recall 100.0%   p@1 100.0%
+        tag-filter: recall 100.0%   p@1 0.0%
+
+baseline recall@5: 86.5%   now: 86.5%   change: -0.0 points
+baseline precision@1: 64.9%   now: 64.9%   change: -0.0 points
+baseline MRR: 74.1%   now: 74.1%   change: -0.0 points
+```
+
+The ranking gap is visible per kind: `paraphrase` 100 recall / 50 p@1,
+`relational` found 5 of 7 but topped only 2, `tag-filter` 100 / 0,
+`nl-question` 85.7 / 57.1. The scored cases missing recall entirely are
+the known ones, identical to the Phase 2 record: `dietary` (needle, both
+embedders); `who owns` (graph hop, 0% since Phase 0) and
+`where sits` (0% since its Phase 0 pass turned out to ride keyword noise —
+Phase 1 note); `package manager` and `code organisation` (Phase 1's
+noise-propped pair and the abstract-category follow-up; the gemini run
+additionally drops `testing tools`/`multi-hit` on the `tests`/`testing`
+stem split — the §11 stemming follow-up).
+
+#### eval — Run 2, production-like config (gemini-embedding-2)
+
+`docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval --config recuerdos-ai.toml`
+
+```
+recall@5: 83.8%   precision@1: 75.7%   MRR: 80.2%   latency p50: 320.7 ms p95: 450.6 ms   (37 scored cases, 4 negative)
+abstention: 100.0%
+   category-filter 100.0/100.0   current-fact 100.0/100.0   exact-token 100.0/100.0
+   needle 66.7/66.7   negative 100.0/100.0   nl-category 75.0/75.0
+   nl-question 78.6/85.7   paraphrase 87.5/75.0   relational 71.4/28.6
+   subcategory-filter 100.0/100.0   tag-filter 100.0/100.0
+```
+
+Identical to Phase 2's Run 2 to the last digit (latency re-measured).
+
+#### Headroom (task 3.2): recall@5 − precision@1
+
+| Scope | bge-small | gemini |
+|---|---|---|
+| overall | 86.5 − 64.9 = **+21.6** | 83.8 − 75.7 = **+8.1** |
+| `nl-question` | 85.7 − 57.1 = **+28.6** | 78.6 − 85.7 = −7.1 |
+| `nl-category` | 75.0 − 75.0 = 0 | 75.0 − 75.0 = 0 |
+| `needle` | 66.7 − 66.7 = 0 | 66.7 − 66.7 = 0 |
+| `paraphrase` | 100.0 − 50.0 = **+50.0** | 87.5 − 75.0 = **+12.5** |
+
+Reading: the kind-level heads where positive are pure **ranking** gaps —
+the expected memory is in the top 5 but not first. The negative
+`nl-question` headroom on gemini is the opposite failure (the pnpm and
+table-driven memories leave the top 5 entirely — the reranker can only
+promote them if they are in the candidate pool, i.e. via
+`candidate_depth`); zero-headroom kinds are recall-bound (`dietary`,
+`code organisation`), not ranking-bound — a reranker will not fix them.
+
+**`nl-*` cases not at #1** (case-level `top` column): bge-small **4**
+(`package manager`, `storage decision`, `auth review`, `code organisation`);
+gemini **2** (`package manager`, `code organisation`).
+
+#### Four §1 queries, re-run against the rehearsal store
+
+Same `ra-calib-store` rehearsal store as Phase 2 (7 memories, gemini-pinned),
+served by this branch's binary under `recuerdos-ai.toml` with the per-model
+0.46 baseline (fresh read-only API key for user `alex` added to that store;
+the store's memory rows untouched):
+
+```
+== what do I use for data storage
+   #1 relevance=0.316  New Python files must use snake_case filenames
+== deployment and hosting
+   #1 relevance=0.450  The backend production Dockerfile is managed through the production-deploy…
+== health, fitness or family
+   (no results at the floor)
+== what and or the for do
+   (no results at the floor)
+== WidgetPool-7 (guard)
+   #1 relevance=0.684  The WidgetPool-7 connector pools Postgres connections in widget_pool.rs
+```
+
+Byte-identical to Phase 2's "0.46 (shipped)" column. What remains of §1 on
+this store is a **ranking** problem, not a noise problem: no noise appears
+at the floor anywhere, and the database rule / Berlin fact remain below it.
+
+#### Decision (task 3.3)
+
+| Condition (after Phase 2) | Measured | Applies? |
+|---|---|---|
+| headroom < 10 **and** all `nl-*` at #1 → NO-GO | false under **both** embedders: `nl-*`-at-#1 fails on both (4 and 2 misses), and headroom ≥ 10 on the baseline embedder | **no** |
+| headroom ≥ 10 **or** ≥ 2 `nl-*` cases miss #1 → GO | headroom 21.6 ≥ 10 **and** ≥ 2 miss #1 **on both embedders** (the second disjunct holds even on gemini, where overall headroom is 8.1) | **yes** |
+| headroom ≥ 10 but corpus < 100 → GO cautiously | eval corpus = 35 memories | **yes** |
+
 | Metric | Value |
 |---|---|
-| recall@5 | _TBD_ |
-| precision@1 | _TBD_ |
-| MRR | _TBD_ |
-| headroom (recall@5 − p@1) | _TBD_ |
-| `nl-*` cases not at #1 | _TBD_ |
-| **Decision** | _TBD (GO / NO-GO / GO-cautiously)_ |
+| recall@5 | 86.5% (bge, gated baseline embedder) · 83.8% (gemini, production-like) |
+| precision@1 | 64.9% · 75.7% |
+| MRR | 74.1% · 80.2% |
+| headroom (recall@5 − p@1) | **+21.6** · +8.1 (per-kind table above) |
+| `nl-*` cases not at #1 | 4 (bge) · 2 (gemini) |
+| **Decision** | **GO, cautiously** |
+
+**GO, cautiously.** Continue to Phase 4. Per the cautious clause the Phase 6
+shadow/audit over the **real** store is a hard prerequisite for any default
+change in Phase 8 — and given the §1 evidence came from the real (larger)
+store while the eval corpus is 35 memories, Phase 7's ship gate should lean
+on the Phase 6 evidence at least as much as on the eval grid.
+
+Follow-on note for Phase 4–7 (no action now): the fixes' ranking gaps are
+concentrated in `paraphrase`/`relational`/`tag-filter` p@1 and the two
+gemini `nl-question` recall misses — cases of the first two styles and a
+candidate pool wide enough to lift the latter are what Phase 7.1 must add.
+
+### Phase 3 DoD
+
+- [x] §12 contains the filled decision table with the measured numbers and
+      the decision (above).
+- [x] If NO-GO: N/A — the decision is GO, Phases 4–8 proceed.
 
 ### Phase 4 — contract
 - Identity test: _TBD_ · `eval` unchanged: _TBD_
