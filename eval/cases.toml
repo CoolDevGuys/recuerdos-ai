@@ -337,8 +337,10 @@ relations = [
 #
 #   `informational = true` — reported in every run but excluded from the
 #   numbers a committed baseline gates against, so a case that documents
-#   a known, deliberately-unfixed defect does not redden CI. Phase 2
-#   removes the flags and re-records the baseline with these kinds gated.
+#   a known, deliberately-unfixed defect does not redden CI. The Phase 0
+#   regression kinds carried it until Phases 1–2 fixed their defects; no
+#   case is marked today (a test asserts that), but the mechanism stays
+#   for the next deliberately-failing case someone needs to add.
 # ─────────────────────────────────────────────────────────────────────
 
 [[case]]
@@ -595,11 +597,11 @@ expect = ["Before the switch, the analytics pipeline was built on Kafka"]
 # These reproduce the two measured defects of that plan's §1: natural
 # language questions lose to keyword-leg noise ("what/and/or/the" each
 # match everything), and questions with no answer return confident
-# rubbish. They are marked `informational = true` (Phase 0.5): reported
-# in every run, excluded from the baseline gate, so the pipeline stays
-# green while the defects still exist. Phase 1–2 fix the defects and
-# remove the flags; Phase 2 re-records the baseline with these kinds
-# gated.
+# rubbish. They were marked `informational = true` in Phase 0.5 so the
+# pipeline stayed green while the defects still existed; Phases 1–2
+# fixed the defects (stopword analyzer, per-model relevance
+# calibration) and removed the flags, so these kinds gate the baseline
+# like every other one now.
 # ─────────────────────────────────────────────────────────────────────
 
 # `nl-question`: the natural-language form of existing cases — the same
@@ -609,42 +611,36 @@ expect = ["Before the switch, the analytics pipeline was built on Kafka"]
 [[case]]
 name = "nl-question: package manager"
 kind = "nl-question"
-informational = true
 query = "what do I use for installing project dependencies"
 expect = ["User prefers pnpm over npm and yarn for package management"]
 
 [[case]]
 name = "nl-question: module exports"
 kind = "nl-question"
-informational = true
 query = "how should I organise the exports of my modules in this repo"
 expect = ["User forbids barrel files and index.ts re-exports"]
 
 [[case]]
 name = "nl-question: storage decision"
 kind = "nl-question"
-informational = true
 query = "what do I use for data storage"
 expect = ["SQLite was chosen over Postgres so the installer stays a single binary"]
 
 [[case]]
 name = "nl-question: auth review"
 kind = "nl-question"
-informational = true
 query = "who do I ask to review a change that touches authentication"
 expect = ["Sam is the reviewer for anything touching authentication"]
 
 [[case]]
 name = "nl-question: shipping a release"
 kind = "nl-question"
-informational = true
 query = "what do I do when I want to ship a new release"
 expect = ["Deployment runbook: tag the release, wait for CI, then run just deploy-prod"]
 
 [[case]]
 name = "nl-question: testing tools"
 kind = "nl-question"
-informational = true
 query = "which tools for testing does the user say they like"
 expect = [
     "User requires table-driven tests in Go, one table per behaviour",
@@ -654,7 +650,6 @@ expect = [
 [[case]]
 name = "nl-question: the failed migration"
 kind = "nl-question"
-informational = true
 query = "why did our database migration go wrong with the index"
 expect = [
     "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem",
@@ -671,7 +666,6 @@ expect = [
 [[case]]
 name = "nl-category: deployment and hosting"
 kind = "nl-category"
-informational = true
 query = "deployment and hosting"
 expect = [
     "The backend deploys on Hetzner, migrated from Fly.io because of cost",
@@ -681,14 +675,12 @@ expect = [
 [[case]]
 name = "nl-category: health, fitness or family"
 kind = "nl-category"
-informational = true
 query = "health, fitness or family"
 expect = ["Alex lives with a partner and a baby in Berlin"]
 
 [[case]]
 name = "nl-category: code organisation"
 kind = "nl-category"
-informational = true
 query = "anything about how I like my code organised"
 expect = [
     "User forbids barrel files and index.ts re-exports",
@@ -698,7 +690,6 @@ expect = [
 [[case]]
 name = "nl-category: database rules"
 kind = "nl-category"
-informational = true
 query = "rules about databases and queries"
 expect = ["Only parameterized queries are permitted for database operations"]
 
@@ -710,27 +701,23 @@ expect = ["Only parameterized queries are permitted for database operations"]
 [[case]]
 name = "negative: stopword soup"
 kind = "negative"
-informational = true
 expect_empty = true
 query = "what and or the for do"
 
 [[case]]
 name = "negative: shape of a question"
 kind = "negative"
-informational = true
 expect_empty = true
 query = "how do I do it"
 
 [[case]]
 name = "negative: hiking trails"
 kind = "negative"
-informational = true
 expect_empty = true
 query = "best hiking trails near the coast"
 
 [[case]]
 name = "negative: bouillabaisse"
 kind = "negative"
-informational = true
 expect_empty = true
 query = "french recipe for bouillabaisse"

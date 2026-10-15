@@ -1082,20 +1082,47 @@ mod tests {
     }
 
     #[test]
-    fn the_committed_old_baseline_still_deserialises() {
-        // Invariant I-5: `eval/baseline.json` predates mrr/latency/
-        // precision_at_1_by_kind, and `eval --baseline` must keep running.
-        let raw = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/baseline.json"),
-        )
-        .expect("eval/baseline.json should exist");
-
+    fn an_old_format_baseline_still_deserialises() {
+        // Invariant I-5 of reranking-plan.md, pinned *inline* now that
+        // Phase 2.5 re-recorded the committed baseline with the newer
+        // fields: a baseline predating mrr/latency/precision_at_1_by_kind
+        // must keep loading (the old committed file was exactly this
+        // shape — recall, precision, cases, by_kind — and operators keep
+        // older ones in the wild).
+        const OLD: &str = r##"{"recall_at_k":90.0,"precision_at_1":60.0,"cases":24,"by_kind":{"paraphrase":87.5}}"##;
         let baseline: Report =
-            serde_json::from_str(&raw).expect("the committed baseline must still deserialise");
+            serde_json::from_str(OLD).expect("an old-format baseline must still deserialise");
         assert!(baseline.recall_at_k > 0.0);
         assert_eq!(baseline.mrr, 0.0, "absent in an old baseline");
         assert_eq!(baseline.latency_ms_p50, 0.0);
         assert!(baseline.precision_at_1_by_kind.is_empty());
+        assert!(
+            baseline.embedder.is_empty(),
+            "the field postdates old baselines"
+        );
+    }
+
+    #[test]
+    fn the_committed_baseline_records_the_metrics_phase_2_added() {
+        // Phase 2.5 re-recorded `eval/baseline.json`; the DoD is that the
+        // p@1, MRR and latency fields are *populated*, so a future
+        // regression in any of them — not just recall — fails the gate.
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/baseline.json"),
+        )
+        .expect("eval/baseline.json should exist");
+        let baseline: Report =
+            serde_json::from_str(&raw).expect("the committed baseline must deserialise");
+        assert!(baseline.recall_at_k > 0.0);
+        assert!(baseline.precision_at_1 > 0.0);
+        assert!(baseline.mrr > 0.0, "re-recorded baselines carry MRR");
+        assert!(baseline.latency_ms_p50 > 0.0);
+        assert!(!baseline.precision_at_1_by_kind.is_empty());
+        assert!(!baseline.embedder.is_empty());
+        // Phase 2.5 also removed the informational flags, so the kinds
+        // that were reporting-only are in the gate now.
+        assert!(baseline.by_kind.contains_key("negative"));
+        assert!(baseline.by_kind.contains_key("nl-question"));
     }
 
     #[test]
@@ -1272,12 +1299,12 @@ mod tests {
             }
         }
 
-        // The Phase 0 regression kinds exist and are marked informational
-        // while they still fail (reranking-plan.md Phase 0.5). Phase 2
-        // fixes the defects, clears the flags, and this assertion clears
-        // with them — hence it asserts presence, not the absence of the
-        // flags, and additionally that every negative case exists with
-        // `expect_empty`.
+        // The Phase 0 regression kinds exist (reranking-plan.md
+        // Phase 0.3) and — since Phases 1–2 fixed the defects they were
+        // written to document — *none* of them carries the `informational`
+        // flag any more (Phase 2.5): every case in the file gates the
+        // baseline now, and this assertion is what stops a new
+        // "temporarily informational" flag from silently living forever.
         for kind in ["nl-question", "nl-category", "negative"] {
             let cases: Vec<&Case> = set.cases.iter().filter(|c| c.kind == kind).collect();
             assert!(
@@ -1285,10 +1312,15 @@ mod tests {
                 "the {kind} kind from reranking-plan.md Phase 0.3 is missing"
             );
             assert!(
-                cases.iter().all(|c| c.informational),
-                "{kind} cases fail on purpose until Phases 1–2 land; they must be informational"
+                cases.iter().all(|c| !c.informational),
+                "{kind} cases are gated since Phases 1–2 fixed their defects; a reappearing \
+                 informational flag needs the defect it hides to be recorded in §12 first"
             );
         }
+        assert!(
+            set.cases.iter().all(|c| !c.informational),
+            "no case in the committed set is informational after Phase 2.5"
+        );
         assert!(
             set.cases
                 .iter()
