@@ -512,10 +512,10 @@ proven with a deterministic fake. Zero behaviour change when absent.
 
 #### Definition of Done
 
-- [ ] `just check-native` passes; `just sdk-test` passes.
-- [ ] The identity test exists and passes.
-- [ ] `eval` numbers identical to Phase 3 (no reranker is wired yet) — recorded in §12.
-- [ ] Module docs in `recall_ranker.rs` describe both strategies and the weight calibration.
+- [x] `just check-native` passes; `just sdk-test` passes.
+- [x] The identity test exists and passes.
+- [x] `eval` numbers identical to Phase 3 (no reranker is wired yet) — recorded in §12.
+- [x] Module docs in `recall_ranker.rs` describe both strategies and the weight calibration.
 
 #### Expected state after this phase
 
@@ -1464,8 +1464,113 @@ candidate pool wide enough to lift the latter are what Phase 7.1 must add.
       the decision (above).
 - [x] If NO-GO: N/A — the decision is GO, Phases 4–8 proceed.
 
-### Phase 4 — contract
-- Identity test: _TBD_ · `eval` unchanged: _TBD_
+### Phase 4 — contract (`feat/rerank-contract`)
+
+Everything below exists exactly as specified — contract, fake, ranker
+strategies, recaller integration, additive surface — and *nothing* is wired:
+the default binary constructs no reranker and takes the pre-change code
+path, pinned by the identity test. `just check-native` passes (fmt, clippy
+`-D warnings`, boundary script, `cargo test`: **787 unit tests, +32**, all
+integration suites green), and `just sdk-test` passes end to end against a
+release-image daemon built with these changes.
+
+**Contract** (`memories/domain/reranker.rs`, exported from `domain`):
+`Reranker::score(&self, query, &[RerankCandidate]) -> Result<Vec<f32>>`,
+aligned-scores by position as the plan prescribes; `RerankMode
+{Off(default), Shadow, On}`. The module docs record why aligned-not-sorted,
+why the scale is model-specific, and why relevance stays untouched (I-4).
+
+**Ranker** (`recall_ranker.rs`): new general entry `rank_with_legs` (with an
+empty rerank list it is *the same code path* — `apply_rerank` returns before
+touching anything), `rank`/`rank_with_graph` unchanged as thin wrappers.
+`ScoredMemory.rerank_score: Option<f32>`, `MatchDetail.rerank_rank:
+Option<usize>` (keeps `Eq`). `RerankStrategy::{Rrf{weight}, Replace}` with
+`Rrf{1.0}` the un-tuned default; the module docs carry the calibration
+argument — one leg ≈ `1/61`, weight 1 can never overrule two-leg agreement
+(arithmetic, pinned by test), weight ≥ 2 can, the tuned range spans 0.5–4,
+and `Replace` bands raw scores by the existing `MULTIPLIER_FLOOR` band so
+recency/quality decide ties but cannot cross a 1.25× gap. Both strategies
+have unit tests (`rank_with_legs` is not wired yet, so `Replace`,
+`with_rerank_strategy`, `rank_with_legs`, `RerankMode::On` and the
+`RerankCandidate` fields carry documented `#[allow(dead_code)]`s until
+Phase 5 consumes them — the precedent is `shared/error.rs`).
+
+**Recaller**: `reranker: Option<Arc<dyn Reranker>>` + mode/depth/timeout via
+`with_reranker` (defaults mirror the planned `[rerank]` block: 30 / 400 ms;
+inert while no reranker). The leg runs **after fusion and after the floor,
+before truncation** — so filters and `min_relevance` always run first and
+the reranker only ever sees the head of what a client could get anyway.
+`rerank_leg()` mirrors `graph_leg()`: skips pools (or heads) under 2, warns
+and serves the pre-rerank order on error, deadline expiry, misaligned score
+counts, or a dead scoring thread. A non-zero deadline runs the synchronous
+`score` on a detached thread (`mpsc::recv_timeout`) so expiry doesn't wait
+for inference; Phase 5's semaphore bounds those server-side. Shadow mode
+logs the event **`rerank_shadow`** (`query_hash, depth, rerank_ms,
+top1_before, top1_after, changed, before, after`) — ids and a SHA-256
+prefix only; the test asserts the raw query and memory content appear
+*nowhere* in the captured fields. Two log-shape decisions were found the
+hard way and are worth repeating: tracing must be given `name:
+"rerank_shadow"` explicitly (an auto-named event's `name()` is the source
+location, which broke the first version of the test), and ids are logged by
+their **last** 8 chars — UUIDv7 heads encode the save timestamp, so
+memories saved in the same millisecond share the first 8.
+
+**Surface**: `matched.rerank_rank` / `matched.rerank_score` on the REST
+search response, `skip_serializing_if = Option::is_none` (old wire shape is
+the default and is asserted); `docs/api.md` documents both; the Python SDK
+adds the two optional fields with tests that a response *without* them
+parses to `None`. MCP has no match-detail output at all (tool results render
+content + relevance), so there was nothing to add there — recorded for
+Phase 6, whose audit CLI is where rerank scores reach an operator.
+
+#### eval — identical to Phase 3, both embedders
+
+`docker compose run --rm dev just eval-native` (bge-small, gated):
+
+```
+recall@5: 86.5%   precision@1: 64.9%   MRR: 74.1%   latency p50: 9.9 ms p95: 12.1 ms   (37 scored, 4 negative)
+baseline recall@5: 86.5%   now: 86.5%   change: -0.0 points
+baseline precision@1: 64.9%   now: 64.9%   change: -0.0 points
+baseline MRR: 74.1%   now: 74.1%   change: -0.0 points
+```
+
+(all `by_kind` lines identical to the Phase 3 record; abstention 100.0%.)
+
+`... eval --config recuerdos-ai.toml` (gemini-embedding-2):
+
+```
+recall@5: 83.8%   precision@1: 75.7%   MRR: 80.2%   latency p50: 321.2 ms p95: 412.5 ms   (37 scored, 4 negative)
+```
+
+— identical to Phase 3's Run 2 to the last digit (latency re-measured). No
+reranker is wired, as required.
+
+#### Identity and the rest of the test plan
+
+- **Identity (the anchor):** `an_absent_or_off_reranker_leaves_recall_byte_identical`
+  — no-reranker vs `Off`-with-one-loaded over a multi-result fixture,
+  fingerprinted by ids+order, the `f32` **bits** of `score` and `relevance`,
+  and the rerank fields; the loaded reranker's call counter stays 0.
+- `On` serves the rerank order exactly (reversing fake through `Replace`,
+  where inversion *is* the strategy's contract — pushing an exact inversion
+  through the weight-1 RRF leg would test the wrong thing, noted at the
+  test); `Shadow` fingerprints identical to the plain run *and* logs the
+  comparison once; failing / expired legs return the pre-rerank order with
+  a `warn!`; the deadline is also asserted in wall-clock (a 500 ms scorer
+  under a 20 ms deadline costs < 400 ms); zero-timeout inline scoring
+  reorders identically to the threaded path; pools/heads < 2 and empty
+  stores never call the reranker; `depth` beyond the pool clamps to it; the
+  category filter's rejects never reach the fake's `seen()`; `relevance`
+  bits unchanged in `On` mode and `min_relevance` still cuts.
+- Doubles for Phase 6: `FakeReranker` (token-overlap / reversing, with call
+  counters and `seen()`), `FailingReranker`, `SleepingReranker`.
+
+#### Phase 4 DoD
+
+- [x] `just check-native` passes; `just sdk-test` passes.
+- [x] The identity test exists and passes (`an_absent_or_off_reranker_leaves_recall_byte_identical`).
+- [x] `eval` numbers identical to Phase 3 (no reranker is wired yet) — recorded above.
+- [x] Module docs in `recall_ranker.rs` describe both strategies and the weight calibration.
 
 ### Phase 5 — adapter
 - Model size / idle RAM / loaded RAM / cold start: _TBD_ · `eval` with `mode=on`: _TBD_

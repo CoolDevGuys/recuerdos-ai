@@ -268,6 +268,32 @@ def test_a_leg_that_did_not_match_reads_as_none_not_zero() -> None:
     assert ra.search("imports")[0].matched.bm25_rank is None
 
 
+def test_a_reranked_hit_carries_the_second_stage_fields() -> None:
+    # ``[rerank].mode = "on"`` is the only server setting that emits
+    # these fields; the score is on the model's scale, not ``relevance``.
+    hit_body = {
+        **MEMORY,
+        "score": 0.03,
+        "matched": {"vector_rank": 3, "rerank_rank": 1, "rerank_score": 0.97},
+    }
+    ra = client_for(responding(200, {"results": [hit_body]}))
+
+    hit = ra.search("imports")[0]
+    assert hit.matched.rerank_rank == 1
+    assert hit.matched.rerank_score == pytest.approx(0.97)
+
+
+def test_an_unreranked_result_reads_the_second_stage_as_none() -> None:
+    # Default server config has no reranker: an older client (and this
+    # SDK) sees exactly the fields it always had, and no null surprises.
+    hit_body = {**MEMORY, "score": 0.01, "matched": {"vector_rank": 1}}
+    ra = client_for(responding(200, {"results": [hit_body]}))
+
+    hit = ra.search("imports")[0]
+    assert hit.matched.rerank_rank is None
+    assert hit.matched.rerank_score is None
+
+
 def test_unknown_response_fields_are_tolerated() -> None:
     # A client pinned to an older SDK must keep working against a newer
     # server, or adding a response field breaks everyone who has not
