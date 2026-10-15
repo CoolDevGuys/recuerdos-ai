@@ -43,17 +43,17 @@ use std::sync::Arc;
 const K: i64 = 5;
 
 #[derive(Debug, Deserialize)]
-struct EvalSet {
+pub(crate) struct EvalSet {
     #[serde(default, rename = "memory")]
-    memories: Vec<SeedMemory>,
+    pub(crate) memories: Vec<SeedMemory>,
     #[serde(default, rename = "case")]
-    cases: Vec<Case>,
+    pub(crate) cases: Vec<Case>,
 }
 
 #[derive(Debug, Deserialize)]
-struct SeedMemory {
-    content: String,
-    category: String,
+pub(crate) struct SeedMemory {
+    pub(crate) content: String,
+    pub(crate) category: String,
     #[serde(default)]
     subcategory: Option<String>,
     #[serde(default)]
@@ -91,12 +91,12 @@ struct SeedRelation {
 }
 
 #[derive(Debug, Deserialize)]
-struct Case {
-    name: String,
-    kind: String,
-    query: String,
+pub(crate) struct Case {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) query: String,
     #[serde(default)]
-    expect: Vec<String>,
+    pub(crate) expect: Vec<String>,
     #[serde(default)]
     categories: Vec<String>,
     #[serde(default)]
@@ -110,7 +110,7 @@ struct Case {
     /// the scored kinds, these cases *do* apply the floor — they measure
     /// exactly what an agent-facing read would show, floor included.
     #[serde(default)]
-    expect_empty: bool,
+    pub(crate) expect_empty: bool,
     /// Reported everywhere but excluded from the numbers a committed
     /// baseline gates against, so a deliberately-failing regression case
     /// (reranking-plan.md Phase 0.5: `nl-*` and `negative` before the fix)

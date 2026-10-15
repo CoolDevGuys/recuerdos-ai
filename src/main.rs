@@ -82,6 +82,24 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Report the relevance calibration of the configured embedder.
+    ///
+    /// Hidden, like `eval`: an operator/dev measurement, not a service.
+    /// Embeds the eval set's corpus and cases with the embedder in `--config`
+    /// and reports the two numbers the relevance floor has to sit inside —
+    /// the **noise ceiling** (max cosine of the `negative` queries against
+    /// the corpus) and the **signal floor** (min cosine of each case's
+    /// expected memory). Read them to set `[retrieval].similarity_baseline`
+    /// when adding an embedding model; the map in
+    /// `memories/domain/recall_ranker.rs` is populated from runs like this
+    /// (reranking-plan.md Phase 2.1).
+    #[command(hide = true)]
+    Calibrate {
+        #[arg(long, default_value = "eval/cases.toml")]
+        cases: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Rebuild derived indexes from the `memories` table.
     ///
     /// With no flags this is the vector reindex: re-embed every memory
@@ -185,6 +203,7 @@ async fn main() {
             config.as_deref(),
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
+        Command::Calibrate { cases, config } => run_calibrate(&cases, config.as_deref()),
         Command::Reindex {
             text,
             vectors,
@@ -535,6 +554,14 @@ fn run_eval(
         return bootstrap::eval::compare(&report, path, max_drop).map_err(|e| e.to_string());
     }
     Ok(())
+}
+
+fn run_calibrate(cases: &Path, config_path: Option<&Path>) -> Result<(), String> {
+    // Same config semantics as `eval`: `--config` decides *which* embedder
+    // is measured, so production's model (and its `[retrieval]` numbers)
+    // are what the report describes (reranking-plan.md Phase 2.1).
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    bootstrap::calibrate::run(cases, &config).map_err(|e| e.to_string())
 }
 
 fn run_warm_models(config_path: Option<&Path>) -> Result<(), String> {
