@@ -176,6 +176,14 @@ them would change what it reorders), and no rerank deadline (measuring what
 the model costs is half the point — the configured `timeout_ms` is printed
 beside the percentiles it has to contain).
 
+And one thing the report now says out loud. Where the stage did not contribute
+to a query — the model failed, or `--depth 1` left no head two candidates wide
+— the summary opens with how many queries it actually reranked. A run where the
+stage did nothing used to look exactly like a run where reranking agreed with
+fusion, and "no disagreements found" is precisely the wrong conclusion to draw
+from that. On the live surface the same fact is visible per request as
+`rerank.state` ([api.md](api.md)).
+
 `--json` emits the same run as ids, ranks and scores, with no memory content —
 so a report can be committed or pasted into an issue without carrying anyone's
 memories with it.
