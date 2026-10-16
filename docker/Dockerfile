@@ -30,10 +30,12 @@ RUN cargo build --release
 # no `[rerank]` config, so the default image carries no rerank model —
 # `mode = off` means no download, no resident weights, no image growth.
 # A deployment that wants the second stage baked in passes
-# `--build-arg RERANK_MODEL=jina-reranker-v1-turbo-en` (~300 MB added
-# to the image, and roughly that again in RSS per `max_concurrency`
+# `--build-arg RERANK_MODEL=bge-reranker-base` (the tuned default: ~1.1 GB
+# of weights added to the image, and ~1.5 GiB of RSS per `max_concurrency`
 # session once serving); with an empty arg the step is exactly what it
-# always was.
+# always was. Bake it rather than let the container download it: `/models`
+# is an image directory, not a volume, so an unbaked model is re-fetched on
+# every container recreate and fails outright with no network.
 ARG RERANK_MODEL=
 RUN if [ -n "$RERANK_MODEL" ]; then \
       RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
