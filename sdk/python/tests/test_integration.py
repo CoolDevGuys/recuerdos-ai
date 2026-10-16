@@ -82,6 +82,46 @@ def test_search_filters_narrow_rather_than_widen(ra: Client, tag: str) -> None:
     assert all(hit.category == "fact.project" for hit in only_facts)
 
 
+def test_search_report_agrees_with_the_server_about_floor_and_stage(
+    ra: Client, tag: str
+) -> None:
+    # A mock built from the same reading of the docs as the client agrees with
+    # itself forever. This is the check that the top level of a real response
+    # parses into the fields the SDK promises — and it earns its keep here,
+    # because the floor the server reports is not always the configured
+    # default, which a unit test has no way to find out.
+    ra.save_direct(
+        "User prefers pnpm over npm for JavaScript packages",
+        category="preference.coding",
+        tags=[tag],
+    )
+
+    prose = ra.search_report("package manager", limit=5)
+    assert prose.took_ms >= 0
+    assert prose.min_relevance == pytest.approx(0.25), (
+        "the daemon's default floor should be what the SDK reports back"
+    )
+
+    # A request that names a tag has already said what it wants in the store's
+    # own vocabulary, so the daemon lifts the floor rather than turning "what
+    # have I stored about X?" into an empty answer over poor wording. The SDK
+    # reports what the server said, not what the default happens to be.
+    filtered = ra.search_report("package manager", tags=[tag], limit=5)
+    assert filtered.min_relevance == pytest.approx(0.0)
+    assert len(filtered.hits) >= 1
+
+    # This daemon runs `[rerank].mode = "off"`, so the honest answer is
+    # absence: not `applied`, and not a model that invented a state.
+    assert prose.rerank is None
+    assert filtered.rerank is None
+
+    # 0.0 is a value with a meaning ("show me the near-misses"), so it must
+    # reach the wire on a prose search too, where it changes what comes back.
+    everything = ra.search_report("package manager", limit=5, min_relevance=0.0)
+    assert everything.min_relevance == pytest.approx(0.0)
+    assert len(everything.hits) >= len(prose.hits)
+
+
 def test_a_memory_can_be_edited_and_forgotten(ra: Client, tag: str) -> None:
     saved = ra.save_direct("original wording", category="reference", tags=[tag])
 

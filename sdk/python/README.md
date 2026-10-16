@@ -128,6 +128,12 @@ except RecuerdosError as error:
   `asyncio.to_thread`.
 - **A key is a user.** There is no user parameter anywhere — two users
   means two clients.
+- **`search_report()` is `search()` plus the top level of the response**:
+  the relevance floor that produced the list, the server's own `took_ms`, and
+  what an enabled rerank stage did — `applied`, `shadow`, `not_needed`, or
+  `skipped` with a reason. A stage that misses `[rerank].timeout_ms` serves
+  the pre-rerank order on purpose, and this is how a client can tell that
+  apart from the feature being off.
 - **Unknown response fields are ignored**, so an older SDK keeps working
   against a newer daemon.
 

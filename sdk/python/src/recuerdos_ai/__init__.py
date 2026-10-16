@@ -26,9 +26,22 @@ from .errors import (
     TimeoutError_,
     ValidationError,
 )
-from .models import Distillation, Job, JobStatus, MatchDetail, Memory, SearchHit
+from .models import (
+    Distillation,
+    Job,
+    JobStatus,
+    MatchDetail,
+    Memory,
+    RerankApplied,
+    RerankNotNeeded,
+    RerankShadow,
+    RerankSkipped,
+    RerankStatus,
+    SearchHit,
+    SearchReport,
+)
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -44,7 +57,13 @@ __all__ = [
     "NotFoundError",
     "PermissionError_",
     "RecuerdosError",
+    "RerankApplied",
+    "RerankNotNeeded",
+    "RerankSkipped",
+    "RerankShadow",
+    "RerankStatus",
     "SearchHit",
+    "SearchReport",
     "ServerError",
     "TimeoutError_",
     "ValidationError",

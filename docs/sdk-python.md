@@ -144,7 +144,43 @@ result appeared).
 leg found the result, so a surprising ranking can be explained rather
 than merely distrusted. `as_of` (a `datetime`) reads the graph hop in
 *valid* time — "who owned this before the reorg?" — leaving the vector and
-keyword legs untouched.
+keyword legs untouched. `min_relevance` overrides the daemon's floor for
+this one query: pass `0.0` to see the near-misses, a higher number when the
+surface has a cost to being wrong.
+
+### `search_report(query, *, limit, categories, tags, since, as_of, min_relevance, include_superseded) -> SearchReport`
+
+The same request, keeping the parts of the response that are not about any
+one hit:
+
+```python
+report = ra.search_report("which package manager?", limit=5)
+print(len(report.hits), report.took_ms, report.min_relevance, report.rerank)
+```
+
+| Field | Why it earns a variable |
+|---|---|
+| `hits` | What `search()` returns |
+| `took_ms` | The server's own timing, so a slow call can be told apart from a slow network on the way to it |
+| `min_relevance` | The floor that produced the list. An empty list at a floor above `0.0` means "nothing cleared it", not "nothing matched" — which is exactly what a retry at `min_relevance=0.0` turns on. A request that names a `category` or `tag` reports `0.0` unless you pass one yourself: filtering in the store's own vocabulary is already a statement of what you want, so the daemon does not let weak wording empty the answer |
+| `rerank` | What the optional second stage did, or `None` when there is no stage |
+
+`rerank` is the reason the method exists. A reranker that misses
+`[rerank].timeout_ms` serves the pre-rerank order **by design** — the second
+stage may cost milliseconds and must never cost a request — and before the
+server reported it, that was indistinguishable from `mode = "off"`. It is a
+small union keyed on `state`:
+
+| `rerank.state` | Means |
+|---|---|
+| `applied` | Judged `judged` candidates in `took_ms`, and its order is the list above |
+| `shadow` | Judged them and logged what it *would* have served; `changed` says whether the top result would have moved |
+| `not_needed` | Fewer than two candidates cleared the floor, so there was nothing to reorder |
+| `skipped` | Configured, and did not contribute: `reason` is `deadline` (raise `timeout_ms`, or lower `[rerank].depth`) or `model` |
+
+A server older than 0.4.2 never sends the key, which reads as `None` — the
+same as `mode = "off"`, and correct, because to those servers the stage really
+is invisible.
 
 ### `get(memory_id) -> Memory`
 
