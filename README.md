@@ -22,8 +22,8 @@ returning both.
                     ┌───────────────┐
 Claude Code ─MCP──▶ │               │  extract → reconcile → store
 opencode ────MCP──▶ │  Recuerdos AI │  recall: vector + BM25 + graph, fused
-Hermes ─────REST──▶ │     daemon    │  nightly: merge, decay, expire
-LangChain ──SDK───▶ │               │
+Hermes ─────REST──▶ │     daemon    │            + optional cross-encoder
+LangChain ──SDK───▶ │               │  nightly: merge, decay, expire
                     └───────────────┘
                        SQLite + local ONNX embeddings
                        no external services required
@@ -33,6 +33,7 @@ LangChain ──SDK───▶ │               │
 - 🧩 **Any agent, any LLM** — REST + MCP, provider-agnostic, one shared memory.
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
 - 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. On by default.
+- 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model; off by default, and `rerank audit` judges it on your store before you turn it on.
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
 ---
@@ -331,6 +332,7 @@ It recalls the preference without being told. ✨
 |---|---|
 | **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25) + a graph hop, fused by reciprocal rank. Paraphrases, exact identifiers, *and* connections. |
 | **Relational recall** | A third leg walks an entity/relation graph, so "who owns the billing service's data?" reaches the memory naming the database — no shared words needed. Bi-temporal, so you can ask what was true *before* a change. On by default; the eval put relational recall@5 at 85.7% (vs 71.4% without it). |
+| **Optional rerank** | A local cross-encoder re-scores the head of the fused list, reading query and memory jointly — the only stage that ever looks at both at once. Opt-in (`[rerank]`): the eval measured +5.8 precision@1 and +2.7 MRR, at 1.1 GB of weights and ~70 ms. Judge it on your own data first: `recuerdos-ai rerank audit`. |
 | **Understands what it stores** | Raw text in, atomic labelled memories out. One sentence with two unrelated facts becomes two separately recallable memories. |
 | **Resolves contradictions** | "We moved to Hetzner" supersedes "we deploy on Fly.io" — the old one is retained for audit, gone from recall. |
 | **Session distillation** | Hand over a finished session; keep the two or three things that outlive it. |
@@ -355,6 +357,13 @@ for methodology, hardware and the raw numbers.
 Ingest acknowledgement is 4.5 ms at p95 and stays flat at 100k — the
 pipeline runs off the request path. Cold start is ~300 ms; idle RSS is
 ~190 MiB, most of it the resident ONNX model.
+
+These are the numbers for the recall that ships on by default. The
+optional second stage adds its own: with a cross-encoder on, budget
+~+59 ms p50 / +71 ms p95 per recall and ~1.5 GiB more RAM (its
+`timeout_ms` drops the stage and serves the fused order, so a slow
+reranker costs latency, never a failed request). See
+[docs/configuration.md](docs/configuration.md).
 
 Recall is flat from 2k to 20k, so at the scale anyone actually reaches it
 is effectively instant. It rises to 83 ms at 100k, which **misses the
@@ -483,6 +492,13 @@ cleanly across every phase.
 entity/relation graph that recall hops over as a third leg, on by default
 (the eval put relational recall@5 at 85.7%, up from 71.4% without it). See
 the [CHANGELOG](docs/CHANGELOG.md#v020--graph-strategy-b-relational-recall).
+
+**Shipped in `v0.4.0`:** the recall-quality release. The keyword leg
+stopped matching stopwords, and the relevance scale is now calibrated per
+embedding model instead of assuming one. Plus an *optional* second stage —
+a local cross-encoder that reads query and memory together, opt-in because
+it costs 1.1 GB and ~70 ms for the +5.8 precision@1 it earned. See the
+[CHANGELOG](docs/CHANGELOG.md#v040--recall-quality-and-an-optional-cross-encoder-reranker).
 
 **On the roadmap:** a web dashboard, Postgres/Qdrant storage backends, and
 user-visible collections/workspaces. See
