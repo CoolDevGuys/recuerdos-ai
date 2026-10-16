@@ -12,11 +12,24 @@ response field is a breaking change for everyone who has not upgraded.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-__all__ = ["Memory", "MatchDetail", "SearchHit", "Job", "Distillation", "JobStatus"]
+__all__ = [
+    "Memory",
+    "MatchDetail",
+    "SearchHit",
+    "SearchReport",
+    "RerankStatus",
+    "RerankApplied",
+    "RerankShadow",
+    "RerankNotNeeded",
+    "RerankSkipped",
+    "Job",
+    "Distillation",
+    "JobStatus",
+]
 
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
 
@@ -74,6 +87,90 @@ class SearchHit(Memory):
 
     score: float = 0.0
     matched: MatchDetail = Field(default_factory=MatchDetail)
+
+
+class RerankApplied(_Model):
+    """The second stage judged the head, and its order is the one you got.
+
+    ``judged`` is how many candidates it scored — the head, not the list you
+    received, which is usually shorter.
+    """
+
+    state: Literal["applied"]
+    judged: int
+    took_ms: int
+
+
+class RerankShadow(_Model):
+    """It judged the head and logged what it *would* have served.
+
+    ``mode = "shadow"`` exists to be measured, so ``changed`` is the useful
+    bit: whether the top result would have moved. It did not — you are reading
+    the pre-rerank order.
+    """
+
+    state: Literal["shadow"]
+    judged: int
+    changed: bool
+    took_ms: int
+
+
+class RerankNotNeeded(_Model):
+    """Nothing to reorder: fewer than two candidates cleared the floor.
+
+    A fact about the query and the store, not a malfunction. It is reported
+    rather than left silent because a head of one is also what a too-high
+    ``min_relevance`` looks like from here.
+    """
+
+    state: Literal["not_needed"]
+    candidates: int
+
+
+class RerankSkipped(_Model):
+    """A configured stage that did not contribute to this search.
+
+    The results above are the pre-rerank order — which is the intended
+    behaviour, since the second stage may cost milliseconds and must never
+    cost a request. It is visible because the alternative was ``mode = "on"``
+    being indistinguishable from ``mode = "off"``: on a machine slower than
+    the one that sized ``[rerank].timeout_ms``, every query can lose the stage.
+
+    ``reason`` says what to do about it: ``deadline`` is raised (or
+    ``[rerank].depth`` lowered), ``model`` is neither.
+    """
+
+    state: Literal["skipped"]
+    reason: Literal["deadline", "model"]
+    candidates: int
+    took_ms: int
+
+
+RerankStatus = Annotated[
+    RerankApplied | RerankShadow | RerankNotNeeded | RerankSkipped,
+    Field(discriminator="state"),
+]
+
+
+class SearchReport(_Model):
+    """One search, with the facts the response carries above the results.
+
+    ``search()`` returns the hits and drops these. That is the right default
+    for a caller who only wants memories, and wrong for two others: anyone
+    deciding whether an empty list means "nothing stored" or "nothing cleared
+    the floor" needs ``min_relevance``, and anyone who enabled the reranker
+    needs ``rerank`` to know whether it ran.
+    """
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    took_ms: int = 0
+    #: The relevance floor that produced ``hits``. An empty list with a floor
+    #: above ``0.0`` is "nothing cleared it", which is a different fact from
+    #: "nothing matched" and is what a retry at ``min_relevance=0.0`` turns on.
+    min_relevance: float = 0.0
+    #: Absent (`None`) when the server has no second stage configured, which
+    #: includes every server older than 0.4.2.
+    rerank: RerankStatus | None = None
 
 
 class Job(_Model):

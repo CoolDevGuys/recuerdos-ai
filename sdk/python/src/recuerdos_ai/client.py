@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 
 from .errors import JobFailedError, RecuerdosError, TimeoutError_, from_response
-from .models import Distillation, Job, Memory, SearchHit
+from .models import Distillation, Job, Memory, SearchHit, SearchReport
 
 __all__ = ["Client"]
 
@@ -243,6 +243,7 @@ class Client:
         tags: list[str] | None = None,
         since: datetime | None = None,
         as_of: datetime | None = None,
+        min_relevance: float | None = None,
         include_superseded: bool = False,
     ) -> list[SearchHit]:
         """Hybrid recall: semantic, keyword, and a graph hop, fused by
@@ -257,7 +258,12 @@ class Client:
         carries a ``graph_rank`` when that is why a result appeared.
 
         An empty result means nothing is stored on the subject, not that
-        the user has no opinion.
+        the user has no opinion. If the server has a relevance floor, an
+        empty list can also mean "nothing cleared it" — the two are told
+        apart by ``min_relevance`` on the response, which this method does
+        not return. Use [`search_report`][`SearchReport`] when that
+        distinction changes what you do next, or when you need to know
+        whether an enabled rerank stage actually ran.
 
         Args:
             query: 1–1000 characters.
@@ -268,7 +274,53 @@ class Client:
             as_of: Reads the graph hop as of this instant in *valid* time —
                 "who owned this before the reorg?". Only the graph leg is
                 affected; omit for the current view.
+            min_relevance: Overrides the daemon's floor for this query. The
+                server default suits a human reading results; a surface with
+                a cost to being wrong supplies a higher one, and a caller
+                determined to see the near-misses passes ``0.0``.
             include_superseded: Include memories a later one replaced.
+        """
+        return self.search_report(
+            query,
+            limit=limit,
+            categories=categories,
+            tags=tags,
+            since=since,
+            as_of=as_of,
+            min_relevance=min_relevance,
+            include_superseded=include_superseded,
+        ).hits
+
+    def search_report(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        categories: list[str] | None = None,
+        tags: list[str] | None = None,
+        since: datetime | None = None,
+        as_of: datetime | None = None,
+        min_relevance: float | None = None,
+        include_superseded: bool = False,
+    ) -> SearchReport:
+        """[`search`][`Client.search`], plus what the response says above the results.
+
+        Three facts live at the top level of a search response and are not
+        properties of any hit:
+
+        * ``min_relevance`` — the floor that produced the list. An empty list
+          with a floor above ``0.0`` means "nothing cleared it", which is a
+          different fact from "nothing matched at all" and is what decides
+          between giving up and retrying at ``min_relevance=0.0``.
+        * ``took_ms`` — the server's own timing, so a slow call can be told
+          apart from a slow network on the way to it.
+        * ``rerank`` — what the optional second stage did, when one is
+          configured: ``applied``, ``shadow``, ``not_needed``, or ``skipped``
+          with a reason. It is here because a stage that misses
+          ``[rerank].timeout_ms`` serves the pre-rerank order *by design*,
+          which from a client's side looked exactly like the feature being
+          off until the field existed. ``None`` means there is no stage
+          (``mode = "off"``), including any server older than 0.4.2.
         """
         body: dict[str, Any] = {"query": query}
         if limit is not None:
@@ -281,12 +333,21 @@ class Client:
             body["since"] = since.isoformat()
         if as_of is not None:
             body["as_of"] = as_of.isoformat()
+        if min_relevance is not None:
+            body["min_relevance"] = min_relevance
         if include_superseded:
             body["include_superseded"] = True
 
         payload = self._request("POST", "/v1/memories/search", json=body)
-        results = payload.get("results", []) if isinstance(payload, dict) else []
-        return [SearchHit.model_validate(hit) for hit in results]
+        if not isinstance(payload, dict):
+            return SearchReport()
+        results = payload.get("results", [])
+        return SearchReport(
+            hits=[SearchHit.model_validate(hit) for hit in results],
+            took_ms=payload.get("took_ms", 0),
+            min_relevance=payload.get("min_relevance", 0.0),
+            rerank=payload.get("rerank"),
+        )
 
     def get(self, memory_id: str) -> Memory:
         """One memory by id.

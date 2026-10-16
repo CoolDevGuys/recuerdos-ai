@@ -8,6 +8,7 @@ The integration suite covers whether the two actually agree.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 import httpx
 import pytest
 
+import recuerdos_ai
 from recuerdos_ai import (
     AuthenticationError,
     Client,
@@ -22,6 +24,7 @@ from recuerdos_ai import (
     NotFoundError,
     PermissionError_,
     RecuerdosError,
+    RerankSkipped,
     ServerError,
     TimeoutError_,
     ValidationError,
@@ -241,6 +244,24 @@ def test_as_of_reaches_the_wire_for_time_travel_recall() -> None:
     assert bodies[0]["as_of"].startswith("2026-01-01")
 
 
+def test_min_relevance_reaches_the_wire_and_is_omitted_when_unset() -> None:
+    # 0.0 is a real value with a meaning ("show me the near-misses"), so it
+    # must travel; the default must not, or the client would be silently
+    # overriding the daemon's own floor.
+    bodies: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    ra = client_for(handler)
+    ra.search("anything", min_relevance=0.0)
+    ra.search("anything")
+
+    assert bodies[0]["min_relevance"] == 0.0
+    assert "min_relevance" not in bodies[1]
+
+
 # --- models ----------------------------------------------------------
 
 
@@ -292,6 +313,95 @@ def test_an_unreranked_result_reads_the_second_stage_as_none() -> None:
     hit = ra.search("imports")[0]
     assert hit.matched.rerank_rank is None
     assert hit.matched.rerank_score is None
+
+
+# --- the second stage, and what else the response says --------------
+
+
+def test_a_search_report_carries_what_is_not_about_any_hit() -> None:
+    ra = client_for(
+        responding(
+            200,
+            {
+                "results": [{**MEMORY, "score": 0.9}],
+                "took_ms": 27,
+                "min_relevance": 0.25,
+                "rerank": {"state": "applied", "judged": 10, "took_ms": 71},
+            },
+        )
+    )
+
+    report = ra.search_report("imports")
+
+    assert report.took_ms == 27
+    assert report.min_relevance == 0.25
+    assert report.hits[0].content == "User prefers pnpm"
+    assert report.rerank is not None
+    assert report.rerank.state == "applied"
+    # `state` is a discriminator, so the fields that belong to one state are
+    # reachable without the caller narrowing anything.
+    assert report.rerank.judged == 10
+
+
+def test_a_second_stage_that_was_dropped_is_named_rather_than_guessed() -> None:
+    # The reason the field exists: `mode = "on"` on a machine that cannot meet
+    # its deadline used to be indistinguishable from `mode = "off"`.
+    ra = client_for(
+        responding(
+            200,
+            {
+                "results": [],
+                "took_ms": 258,
+                "min_relevance": 0.25,
+                "rerank": {
+                    "state": "skipped",
+                    "reason": "deadline",
+                    "candidates": 10,
+                    "took_ms": 251,
+                },
+            },
+        )
+    )
+
+    status = ra.search_report("imports").rerank
+
+    assert isinstance(status, RerankSkipped)
+    assert status.reason == "deadline"
+    assert status.candidates == 10
+
+
+def test_no_second_stage_reads_as_absent_rather_than_as_failure() -> None:
+    # `mode = "off"`, and every server older than 0.4.2: the key is not there.
+    ra = client_for(
+        responding(200, {"results": [], "took_ms": 4, "min_relevance": 0.25})
+    )
+
+    assert ra.search_report("imports").rerank is None
+
+
+def test_every_rerank_state_the_server_can_report_parses() -> None:
+    for payload in [
+        {"state": "applied", "judged": 3, "took_ms": 12},
+        {"state": "shadow", "judged": 6, "changed": True, "took_ms": 180},
+        {"state": "not_needed", "candidates": 1},
+        {"state": "skipped", "reason": "model", "candidates": 10, "took_ms": 4},
+    ]:
+        ra = client_for(responding(200, {"results": [], "rerank": payload}))
+
+        status = ra.search_report("imports").rerank
+
+        assert status is not None, payload
+        assert status.state == payload["state"]
+
+
+def test_search_still_returns_only_the_hits() -> None:
+    # `search()` is `search_report().hits` now: a delegation, not a change of
+    # shape for the callers who only ever wanted memories.
+    ra = client_for(
+        responding(200, {"results": [{**MEMORY, "score": 0.9}], "took_ms": 1})
+    )
+
+    assert [hit.content for hit in ra.search("imports")] == ["User prefers pnpm"]
 
 
 def test_unknown_response_fields_are_tolerated() -> None:
@@ -428,3 +538,15 @@ def test_a_trailing_slash_in_the_base_url_does_not_double_up() -> None:
     ).search("anything")
 
     assert seen[0] == "http://daemon:7070/v1/memories/search"
+
+
+# --- the package itself -----------------------------------------------
+
+
+def test_the_version_a_caller_can_read_is_the_version_installed() -> None:
+    # `recuerdos_ai.__version__` sat at 0.2.0 through two releases whose
+    # packaging metadata said 0.3.0. Whatever a caller quotes when reporting a
+    # bug has to be what they are actually running, so it is pinned to the
+    # installed distribution instead of to a second copy of the truth that
+    # nobody updates.
+    assert recuerdos_ai.__version__ == importlib.metadata.version("recuerdos-ai")
