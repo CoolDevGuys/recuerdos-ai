@@ -280,6 +280,13 @@ in `src/memories/domain/recall_ranker.rs`.
 `default_limit` applies when a search omits `limit`; requests are capped
 at 50 regardless.
 
+There is also an optional second stage, `[rerank]` (documented in
+`recuerdos-ai.example.toml`): a local cross-encoder that re-scores the head of
+the fused list. It is off by default, and `recuerdos-ai rerank audit` is how
+you judge it on your own store before turning it on — a read-only replay that
+runs *without* `min_relevance`, so it shows you the near-misses your clients
+would never see ([`docs/evaluation.md`](evaluation.md)).
+
 ## Storage
 
 ```toml

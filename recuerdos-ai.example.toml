@@ -219,6 +219,16 @@ max_concurrency = 2
 # Candidates per forward pass (the forward pass pads to the longest
 # pair in the batch, so smaller batches keep the padding short).
 batch_size = 16
+# Judging this before trusting it, on your own data:
+#   recuerdos-ai rerank audit --queries <file>
+# replays your queries over your store twice — with and without the stage —
+# and prints both orderings, how often the head moved and what it cost. It
+# writes nothing and works while the daemon runs, so it is also how a store
+# that already has memories is evaluated; there is deliberately no command
+# that stamps rerank scores onto stored memories. In "shadow" mode each recall
+# logs one `rerank_shadow` line (ids and ranks, never content): the
+# disagreement rate is how many of those say changed=true. Both are written up
+# in docs/evaluation.md.
 
 # Results scoring below this relevance are dropped rather than returned.
 # Relevance is measured from what the indexes matched — not from where a

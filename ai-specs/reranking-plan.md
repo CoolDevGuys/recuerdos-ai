@@ -1645,7 +1645,186 @@ reversing fake — `on` + `replace` serves the exact reversed head and
 `depth = 2` bounds it to a top-two swap.
 
 ### Phase 6 — audit and shadow
-- `rerank audit` output: _TBD_ · shadow disagreement rate + latency: _TBD_
+
+#### Reading without leaving a mark (6.1)
+
+`MemoryRecaller::execute_untracked` is the same pipeline with `touch_accessed`
+skipped: identical candidates, fusion, rerank leg, floor and order, no write
+behind it. `ExecuteOptions { track_access }` defaults to `true` and every
+client-facing path still calls `execute`, so forgetting the option cannot
+switch decay off by accident — the untracked path is opt-in and has exactly two
+callers, the audit and `eval` (both its warmup and `score`). A clone of the
+recaller is cheap (every field is an `Arc`), which is how the audit gets its
+two pipelines: `with_second_stage(None, Off)` and
+`with_second_stage(Some(reranker), On)` over **one** set of indexes, so the two
+columns cannot differ by anything but the stage being judged.
+
+The keyword index opens through `TantivyTextIndex::open_read_only`: no
+`IndexWriter` is ever created, so tantivy's per-directory writer lock stays
+with whoever holds it, and every mutation path returns
+"the keyword index is open read-only, so it cannot be written" instead of
+writing. It is *not* `Database::open_read_only` — that variant takes
+`META_LOCK`, which a writer holds across `wait_merger_threads()`, so a reader
+opening that way could block for the length of a merge. `search` on the
+plain `MmapDirectory` only takes the short per-read lock and never the writer
+lock, which is what makes the daemon-running case work. A user with no keyword
+index is a refusal naming `reindex --text`, not a silently vector-only audit.
+
+SQLite is opened the normal way (migrations are no-ops on an existing store);
+purity is carried by "the audit never issues a write" plus the test, which is
+what the plan allows ("read-only (or never writes)").
+
+#### `rerank audit` (6.2)
+
+Hidden subcommand, `eval`/`calibrate` pattern:
+`rerank audit --queries <file> [--user <handle>] [--limit 8] [--depth N] [--config <path>] [--json]`.
+Query file is sniffed: plain lines (`#` comments allowed) or `[[query]]` blocks
+with `text` and optional `expect` — a case-insensitive **substring** of the
+memory that should win, because an operator typing about memories they wrote
+months ago will not paste them. `--user` follows the background jobs'
+enumeration (`UserRepository::list` + `BackgroundUserResolver`) and refuses to
+guess when several users exist; an unknown handle lists the real ones.
+
+It loads `[rerank].model` **regardless of `mode`** — judging a feature whose
+honest config answer is still `off` is the point — while strategy, weight and
+depth come from the config, so the `after` column is what enabling it would
+serve. Two disclosed departures from a live request, printed in the header: no
+relevance floor (near-misses are the subject; flooring before the reranker
+would change what it reorders) and no rerank deadline (measuring what the model
+costs is half the job; `timeout_ms` is printed beside the percentiles it must
+contain). Latency is metered around the `Reranker` boundary, not around the
+recall call, because a recall also embeds the query and on the local model that
+is the larger half. `--json` carries ids, ranks, scores and the judged
+candidate range, and **no memory content**, so a run can be committed or
+pasted; content is terminal-only.
+
+Tests: untracked recall orders identically to tracked and stamps nothing
+(in-memory repository) while still running the second stage; `with_second_stage`
+shares everything else; the read-only keyword handle reads what a still-open
+writer committed, refuses all three mutations, and names the repair when there
+is nothing to read; and the audit over a seeded store asserts the reversed
+`after` column exactly, the `--json` shape (including that memory text is
+absent), the top-1 flag, the summary arithmetic to the third decimal, user
+isolation, `--user` required with several users, unknown user, empty query file,
+both query-file formats, and — the phase's own requirement — that the
+`memories` rows including `access_count`, `last_accessed_at` and `importance`
+are identical after two consecutive audits.
+
+#### Rehearsal on a copy of a real store
+
+**This environment has no live store.** What exists is the Phase 2/3 rehearsal
+store: **7 memories** (the eval corpus), `gemini-embedding-2`, keyword index
+`v2`. The DoD asks for a copy of the real data directory; this is the copy of
+the only store here, and the numbers below must be read as a *smoke test of the
+command*, not as evidence about the deployment.
+
+Against a copy (`ra-audit-store`), with the daemon serving that copy and the
+real `jina-reranker-v1-turbo-en`, `--limit 5`, depth left at the configured 30,
+15 queries — §1's four plus eleven operator phrasings, 12 of them with
+`expect`:
+
+| run | state | top-1 changed | mean rank disp. | rerank p50 / p95 | p@1 before → after | MRR before → after |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | daemon serving the copy | 0/15 (0.0%) | 0.60 | 13 ms / 30 ms | 91.7% → 91.7% | 93.8% → 93.8% |
+| 2 | daemon **holding the keyword writer lock** | 2/15 (13.3%) | 0.65 | 13 ms / 26 ms | 91.7% → **83.3%** | 93.8% → **89.6%** |
+
+13 ms p50 is the cost of judging **7 candidates** (the whole store; `depth 30`
+never binds) — consistent with Phase 5's 45 ms for 30, and reported as
+"7 candidates judged; depth ceiling 30" for exactly that reason.
+
+**Read-only, verified on the store, not only in a test.** `cksum` over all 18
+files of the copy (db, WAL, and every tantivy segment) was identical before and
+after the audit. In the same conditions — daemon up, having served one write,
+so it holds the writer lock — a read-*write* open still fails, as it must:
+
+```
+error: internal error: failed to open a text index writer: Failed to acquire
+Lockfile: LockBusy. Some("Failed to acquire index lock. If you are using a
+regular directory, this means there is already an `IndexWriter` working on
+this `Directory`, in this process or in a different process.")
+```
+(from `recuerdos-ai reindex --text`, run to prove the point). The audit ran
+fine at the same moment. No weakening of the "stop the daemon" clause was
+needed, and none was done.
+
+**Every top-1-changed case, by hand** (the ship gate's requirement):
+
+```
+3. health, fitness or family   ⚑ top-1 changed
+   before
+    1. ae56d01b  fact.person            rel 0.19  Alex lives with a partner and a baby in Berlin
+    2. 38836313  preference.personal    rel 0.18  Prefers short answers over long explanations
+   after
+    1. 38836313  preference.personal    rel 0.18 rerank 0.022 (from 2)  Prefers short answers over long explanations
+    2. ae56d01b  fact.person            rel 0.19 rerank 0.016 (from 1)  Alex lives with a partner and a baby in Berlin
+   expect "partner and a baby": rank 1 → 2
+```
+
+* **Q3 "health, fitness or family"** — *a real regression.* The fused head was
+  already right ("Alex lives with a partner and a baby in Berlin", rank 1) and
+  the reranker preferred "Prefers short answers over long explanations"
+  (rerank 0.022 vs 0.016). Both scores sit in the model's noise band; a
+  three-word category phrase against two declarative memories is precisely the
+  input the `reranker` module docs warn about (trained on question→passage
+  pairs). Cost: p@1 −8.3 points on 12 expectations.
+* **Q4 "what and or the for do"** — *no verdict possible.* Nothing in the store
+  answers it; the head moved from "Prefers short answers" (relevance 0.21) to
+  "Only parameterized queries…" (0.09). Every result in that list is below the
+  live 0.25 floor, so a real client sees nothing either way — but it shows the
+  stage will happily reshuffle pure noise, which the audit only reveals because
+  it runs floorless.
+
+**Why the two runs disagreed** is itself worth recording: Q3's rerank scores
+were identical in both runs (0.022 vs 0.016) and its fused order was identical,
+yet run 1 kept the head and run 2 flipped it — the RRF margin between those two
+memories is smaller than the recency decay of the 17 minutes between the runs.
+So on this corpus a *single* head is not a stable measurement object; the p@1 /
+MRR pair over expectations is, and that is what Phase 7's grid should compare.
+
+**What this rehearsal cannot decide:** 7 memories, and the fused order already
+places 11 of 12 expectations first. A stage that can only reorder the head has
+nowhere to gain and somewhere to lose, so "no measurable benefit" here is a
+statement about the corpus as much as about the reranker. §1's failures came
+from a larger store than this one; per §9's risk row ("offline eval too small
+to represent real traffic"), Phase 7 must run its grid on the expanded 7.1
+cases and on a store with ≥100 memories, or say that the ship decision rests on
+shadow data instead.
+
+#### Shadow telemetry (6.3)
+
+The event name and fields were fixed in Phase 4 (`rerank_shadow{query_hash,
+depth, rerank_ms, top1_before, top1_after, changed, before, after}` — ids are
+the UUIDv7 tails, no content, no query text, pinned by
+`shadow_returns_the_pre_rerank_order_and_logs_only_ids_and_a_hash`). What this
+phase added is the operator-facing half: `docs/evaluation.md` now documents the
+grep (`grep 'rerank_shadow' | grep -c 'changed=true'` over the text log, or
+`select(.fields.message == "rerank_shadow")` in the `RECUERDOS_AI_LOG=json`
+form) and how to read the rate — it says how much the stage would *bite*, not
+whether it is right, and it must be read next to `rerank_ms` p95 against
+`timeout_ms`. `[rerank]` in `recuerdos-ai.example.toml` points at both.
+
+**Disagreement rate and latency: not measured — no live traffic.** The store
+here serves nobody: no client is recalling against it, so the DoD's "≥3 days or
+≥200 real recalls" clause is skipped under its own exemption and recorded as
+skipped. When a deployment with traffic exists, the commands above produce the
+number in one pass; nothing else about this phase has to change to obtain it.
+
+#### No "rerank all" (6.4)
+
+Provided by absence, and stated where someone would look for it: the `rerank`
+subcommand's own help, `docs/evaluation.md`, and the `[rerank]` config block
+all say the audit is the supported way to run the stage over existing memories,
+and that rerank scores are a property of a query and its candidate list rather
+than of a stored row.
+
+#### Gates
+
+`just check-native`: green (fmt, `clippy -D warnings`, boundary script, 919
+tests passing — 823 unit and the integration suites, 18 of them new here).
+`just eval-native`: **unchanged** against the committed baseline —
+recall@5 86.5%, precision@1 64.9%, MRR 74.1%, abstention 100% — which is the
+point of switching the eval to `execute_untracked`: it must score exactly what
+it scored before.
 
 ### Phase 7 — tuning
 - Grid table: _TBD_ · winner + rationale: _TBD_ · relevance decision: _TBD_ · ship-gate checklist: _TBD_

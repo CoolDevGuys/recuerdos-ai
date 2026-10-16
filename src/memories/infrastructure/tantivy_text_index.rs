@@ -41,6 +41,15 @@
 //!
 //! Tokenizer registrations are per-`Index`-instance, *not* persisted in
 //! the index, so `user_index` registers the analyzer on every open.
+//!
+//! # Read-only
+//!
+//! [`TantivyTextIndex::open_read_only`] opens the same directories without
+//! ever creating an `IndexWriter` — tantivy takes an exclusive writer lock
+//! per index directory, so a read-write open fails while the daemon is
+//! serving that user. The audit path (reranking-plan.md Phase 6.2) reads a
+//! live store, so it opens this way: searches work, and every mutation
+//! returns an error instead of writing.
 
 use super::stopwords::STOP_WORDS;
 use crate::identity::domain::user_context::UserContext;
@@ -114,13 +123,18 @@ struct Fields {
 
 struct UserIndex {
     index: Index,
-    writer: IndexWriter,
+    /// `None` on a read-only open — see [`TantivyTextIndex::open_read_only`].
+    writer: Option<IndexWriter>,
 }
 
 pub struct TantivyTextIndex {
     root: PathBuf,
     schema: Schema,
     fields: Fields,
+    /// `false` for the daemon's read-write index. `true` for the audit's,
+    /// which must neither write nor take the per-directory writer lock the
+    /// daemon is holding (module docs).
+    read_only: bool,
     // Opened lazily per user and kept for the process's lifetime.
     indexes: Mutex<HashMap<UserId, Arc<Mutex<UserIndex>>>>,
 }
@@ -134,6 +148,23 @@ impl TantivyTextIndex {
             ))
         })?;
 
+        Ok(Self::new(root, false))
+    }
+
+    /// The same indexes, opened for reading only
+    /// (`reranking-plan.md Phase 6.2`).
+    ///
+    /// Two things this guarantees, both of them the audit's: nothing here
+    /// writes a byte to the index, and no `IndexWriter` is created — so the
+    /// per-directory writer lock tantivy takes stays free and the command
+    /// works against a store a running daemon is serving. Indexes that do
+    /// not exist yet are an error rather than an empty leg: a silently dead
+    /// keyword leg would misreport the ordering the operator came to read.
+    pub fn open_read_only(root: PathBuf) -> Result<Self> {
+        Ok(Self::new(root, true))
+    }
+
+    fn new(root: PathBuf, read_only: bool) -> Self {
         let mut builder = Schema::builder();
         // STRING (not TEXT) for the id: it must match exactly, never be
         // tokenised.
@@ -147,17 +178,18 @@ impl TantivyTextIndex {
         let category = builder.add_text_field("category", text_options());
         let schema = builder.build();
 
-        Ok(Self {
+        Self {
             root,
             schema: schema.clone(),
             fields: Fields {
                 memory_id,
-                content,
                 tags,
+                content,
                 category,
             },
+            read_only,
             indexes: Mutex::new(HashMap::new()),
-        })
+        }
     }
 
     fn user_index(&self, user_id: UserId) -> Result<Arc<Mutex<UserIndex>>> {
@@ -171,6 +203,23 @@ impl TantivyTextIndex {
         }
 
         let directory = self.user_directory(user_id);
+        if self.read_only {
+            let index = Index::open_in_dir(&directory).map_err(|e| {
+                RaError::Internal(format!(
+                    "no keyword index to read at {}: {e}. Start the daemon once, or \
+                     stop it and run `recuerdos-ai reindex --text`.",
+                    directory.display()
+                ))
+            })?;
+            index.tokenizers().register(TEXT_ANALYZER, text_analyzer());
+            let user_index = Arc::new(Mutex::new(UserIndex {
+                index,
+                writer: None,
+            }));
+            indexes.insert(user_id, Arc::clone(&user_index));
+            return Ok(user_index);
+        }
+
         std::fs::create_dir_all(&directory).map_err(|e| {
             RaError::Internal(format!(
                 "failed to create the text index directory {}: {e}",
@@ -195,7 +244,10 @@ impl TantivyTextIndex {
             .writer(WRITER_HEAP_BYTES)
             .map_err(|e| RaError::Internal(format!("failed to open a text index writer: {e}")))?;
 
-        let user_index = Arc::new(Mutex::new(UserIndex { index, writer }));
+        let user_index = Arc::new(Mutex::new(UserIndex {
+            index,
+            writer: Some(writer),
+        }));
         indexes.insert(user_id, Arc::clone(&user_index));
         Ok(user_index)
     }
@@ -205,19 +257,31 @@ impl TantivyTextIndex {
         self.root.join(TEXT_INDEX_VERSION).join(user_id.to_string())
     }
 
+    /// The writer a mutation needs, or an error on a read-only handle —
+    /// which never creates one, so a write reaching here means something
+    /// was wired to the wrong handle. Failing loudly is the point: silently
+    /// dropping an index write would leave a memory unsearchable forever
+    /// with nothing but a green result to show for it.
+    fn writer_mut(user_index: &mut UserIndex) -> Result<&mut IndexWriter> {
+        user_index.writer.as_mut().ok_or_else(|| {
+            RaError::Internal("the keyword index is open read-only, so it cannot be written".into())
+        })
+    }
+
     /// Removes any existing document for `id`. tantivy has no update:
     /// indexing the same id twice would return it twice.
-    fn delete_term(&self, user_index: &mut UserIndex, id: MemoryId) {
-        user_index.writer.delete_term(Term::from_field_text(
+    fn delete_term(&self, user_index: &mut UserIndex, id: MemoryId) -> Result<()> {
+        Self::writer_mut(user_index)?.delete_term(Term::from_field_text(
             self.fields.memory_id,
             &id.to_string(),
         ));
+        Ok(())
     }
 
     /// Deletes any document for `memory` and appends its current text.
     /// Not committed — callers decide when the batch is durable.
     fn reindex_document(&self, user_index: &mut UserIndex, memory: &Memory) -> Result<()> {
-        self.delete_term(user_index, memory.id());
+        self.delete_term(user_index, memory.id())?;
 
         let mut document = TantivyDocument::default();
         document.add_text(self.fields.memory_id, memory.id().to_string());
@@ -225,8 +289,7 @@ impl TantivyTextIndex {
         document.add_text(self.fields.tags, memory.tags().join(" "));
         document.add_text(self.fields.category, memory.category().as_str());
 
-        user_index
-            .writer
+        Self::writer_mut(user_index)?
             .add_document(document)
             .map_err(|e| RaError::Internal(format!("failed to index memory text: {e}")))?;
         Ok(())
@@ -246,8 +309,7 @@ impl TextIndex for TantivyTextIndex {
         // recallable looks like a lost write to the agent that just saved
         // it. Batching would be faster, and is the thing to reach for if
         // ingest throughput ever matters more than read-after-write.
-        user_index
-            .writer
+        Self::writer_mut(&mut user_index)?
             .commit()
             .map_err(|e| RaError::Internal(format!("failed to commit the text index: {e}")))?;
 
@@ -272,8 +334,7 @@ impl TextIndex for TantivyTextIndex {
             self.reindex_document(&mut user_index, memory)?;
         }
 
-        user_index
-            .writer
+        Self::writer_mut(&mut user_index)?
             .commit()
             .map_err(|e| RaError::Internal(format!("failed to commit the text index: {e}")))?;
 
@@ -294,9 +355,8 @@ impl TextIndex for TantivyTextIndex {
             .lock()
             .map_err(|_| RaError::Internal("text index poisoned".to_string()))?;
 
-        self.delete_term(&mut user_index, id);
-        user_index
-            .writer
+        self.delete_term(&mut user_index, id)?;
+        Self::writer_mut(&mut user_index)?
             .commit()
             .map_err(|e| RaError::Internal(format!("failed to commit the text index: {e}")))?;
 
@@ -400,5 +460,132 @@ mod tests {
     #[test]
     fn escaping_leaves_ordinary_text_alone() {
         assert_eq!(escape_query("user prefers pnpm"), "user prefers pnpm");
+    }
+
+    /// A store with one keyword index, written by a handle that is *still
+    /// open* — which is the situation `rerank audit` has to survive: the
+    /// daemon's writer holds tantivy's per-directory lock the whole time.
+    struct Fixture {
+        root: PathBuf,
+        writable: TantivyTextIndex,
+        alex: UserContext,
+        sam: UserContext,
+        /// Declared last so it outlives the index handles that live inside it.
+        #[allow(dead_code)]
+        scratch: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        use crate::bootstrap::wiring::Identity;
+        use crate::identity::domain::scope::Scope;
+
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let root = scratch.path().join("text-index");
+        let writable = TantivyTextIndex::open(root.clone()).unwrap();
+        let database = Arc::new(crate::shared::sqlite::SqliteDatabase::open_in_memory().unwrap());
+        let identity = Identity::from_database(database).unwrap();
+        let authenticate = |handle: &str| {
+            identity.user_creator.execute(handle, None).unwrap();
+            let issued = identity
+                .api_key_issuer
+                .execute(handle, vec![Scope::Admin], "test")
+                .unwrap();
+            identity
+                .key_authenticator
+                .execute(&issued.token.render())
+                .unwrap()
+        };
+        Fixture {
+            root,
+            writable,
+            alex: authenticate("alex"),
+            sam: authenticate("sam"),
+            scratch,
+        }
+    }
+
+    fn memory(context: &UserContext, content: &str) -> crate::memories::domain::memory::Memory {
+        crate::memories::domain::memory::Memory::create(
+            context.user_id(),
+            crate::memories::application::test_doubles::new_memory(content),
+            crate::memories::application::test_doubles::now(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_read_only_open_reads_what_the_writer_committed() {
+        let fixture = fixture();
+        fixture
+            .writable
+            .upsert(
+                &fixture.alex,
+                &memory(&fixture.alex, "the user prefers pnpm"),
+            )
+            .unwrap();
+
+        let readable = TantivyTextIndex::open_read_only(fixture.root.clone()).unwrap();
+        let hits = readable.search(&fixture.alex, "pnpm", 5).unwrap();
+        assert_eq!(hits.len(), 1, "the read-only leg found nothing");
+
+        // Isolation is structural, not a courtesy: the other user's store is
+        // empty, and the one that does not exist yet is an error rather than
+        // a silently dead leg.
+        assert!(readable.search(&fixture.sam, "pnpm", 5).is_err());
+        assert!(!readable.is_populated(&fixture.sam));
+        assert!(readable.is_populated(&fixture.alex));
+    }
+
+    #[test]
+    fn a_read_only_handle_refuses_every_mutation_it_is_handed() {
+        let fixture = fixture();
+        let kept = memory(&fixture.alex, "the user prefers pnpm");
+        fixture.writable.upsert(&fixture.alex, &kept).unwrap();
+
+        let readable = TantivyTextIndex::open_read_only(fixture.root.clone()).unwrap();
+        for outcome in [
+            readable.upsert(&fixture.alex, &memory(&fixture.alex, "a new fact")),
+            readable.upsert_many(
+                &fixture.alex,
+                &[
+                    memory(&fixture.alex, "another fact"),
+                    memory(&fixture.alex, "and one more"),
+                ],
+            ),
+            readable.remove(&fixture.alex, kept.id()),
+        ] {
+            let error = outcome.expect_err("a read-only index must refuse to be written");
+            assert!(
+                error.to_string().contains("read-only"),
+                "the refusal should say why: {error}"
+            );
+        }
+
+        // Nothing happened: the one committed document is still the only one,
+        // and the scratch directory is still there to prove the run left the
+        // store as it found it.
+        assert_eq!(readable.search(&fixture.alex, "pnpm", 5).unwrap().len(), 1);
+        assert!(
+            readable
+                .search(&fixture.alex, "another", 5)
+                .unwrap()
+                .is_empty()
+        );
+        drop(readable);
+        assert!(fixture.scratch.path().exists());
+    }
+
+    #[test]
+    fn a_read_only_open_names_the_repair_when_there_is_nothing_to_read() {
+        let fixture = fixture();
+        let readable = TantivyTextIndex::open_read_only(fixture.root).unwrap();
+        let error = readable
+            .search(&fixture.sam, "pnpm", 5)
+            .expect_err("no index exists for this user");
+        let message = error.to_string();
+        assert!(
+            message.contains("reindex"),
+            "the operator should be told what to run: {message}"
+        );
     }
 }

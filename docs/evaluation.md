@@ -120,3 +120,99 @@ query-expansion step.
 The corpus is deliberately larger than the cases need. With six memories
 almost any ranker scores perfectly; the filler exists so a case has
 something to be wrong about.
+
+## Judging a second stage on your own memories
+
+`recuerdos-ai eval` answers "did this change break retrieval?" against a
+corpus someone wrote. It cannot answer the operator's question — *would
+enabling the reranker change what my agent sees, in my store, for queries I
+actually ask?* — because 35 seeded memories written by whoever built the
+feature are not the eight hundred you accumulated.
+
+`recuerdos-ai rerank audit` is that measurement:
+
+```bash
+recuerdos-ai rerank audit --config recuerdos-ai.toml --queries queries.toml
+```
+
+```toml
+# queries.toml — or one query per line, `#` for comments
+[[query]]
+text = "which package manager do we use?"
+expect = "prefers pnpm"   # a substring of the memory that should come first
+
+[[query]]
+text = "who owns the billing service?"
+```
+
+Each query runs twice over the real store: once through the pipeline as it
+serves today, once with the second stage switched on. Both orderings are
+printed with ids, category, relevance, the model's score and where each
+result moved, and the run ends with the share of queries whose top result
+changed, mean rank displacement, p50/p95 rerank latency, and p@1 / MRR before
+vs after for the queries that carried an `expect`.
+
+What it will not do:
+
+* **It changes nothing.** Recall runs untracked, so access counters,
+  `last_accessed_at` and importance are byte-identical afterwards — a replay
+  that stamped the memories it read would feed importance decay and quietly
+  change the ranking it came to measure. A test asserts it.
+* **It does not need the daemon stopped.** The keyword index is opened
+  read-only, so it never asks for the writer lock a running daemon holds. If
+  the store has no keyword index yet it refuses and says to run
+  `recuerdos-ai reindex --text` rather than auditing a half-dead pipeline.
+* **It is not `rerank all`.** No command writes rerank scores to stored
+  memories: a rerank score is a property of a query and the candidate list it
+  produced, not of a memory, so storing one would be a cache with no way to
+  invalidate it. This command, reading and reporting, is the supported way to
+  run the stage over an existing corpus.
+
+Two things it does differently from a live request, both stated in the report
+header, because a report that quietly differs from production is how you end
+up shipping the wrong conclusion: it applies no relevance floor (near-misses
+are what you came to look at, and dropping results before the reranker sees
+them would change what it reorders), and no rerank deadline (measuring what
+the model costs is half the point — the configured `timeout_ms` is printed
+beside the percentiles it has to contain).
+
+`--json` emits the same run as ids, ranks and scores, with no memory content —
+so a report can be committed or pasted into an issue without carrying anyone's
+memories with it.
+
+## Reading the shadow log
+
+`[rerank].mode = "shadow"` is the same judgment on traffic you did not have to
+think up: every recall runs the stage, logs the comparison, and serves the
+**old** order. One line per recall, `rerank_shadow`, carrying
+`query_hash`, `depth`, `rerank_ms`, `top1_before`, `top1_after`, `changed`,
+and the two full orderings as `before` / `after`. Ids are the last eight
+characters of the UUIDv7 — the head is the creation timestamp and would repeat
+across memories saved together. No query text and no memory content appears in
+any field.
+
+The number to read out of it is the **disagreement rate** — how often the
+second stage would have changed the answer:
+
+```bash
+# the default text log: judged recalls, and of those how many moved the head
+grep -c 'rerank_shadow' daemon.log
+grep 'rerank_shadow' daemon.log | grep -c 'changed=true'
+```
+
+or, with `RECUERDOS_AI_LOG=json`:
+
+```bash
+jq -s '[.[] | select(.fields.message == "rerank_shadow")]
+       | {recalls: length,
+          changed: (map(select(.fields.changed)) | length),
+          rerank_ms_p95: (map(.fields.rerank_ms) | sort
+                          | .[((length * 0.95) | floor)])}' daemon.log
+```
+
+Read it as a rate with its denominator, and read it against latency: a 3%
+disagreement rate at 400 ms p95 means the stage mostly agrees and costs a
+deadline's worth of time — hard to justify. A high rate says the stage has
+something to say, which is when the audit above matters: the log tells you how
+often the answer would change, and only a human reading the two orderings says
+whether that is for the better.
