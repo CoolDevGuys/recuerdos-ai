@@ -2439,6 +2439,71 @@ operator-shaped config (two retrieval keys under `[rerank]`, plus a `[rerrank]`
 typo) logs three named warnings then `listening`; the shipped example, as a
 control, logs none — no false positives on the file `init` writes.
 
+#### Found in the field, part two: `mode = "on"` that never ran (fixed on `fix/rerank-silent-skip`)
+
+Verifying that same deployment after it took `v0.4.1` — over MCP first, then
+`POST /v1/memories/search` to reach the per-result keys — showed the rerank stage
+loading its weights, judging, and stamping `rerank_rank`/`rerank_score` on small
+queries (≤6 candidates), and doing none of it on ordinary ones. The
+`rerank leg failed` `WARN` was there in the journal every time; the response was
+not. The stage was being dropped at `[rerank].timeout_ms = 250` on every query
+that mattered: on that host a candidate pair costs ~34 ms, not the ~7 ms the
+tuning box managed, because it is also serving Qwen3.5-9b and
+`embeddinggemma-300M`. `depth = 10` therefore needs ~350 ms against a 250 ms
+deadline, so **`mode = "on"` behaved exactly like `mode = "off"`**.
+
+Neither gate in this plan could have caught it, which is worth writing down
+rather than explaining away:
+
+* Phase 5's timeout test asserts the *fallback* — a late stage must not make a
+  caller wait. It passes, and should.
+* Phase 7's latency gate measured p95 on an **idle** box, so the shipped default
+  was sized to the machine that measured it. Nothing asserted that a configured
+  stage contributes on a machine that is not idle.
+* `rerank audit` runs deadline-free, so the operator's one tool for judging the
+  stage reported it as working while the live path discarded its answer. Its
+  `rerank_calls` meter counts a call that timed out, because that call really
+  did run — metering the model cannot answer "did the order change".
+
+The fix makes the fact visible where each audience can use it:
+
+1. **The response** (`memory_recaller::RerankTrace` → `dto::RerankResponse`): a
+   top-level `rerank` object with `state` ∈ `applied | shadow | not_needed |
+   skipped`, `skipped` carrying `reason` ∈ `deadline | model` because the
+   remedies differ — raise `timeout_ms` or lower `depth`, versus fix the model.
+   Absent for `off`, checked by a DTO test and by
+   `mode_off_reports_nothing_even_with_a_model_wired`, so "off is a hard no-op"
+   still means the response is what the pre-rerank build returned, field for
+   field. `execute_traced`/`execute_untracked_traced` carry it; `execute` and
+   `execute_untracked` are unchanged wrappers, which is why the reconciler and
+   every existing call site did not move.
+2. **`rerank audit`**: per-query `contributed` plus summary counters, and a
+   summary that opens with "the stage contributed to *n*/*m* queries" when
+   *n* < *m*. The audit keeps its deliberate deadline-free measurement — that
+   is what makes its p95 meaningful — but can no longer present a stage that
+   produced nothing as a stage that agreed.
+3. **`eval`**: one stderr line, once per run, when a case's stage was skipped.
+   Restructuring `EvalCase` to carry the trace through `compare()` was not worth
+   gating a new field into every historical report; the numbers an operator
+   should trust from a run whose stage never finished are none of them.
+4. **Docs**: `api.md` documents the object, `configuration.md` gains
+   *Sizing `timeout_ms` for your machine* with the idle-box/home-server per-pair
+   table, and `evaluation.md` says what `contributed` means.
+
+Deliberately **not** changed: the MCP text surface. `memory_recall`'s output is
+the agent's task material, and "your daemon's second stage is mis-deadlined" is
+an operator fact for the config, not a line to spend the model's context on. The
+toolbox calls the same REST endpoint, so the field is already in the body it
+parses if a later decision wants it. `rerank all`/`rerank grid` were likewise
+left alone: the grid reports its own per-cell latency, which is where its stage
+cost is visible.
+
+Operator action, recorded so the follow-up is checkable: raise
+`[rerank].timeout_ms` to ~2× measured `rerank.took_ms` (800 on that host),
+confirm `rerank_rank` appears at the default floor, run `calibrate` for
+`embeddinggemma-300M`, then `rerank audit` before trusting `mode = on` — until
+the deadline is met, an audit-vs-live disagreement there is expected, not a
+mystery.
 
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
