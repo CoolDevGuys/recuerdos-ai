@@ -466,6 +466,21 @@ pub(crate) fn load_reranker_for_audit(config: &AppConfig) -> Result<FastembedRer
 /// deployment would run. A load failure (missing file, no network to
 /// download it) is an error either way, and names the model.
 fn load_reranker(config: &AppConfig, max_concurrency: usize) -> Result<FastembedReranker> {
+    // Logged *before* the load, not only after it. Loading is where a first
+    // `mode = "shadow"`/`"on"` boot can spend minutes — the weights are over a
+    // gigabyte and come over the network — and an operator watching a log that
+    // stops at the previous line cannot tell a slow download from a hung
+    // process. Naming the model and the directory says where to look
+    // (`du -sh <cache_dir>` grows as it downloads) without reaching for a
+    // debugger. A model already in the cache, or a bring-your-own path, pays
+    // nothing and this line costs nothing either.
+    tracing::info!(
+        model = %config.rerank.model,
+        cache_dir = %config.model_cache_dir().display(),
+        "loading the rerank model; if its weights are not in this cache yet, \
+         the first load downloads them (~1.1 GB for the default model) and can \
+         take minutes"
+    );
     FastembedReranker::load(
         &config.rerank.model,
         config.model_cache_dir(),
