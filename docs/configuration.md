@@ -117,10 +117,10 @@ a real section is the one mistake the loader had no way to mention. During
 rerank development the example file itself fell into exactly that hole (both
 relevance keys trailed the `[rerank]` block, so `recuerdos-ai init` handed out a
 template whose `min_relevance` did nothing), and **v0.4.0 shipped with it**. The
-example is repaired and pinned by a test from that release's next patch; if you
-are on v0.4.0 and copied the file, move `min_relevance` and
-`similarity_baseline` up above `[rerank]` yourself — before this warning
-existed, editing them there had no effect at all.
+example is repaired and pinned by a test in `v0.4.1`; if you are on `v0.4.0` and
+copied the file, move `min_relevance` and `similarity_baseline` up above
+`[rerank]` yourself — before this warning existed, editing them there had no
+effect at all.
 
 So: every key for a section belongs above the next `[table]` line. If a
 setting you changed appears to have no effect, check the startup log for this
