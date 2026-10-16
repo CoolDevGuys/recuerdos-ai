@@ -379,8 +379,8 @@ The cost is per candidate pair, so what matters is your machine's number:
 The second row is a real deployment, not a worst case invented for a warning:
 its `mode = "on"` never contributed once, because every query worth asking had
 more than about seven candidates above the floor and the stage missed its
-deadline each time. Nothing in the response said so — until this field existed.
-Check yours in one request:
+deadline each time. Nothing in the response said so — until `v0.4.2` added the
+`rerank` field. Check yours in one request:
 
 ```bash
 curl -s $BASE/v1/memories/search \
