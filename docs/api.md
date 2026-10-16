@@ -284,11 +284,17 @@ query to it.
 With `[rerank].mode = "on"`, an optional second-stage ranker re-scores the
 top of the fused list query-to-memory, and each result it scored carries
 two more keys inside `matched`: `rerank_rank` (its position in the
-reranker's ordering) and `rerank_score` (the raw value, on the reranker's
-own scale — read it as a diagnostic; `relevance` keeps its calibrated
-meaning). Off by default, and never visible in `shadow` mode: a server
-without a reranker, or one running shadow mode, produces exactly the
-`matched` objects above.
+reranker's ordering) and `rerank_score` (its confidence, in `(0, 1)`).
+Read `rerank_score` as a diagnostic and rank as the signal: every model's
+output is squashed onto that interval by a strictly increasing function, so
+**ranks are comparable across models while score magnitudes are not** — and
+neither number is a calibrated probability that the memory answers the query.
+`relevance` keeps its calibrated meaning either way.
+A result outside the reranked head (`[rerank].depth`) carries neither key, and
+so does any result in a one-candidate head — there is nothing to reorder — so
+their absence does not mean the stage is off. Off by default, and never
+visible in `shadow` mode: a server without a reranker, or one running shadow
+mode, produces exactly the `matched` objects above.
 
 | Field | Notes |
 |---|---|

@@ -61,9 +61,11 @@ class MatchDetail(_Model):
     #: in shadow mode, or never reached this result.
     rerank_rank: int | None = None
     #: The reranker's own score for the memory, present exactly when
-    #: ``rerank_rank`` is. It is on the *model's* scale (a probability for
-    #: one reranker, a logit for another): a diagnostic, never a threshold.
-    #: ``relevance`` keeps its meaning regardless.
+    #: ``rerank_rank`` is. Every model's output is squashed onto ``(0, 1)`` by
+    #: a strictly increasing function, so **ranks are comparable across
+    #: models while magnitudes are not**, and neither is a calibrated
+    #: probability that the memory answers the query. A diagnostic, never a
+    #: threshold: ``relevance`` keeps its meaning regardless.
     rerank_score: float | None = None
 
 

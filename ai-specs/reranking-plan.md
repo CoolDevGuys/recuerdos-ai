@@ -1,6 +1,13 @@
 # Recuerdos AI — Recall Quality & Cross-Encoder Reranking Plan
 
 **v0.1 · drafted 2026-10-14 · companion to [project-plan.md](project-plan.md) and [implementation-plan.md](../implementation-plan.md)**
+**Status: ✅ shipped** — Phases 0–8 complete, released as `v0.4.0` (2026-10-16). Two
+recall defects fixed and measured; the cross-encoder earned its gate and ships
+**compiled in, switched off** — `mode = "off"` stays the default until a shadow
+period on a real store (8.3, §12 Phase 8). The relevance question answered *leave it
+alone*, with the distribution that decided it on record. Two follow-ups survive the
+release: that shadow period, and the Gemini parity re-check that free-tier quota
+blocked (§12 Phase 8, "Still open").
 
 This plan fixes two measured recall defects (keyword-leg noise, miscalibrated
 relevance) and then, only if the measurements still justify it, adds a
@@ -737,11 +744,26 @@ Phase 7.
 
 #### Definition of Done
 
-- [ ] `just check-native`, `just sdk-test`, `just docker-build` all succeed.
-- [ ] A clean container started from the release image with the documented env/config answers a
-      recall in the chosen mode (smoke test recorded in §12).
-- [ ] Docs reviewed for accuracy against the final config keys.
-- [ ] §12 is complete; the header status line of this file is updated to "shipped" / "closed (no-go)".
+- [x] `just check-native`, `just sdk-test`, `just docker-build` all succeed. (§12
+      Phase 8 "Gates": 928 tests, clippy `-D warnings` and the boundary script clean,
+      SDK suite green against the release image, both image variants built.)
+- [x] A clean container started from the release image with the documented env/config answers a
+      recall in the chosen mode (smoke test recorded in §12). — recorded for **both**
+      modes: default image with the default config (no rerank weights on disk, no
+      `rerank_*` keys, correct recall), and the baked image with
+      `RECUERDOS_AI_RERANK__MODE=on` (stage loaded, reranked order, `rerank_rank` /
+      `rerank_score` present). The upgrade path was exercised on a store containing
+      memories, and the missing-weights failure mode was run rather than asserted.
+- [x] Docs reviewed for accuracy against the final config keys — and the review found
+      real defects, recorded in §12 Phase 8: `rerank_score` documented as a raw
+      model value when the adapter squashes it to `(0,1)` (`docs/api.md`, SDK
+      docstring), "re-scores the fused list" overstating reach where the floor runs
+      first (`example.toml`, `configuration.md`), a stale `max_concurrency = 2`
+      comment in the adapter, a Dockerfile comment pricing a model nobody chose, and
+      the default model's languages stated wrongly as English-only.
+- [x] §12 is complete; the header status line of this file is updated to "shipped" / "closed (no-go)".
+      — shipped, with the two follow-ups that survive the release named there rather
+      than left implicit.
 
 #### Expected state after this phase
 
@@ -2154,8 +2176,202 @@ floor), so if the expansion moved it, that is a corpus fix per the
   default stays `mode = off` pending Phase 8's shadow period.
 
 
-### Phase 8 — release
-- Smoke test: _TBD_ · final default (`off`/`on`): _TBD_
+### Phase 8 — release (`docs/rerank-release`)
+
+**The binary did not change.** Phases 0–7 shipped the code; this phase is the
+operator-facing surface, the default decision, and the release. The only source
+edit is a stale doc comment (`FastembedReranker` still claimed
+`max_concurrency` defaulted to 2; the tuned default has been 1 since Phase 7).
+
+#### 8.3 — the default, decided: `mode` stays `off`
+
+The plan makes this a two-condition decision, and only one condition is met:
+
+| Condition | State |
+|---|---|
+| Ship gate passed (Phase 7) | ✅ offline: +5.8 p@1, +2.7 MRR, +0.3 recall@5, +70.6 ms added p95 against the 150 ms budget written before the run |
+| Phase 3's cautious clause — a shadow period on **real traffic** before changing what clients see | ❌ this environment has no live store; the rehearsal volume is 7 eval memories, and Phase 6's own record says a rehearsal cannot decide this |
+| The operator accepts the cost | ❌ 1.1 GB of weights, ~1.5 GiB per inference session, +71 ms p95 — never priced against a real corpus by the person who would run it |
+
+Flipping the default that changes every client's result order on the strength of
+an offline corpus is precisely the failure "GO, **cautiously**" was written to
+prevent, so it is not flipped, and no gate was reinterpreted to make flipping it
+available. Everything else ships at its measured setting, which is the point of
+tuning them now: enabling the stage later is one line (`mode = "on"`), not a
+rediscovery. The revertable-in-isolation commit that Task 7.3.6 used is therefore
+not needed — there is nothing to revert; the default was never changed here.
+
+`recuerdos-ai config` expectations updated rather than changed: with the stage off
+the block prints `mode off` alone, and `docs/configuration.md` now says why (the
+report answers "what is this daemon paying", and off pays nothing).
+
+#### 8.1 — documentation
+
+| File | What landed |
+|---|---|
+| `README.md` | recall diagram and feature list now say *vector + BM25 + graph, fused + optional cross-encoder*; new "Optional rerank" row; the performance table is explicitly labelled as the **default** path, with the stage's +59/+71 ms and ~1.5 GiB stated beside it; "Shipped in `v0.4.0`" |
+| `docs/architecture.md` | the recall section now names the second stage, its `domain` trait / `infrastructure` adapter placement, and the three invariants an implementer must not break (additive only, `off` builds nothing, a missed deadline drops the stage) |
+| `docs/configuration.md` | new rerank subsections: **"If a model is too big for your box"** (the costed alternatives table, and the explicit advice that a box which cannot pay stays `off` rather than degrading to the small model whose +1.9 is noise), **"Language: what the default model actually speaks"**, and **"Recall quality: 'results look random'"** — three ordered checks: analyzer, then `similarity_baseline` for *your* model, then whether the answer exists at all; closes by stating the reranker is not a fix for any of them |
+| `docs/deployment.md` | **"Optional: second-stage reranking"**: cost table, judge-before-enabling (`rerank audit`, then shadow), where the weights come from (bake-in vs mounted `/models`), enabling, and how to undo it |
+| `recuerdos-ai.example.toml` | tuned comments from Phase 7, reviewed against the final keys. Two imprecisions fixed: the `depth` comment implied the stage re-scores the fused list, when [`rerank_leg`](../../src/memories/application/memory_recaller.rs) runs **after** `min_relevance` — so the stage reorders and never rescues; and the model comment now states the language limitation next to the price |
+| `docs/api.md` | **`rerank_score` was documented wrongly, and the fix matters:** the Phase 4 text called it "the raw value, on the reranker's own scale", but Phase 5 squashes every model's logits through a sigmoid into `(0,1)` — strictly monotonically, which is the adapter's whole safety property. A client that took the old sentence literally might have thresholded a logit against a probability. Now: ranks are comparable across models, magnitudes are not, and neither is a calibrated probability. Also documents the case the smoke test hit — a one-candidate head carries no `rerank_*` keys, so absent keys do not mean the stage is off |
+| `docker/Dockerfile` | the bake-in comment named the old placeholder model and "~300 MB"; now names the tuned model and its real 1.1 GB, and says why `/models` being an image directory (not a volume) makes baking or mounting a requirement rather than a preference |
+| `ai-specs/project-plan.md` | §5's read-path step 2 rewritten (it still described a "cross-encoder-free" boost and no graph leg); new **§7.9** carrying the measured verdict and the three inverted expectations; header status note for `v0.4.0` |
+| `docs/evaluation.md` | already documented the audit and how to read a shadow log from Phase 6; checked against the shipped behaviour, unchanged |
+
+#### 8.2 — upgrade notes, and each claim run rather than assumed
+
+`docs/deployment.md` §6 now states, and this session executed:
+
+- **Back up first** (step 5's `tar` of the data volume) — stated before the
+  upgrade steps, not after.
+- **The keyword index rebuilds itself on the first start.** Run on a store that
+  had memories and no current-version index, on the release image:
+
+  ```
+  INFO … text_index_rebuilder: text index rebuilt users_rebuilt=1 memories_indexed=4 elapsed_ms=30
+  rebuilt the keyword index for 1 users (4 memories)
+  ```
+
+  and keyword recall afterwards returned `matched {vector_rank: 1, bm25_rank: 1}`.
+- **`reindex --text` is the manual/repair path, and the daemon must be the one
+  stopped.** Run against a live daemon, on the release image, it fails the way
+  Phase 6 recorded:
+
+  ```
+  error: internal error: failed to open a text index writer: Failed to acquire
+  Lockfile: LockBusy. Some("Failed to acquire index lock. …")
+  ```
+- **No vector reindex is needed for this release.** Phase 2.3 resolved
+  `VERIFY` with a measurement (Gemini embeddings are unit-length at 3072 dims),
+  so the per-model baseline changes how stored vectors are *read*. The docs say
+  this explicitly, because "relevance changed" reads to an operator like
+  "re-embed everything", which would cost a full corpus of API calls for nothing.
+- **Model download: bake it or mount `/models`.** `/models` is baked into the
+  image and is *not* a volume, so a runtime download lands in the container's
+  writable layer and dies with it. Both paths are documented, with `warm-models`
+  as the pre-warm.
+- **What it costs, measured on the release images:**
+
+  | Image | Size | RSS at idle |
+  |---|---|---|
+  | `recuerdos-ai:local` (default, no rerank model) | 292 MB | 232 MiB |
+  | `recuerdos-ai:bake-rerank` (`--build-arg RERANK_MODEL=bge-reranker-base`) | 1.42 GB | 1.73 GiB |
+
+  The delta is +1.13 GB of image and ~1.5 GiB of RAM, matching the numbers the
+  config docs quote. The default image is **unchanged in size and contents**:
+  `ls /models` in it shows only `models--Xenova--bge-small-en-v1.5`, and its
+  startup log contains zero lines mentioning rerank.
+- **How to judge before enabling**: `rerank audit`, then a shadow week — commands
+  in `docs/deployment.md`, reading guide in `docs/evaluation.md`.
+
+#### 8.4 — smoke tests on the release image
+
+Two clean containers, clean volumes, no config file — only the documented env.
+
+**Default image, default config (`mode` off):**
+
+```
+$ curl -s localhost:7071/healthz
+{"status":"ok"}
+$ docker exec ra-smoke-off recuerdos-ai config | sed -n '/rerank/,/^$/p'
+rerank
+  mode       off
+$ # 4 memories stored via POST /v1/memories:direct (201 each)
+$ curl -s -X POST localhost:7071/v1/memories/search -d '{"query":"which database holds the billing service data","limit":3}'
+  "The billing service reads and writes ledger-db, a Postgres 16 cluster"
+    relevance 0.703 · matched {vector_rank: 1, bm25_rank: 1} · took_ms 8 · min_relevance 0.25
+$ curl -s -X POST localhost:7071/v1/memories/search -d '{"query":"can I add an index.ts that re-exports everything","limit":2}'
+  1. "User forbids barrel files / index.ts re-exports in TypeScript"  matched {vector_rank: 1, bm25_rank: 1}
+  2. "Deployment moved from fly.io to Hetzner…"
+```
+
+No `rerank_*` keys in `matched`, no rerank weights on disk, no rerank log line: the
+inert default holds in the shipped artifact, not only in a unit test.
+
+**Baked image with `RECUERDOS_AI_RERANK__MODE=on`:**
+
+```
+INFO recuerdos_ai::bootstrap::memories_wiring: rerank stage loaded model="bge-reranker-base" mode=On depth=10 max_concurrency=1
+$ docker exec ra-smoke-on recuerdos-ai config | sed -n '/rerank/,/^$/p'
+rerank
+  mode       on
+  model      bge-reranker-base
+  depth      10
+  strategy   rrf (weight 1)
+  timeout    250 ms
+  concurrent 1
+  batch      16
+$ curl -s -X POST localhost:7072/v1/memories/search -d '{"query":"can I add an index.ts that re-exports everything","limit":5}'
+took_ms 33
+  "User forbids barrel files / index.ts re-exports in TypeScript" | {vector_rank: 1, bm25_rank: 1, rerank_rank: 1, rerank_score: 0.937969}
+  "Deployment moved from fly.io to Hetzner…"                      | {vector_rank: 2, rerank_rank: 2, rerank_score: 3.9394094e-05}
+```
+
+The stage loads from the baked weights (the blobs' timestamps are the build's, not
+the boot's), serves the reranked order, and stamps `rerank_rank` / `rerank_score`.
+
+**One behaviour this surfaced, and it is by design — but not the behaviour the
+docs had implied.** That same "billing database" query in the `on` container came
+back with one result, `took_ms 7`, and no `rerank_*` keys:
+[`rerank_leg`](../../src/memories/application/memory_recaller.rs) returns
+immediately when the list it was handed has fewer than two members, because
+reordering one candidate is not a reorder. Note *which* list that is — the floor
+is applied **before** the stage, so a head the floor narrowed to one memory costs
+nothing and changes nothing. Two consequences, both now documented: `depth` is a
+ceiling on the *surviving* candidates it re-scores (it cannot reach a memory the
+floor dropped, so it reorders and never rescues), and an operator reading a shadow
+log full of `changed=false` may be looking at a store whose heads are short, not
+at a reranker that disagrees.
+
+**Failure mode, run rather than promised** — stage enabled, weights absent, no
+network:
+
+```
+error: internal error: failed to load rerank model "bge-reranker-base" (from
+BAAI/bge-reranker-base) into /models: Failed to retrieve model file:
+onnx/model.onnx. If this host has no internet access, pre-populate the cache with
+`recuerdos-ai warm-models` or bake the model into the image.
+```
+
+It fails at boot with the model named. It does not serve a recall that silently
+lacks the second stage its operator asked for.
+
+#### Gates
+
+All four, on this branch's tree, in the container (the `just` recipes are thin
+wrappers, so the recipe that names a `-native` command is what ran):
+
+| Gate | Result |
+|---|---|
+| `just check-native` | ✅ exit 0 — `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings` clean; `check-boundaries.sh: no violations found`; **928 tests, 0 failures** across 10 suites |
+| `just eval-native` | ✅ exit 0 — `recall@5 83.0% → 83.0% (−0.0)`, `precision@1 65.4% → 65.4% (−0.0)`, `MRR 74.3% → 74.6% (+0.3)`. Nothing moving is the expected result: this phase changed no behaviour, and a phase that only writes docs *should* be unable to move the gate |
+| `just docker-build` | ✅ exit 0 — `recuerdos-ai:local`, **292 MB**, carrying no rerank weights |
+| the bake variant | ✅ exit 0 — `docker build --build-arg RERANK_MODEL=bge-reranker-base`, **1.42 GB**, `/models` holding `models--BAAI--bge-reranker-base` (1.1 GB) beside the embedding model |
+| `just sdk-test` | ✅ exit 0 (run twice — once on the release image as first built, once after the `rerank_score` docstring fix) — ruff format + lint clean, mypy clean over 5 source files, **29 unit + 13 integration** tests against a daemon running the release image, both examples executed |
+
+`recuerdos-ai --version` inside the release image reports `recuerdos-ai 0.4.0`.
+
+#### 8.5 — close-out
+
+`implementation-plan.md` gains **Task 7.4**, same shape as Task 7.3, pointing here
+for the full record; the Phase 7 status line and its sequencing table now reflect
+7.1–7.4.
+
+#### Still open after this release (deliberate, not silent)
+
+1. **`mode = on` needs a shadow period on a real store** — the reason the default
+   stayed off, restated in `docs/deployment.md` and §12 Phase 7 above.
+2. **Production-parity on `gemini-embedding-2` is still unrun.** Every 429 canary
+   this session (Phase 7 and Phase 8) was free-tier quota, e.g.
+   `Gemini returned HTTP 429 … You exceeded your current quota`. It does not gate
+   this release, because the default path does not reach the reranker; it gates the
+   flip in (1), since a reranker tuned on bge-small embeddings has not been shown to
+   behave the same under 3072-dim Gemini embeddings.
+3. **`docs/CHANGELOG.md` has no `v0.2.2`/`v0.3.0`/`v0.3.1` entries** — they were
+   skipped when those shipped. Backfilling them is a separate, honest chore; this
+   release's entry is accurate, which is the most that can be claimed here.
+
 
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
@@ -2179,4 +2395,10 @@ floor), so if the expansion moved it, that is a corpus fix per the
       extended with an empty-default `ARG RERANK_MODEL=` guarding an if/else around the same step,
       so the default image is byte-for-byte what it was and a bake-in is one build arg (~147 MB).
       Details in the Phase 5 log above.
-- [ ] Read-only open of SQLite/tantivy while the daemon runs (6.2)
+- [x] Read-only open of SQLite/tantivy while the daemon runs (6.2) — **it works**:
+      `rerank audit` ran against a copy of a live store while the daemon served it, and
+      `cksum` over all 18 files of the copy (db, WAL, every tantivy segment) was
+      identical before and after. A read-*write* open still fails while the daemon holds
+      the writer lock (`reindex --text` → `LockBusy`), as it must; the plan's "stop the
+      daemon" clause needed no weakening and none was done. Details in the Phase 6 log
+      above.
