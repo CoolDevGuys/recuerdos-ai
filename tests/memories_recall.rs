@@ -240,6 +240,31 @@ async fn a_stopword_only_query_is_answered_with_nothing_at_the_default_floor() {
 }
 
 #[tokio::test]
+async fn a_search_from_a_reranker_less_deployment_says_nothing_about_reranking() {
+    // The additive-only rule, checked over the transport rather than in a
+    // DTO: this app has no second stage, so its response must be exactly what
+    // it was before the stage existed — including staying silent about one.
+    // The reporting side is covered by `memory_recaller`'s and `dto`'s tests:
+    // a black-box app with a real reranker would mean pulling 1.1 GB of
+    // weights into a test.
+    let client = Client::spawn().await;
+    client
+        .save(json!({"content": "User prefers pnpm over npm for package management"}))
+        .await;
+
+    let results = client.search(json!({"query": "package manager"})).await;
+
+    assert!(
+        results.get("rerank").is_none(),
+        "a deployment without a rerank stage put one in the response: {results}"
+    );
+    // The fields clients already depend on are still the whole top level.
+    for key in ["results", "took_ms", "min_relevance"] {
+        assert!(results.get(key).is_some(), "{key} vanished: {results}");
+    }
+}
+
+#[tokio::test]
 async fn search_filters_by_tag() {
     let client = Client::spawn().await;
     client

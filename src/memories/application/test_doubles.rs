@@ -658,6 +658,13 @@ pub struct FakeReranker {
     calls: AtomicUsize,
     /// The candidate ids of every call, in call order.
     seen: Mutex<Vec<Vec<MemoryId>>>,
+    /// Wall time spent inside every `score` call. With a short
+    /// `[rerank].timeout_ms` this is how a test makes the stage miss its
+    /// deadline — the condition that used to be invisible in a response.
+    delay: std::time::Duration,
+    /// Fails every call, standing in for a model that cannot answer at all
+    /// (or answers with scores that do not line up with its candidates).
+    failing: bool,
 }
 
 impl FakeReranker {
@@ -678,6 +685,24 @@ impl FakeReranker {
         }
     }
 
+    /// Like [`Self::by_token_overlap`], but takes `delay` on every call —
+    /// long enough past a test's `timeout_ms` to prove a stage that misses
+    /// its deadline is *reported*, not merely absent from the ordering.
+    pub fn sleeping(delay: std::time::Duration) -> Self {
+        Self {
+            delay,
+            ..Default::default()
+        }
+    }
+
+    /// Errors on every call: the model is configured and asked, and refuses.
+    pub fn failing() -> Self {
+        Self {
+            failing: true,
+            ..Default::default()
+        }
+    }
+
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -694,6 +719,15 @@ impl Reranker for FakeReranker {
             .lock()
             .unwrap()
             .push(candidates.iter().map(|c| c.id).collect());
+
+        if self.failing {
+            return Err(crate::shared::error::RaError::Internal(
+                "fake reranker is failing".to_string(),
+            ));
+        }
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
 
         if self.reverse {
             let n = candidates.len();
