@@ -454,7 +454,7 @@ expect = ["SQLite was chosen over Postgres so the installer stays a single binar
 [[case]]
 name = "tag filter: typescript"
 kind = "tag-filter"
-query = "conventions"
+query = "typescript conventions"
 tags = ["typescript"]
 expect = ["User forbids barrel files and index.ts re-exports"]
 
@@ -508,6 +508,10 @@ expect = [
     "User requires table-driven tests in Go, one table per behaviour",
     "User prefers Vitest over Jest for anything new",
     "User always writes integration tests with testcontainers",
+    # Phase 7.1 grew the testing-subcategory corpus; this memory is as much
+    # an answer to "test" under this filter as the three above, so the gold
+    # completes rather than the case silently measuring the expansion.
+    "Test names read as sentences describing behaviour, not method names",
 ]
 
 [[case]]
@@ -721,3 +725,560 @@ name = "negative: bouillabaisse"
 kind = "negative"
 expect_empty = true
 query = "french recipe for bouillabaisse"
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 7.1 corpus expansion (reranking-plan.md).
+#
+# Thirty-five memories cannot decide anything about a reranker: the fused
+# head already contains the whole corpus, so a second stage has nowhere
+# to gain and nowhere to lose (the Phase 6 rehearsal says exactly this).
+# This section grows the store past one hundred memories with three kinds
+# of pressure the reranker is proposed against:
+#
+#   * near-miss pairs — memories that read alike and answer different
+#     questions, where the vector and keyword legs agree on the wrong
+#     one and full cross-attention is supposed to separate them;
+#   * abstract-category clusters — an "anything about X" query whose
+#     answer is three memories sharing a theme and no vocabulary;
+#   * realistic filler so the numbers are not trivially perfect.
+#
+# Filler rules learned the hard way in Phases 1–2: every entry stays
+# concrete (a generic sentence is what a generic query like "how do I do
+# it" drifts toward), and none of it shares vocabulary with the
+# `negative` queries above — the negatives must keep passing at the
+# floor as the corpus grows, or the Phase 7 ship gate reads corpus drift
+# as a calibration break. Words like "best" (the Phase 2 noise word) are
+# avoided outright.
+# ─────────────────────────────────────────────────────────────────────
+
+# Near-miss pair 1 — the two "waits N seconds" memories.
+[[memory]]
+content = "The HTTP client gives up on an API request after ten seconds and retries twice"
+category = "fact.project"
+tags = ["http"]
+
+[[memory]]
+content = "Connection acquisition against the database fails after two seconds rather than queueing"
+category = "fact.project"
+tags = ["database"]
+
+# Near-miss pair 2 — caches that expire, for different things.
+[[memory]]
+content = "Static assets are served from the CDN with a seven day cache header"
+category = "fact.project"
+tags = ["frontend"]
+
+[[memory]]
+content = "Redis holds session records for fifteen minutes after the last request"
+category = "fact.project"
+tags = ["cache"]
+
+# Near-miss pair 3 — retrying a queued job vs retrying a request (pair 1).
+[[memory]]
+content = "The payment worker requeues a failed job up to three times with exponential backoff"
+category = "fact.project"
+tags = ["jobs"]
+
+# Near-miss pair 4 — the certificate lives at the balancer; nginx proxies.
+[[memory]]
+content = "The TLS certificate for the apex domain is renewed by the load balancer certificate manager"
+category = "fact.project"
+tags = ["infrastructure", "security"]
+
+[[memory]]
+content = "Nginx proxies /api traffic to the backend and strips the X-Forwarded headers"
+category = "fact.project"
+tags = ["infrastructure"]
+
+# Near-miss pair 5 — two reviewers of different territories (Sam is the other).
+[[memory]]
+content = "Ines owns the design system and reviews every pull request touching shared components"
+category = "fact.person"
+tags = ["team", "review"]
+
+# Near-miss pair 6 — pgvector used by search today vs the old failed migration.
+[[memory]]
+content = "Product search runs on the pgvector extension in Postgres since retiring Elasticsearch"
+category = "fact.project"
+tags = ["search"]
+
+# Statement-style targets — memories phrased as rules, queried as situations.
+[[memory]]
+content = "Migrations run inside the deploy job, never by hand against production"
+category = "skill"
+tags = ["migrations", "production"]
+
+[[memory]]
+content = "Feature flags wrap risky backend changes until they have survived a week of traffic"
+category = "decision"
+tags = ["releases"]
+
+# Abstract-category cluster — errors and observability.
+[[memory]]
+content = "The team wraps errors with anyhow context at the boundary and never swallows one"
+category = "preference.coding"
+tags = ["rust", "errors"]
+
+[[memory]]
+content = "Every 500 response logs a trace id linking to the OpenTelemetry span"
+category = "fact.project"
+tags = ["observability"]
+
+[[memory]]
+content = "Alerts page only on sustained error rates and post to the platform channel otherwise"
+category = "fact.project"
+tags = ["alerts"]
+
+# Abstract-category cluster — public API rules.
+[[memory]]
+content = "Public API pagination uses cursors, not offsets, past the first thousand rows"
+category = "preference.coding"
+tags = ["api"]
+
+[[memory]]
+content = "Breaking changes to a public endpoint require a new version segment under /v1"
+category = "preference.coding"
+tags = ["api"]
+
+[[memory]]
+content = "Error payloads follow the RFC 9457 problem-details shape"
+category = "preference.coding"
+tags = ["api"]
+
+# Abstract-category cluster — the development environment.
+[[memory]]
+content = "A fresh laptop needs rustup, just and docker before the first build succeeds"
+category = "skill"
+tags = ["onboarding"]
+
+[[memory]]
+content = "Dotenv files load through direnv and are never exported by hand"
+category = "preference.coding"
+tags = ["tooling"]
+
+[[memory]]
+content = "The devcontainer runs the daemon on port 7070 with the local model mounted"
+category = "fact.project"
+tags = ["tooling"]
+
+# Abstract-category cluster — how pull requests move.
+[[memory]]
+content = "Pull requests merge after one approval and green CI"
+category = "fact.project"
+tags = ["review", "process"]
+
+[[memory]]
+content = "Reviewers self-assign and turn reviews around the same day"
+category = "fact.project"
+tags = ["review", "process"]
+
+# Filler — coding preferences.
+[[memory]]
+content = "User names branches with the ticket key first, like RA-1234-add-cursor-pagination"
+category = "preference.coding"
+subcategory = "naming"
+tags = ["git"]
+
+[[memory]]
+content = "User prefers constructor injection over any service locator"
+category = "preference.coding"
+tags = ["architecture"]
+
+[[memory]]
+content = "Commit messages read as one-line summaries a rebase can survive"
+category = "preference.coding"
+subcategory = "naming"
+tags = ["git"]
+
+[[memory]]
+content = "User extracts guard clauses instead of nesting conditionals three deep"
+category = "preference.coding"
+tags = ["style"]
+
+[[memory]]
+content = "Rust error Display strings never leak internals to the caller"
+category = "preference.coding"
+tags = ["rust", "errors"]
+
+[[memory]]
+content = "Public items carry a doc comment written for a reader new to the file"
+category = "preference.coding"
+subcategory = "docs"
+tags = ["docs"]
+
+[[memory]]
+content = "User keeps functions under forty lines and files under four hundred"
+category = "preference.coding"
+subcategory = "structure"
+tags = ["style"]
+
+[[memory]]
+content = "User writes explicit lifetimes in signatures even where elision would do"
+category = "preference.coding"
+tags = ["rust"]
+
+[[memory]]
+content = "Schema changes ship with their rollback migration in the same change"
+category = "preference.coding"
+tags = ["migrations"]
+
+[[memory]]
+content = "User formats Python with ruff and black, in that order"
+category = "preference.coding"
+tags = ["python", "tooling"]
+
+[[memory]]
+content = "Test names read as sentences describing behaviour, not method names"
+category = "preference.coding"
+subcategory = "testing"
+tags = ["testing", "naming"]
+
+[[memory]]
+content = "Dependency versions stay pinned by a lockfile and floating ranges are refused"
+category = "preference.coding"
+tags = ["tooling"]
+
+[[memory]]
+content = "Feature branches get split once they pass two hundred lines"
+category = "preference.coding"
+tags = ["git", "review"]
+
+[[memory]]
+content = "Timestamps are stored in UTC and timezone-carrying columns are rejected in review"
+category = "preference.coding"
+tags = ["database"]
+
+# Filler — project facts.
+[[memory]]
+content = "The admin console is a Remix app mounted under /admin"
+category = "fact.project"
+tags = ["frontend"]
+
+[[memory]]
+content = "Nightly jobs run at 02:00 UTC and report to the ops dashboard"
+category = "fact.project"
+tags = ["jobs"]
+
+[[memory]]
+content = "Staging runs one replica behind a small droplet and mirrors the production config"
+category = "fact.project"
+tags = ["infrastructure"]
+
+[[memory]]
+content = "The mobile client supports iOS 16 and Android 13 as minimums"
+category = "fact.project"
+tags = ["mobile"]
+
+[[memory]]
+content = "Grafana dashboards live in dashboards/ and ship from this repository"
+category = "fact.project"
+tags = ["observability"]
+
+[[memory]]
+content = "The public status page is hosted by BetterStack"
+category = "fact.project"
+tags = ["operations"]
+
+[[memory]]
+content = "Weekly infrastructure cost reports post to the finance channel"
+category = "fact.project"
+tags = ["operations"]
+
+[[memory]]
+content = "The onboarding guide lives in docs/onboarding.md and Amara keeps it current"
+category = "reference"
+tags = ["docs"]
+
+[[memory]]
+content = "Image resizing happens on the fly through thumbor"
+category = "fact.project"
+tags = ["media"]
+
+[[memory]]
+content = "Transactional email goes through Postmark with receipts in the ops inbox"
+category = "fact.project"
+tags = ["email"]
+
+[[memory]]
+content = "The search index rebuilds nightly and takes about forty minutes"
+category = "fact.project"
+tags = ["search"]
+
+[[memory]]
+content = "Feature usage metrics stream to PostHog"
+category = "fact.project"
+tags = ["analytics"]
+
+[[memory]]
+content = "The edge functions run on Cloudflare Workers"
+category = "fact.project"
+tags = ["infrastructure"]
+
+# Filler — decisions.
+[[memory]]
+content = "Export pagination moved to cursors because deep offsets made the nightly archive crawl"
+category = "decision"
+tags = ["exports"]
+
+[[memory]]
+content = "The repository stays a monorepo instead of splitting per package"
+category = "decision"
+tags = ["tooling"]
+
+[[memory]]
+content = "Kubernetes adoption waits until a third service exists"
+category = "decision"
+tags = ["infrastructure"]
+
+[[memory]]
+content = "The marketing site ships server-side rendered rather than as a single-page app"
+category = "decision"
+tags = ["frontend"]
+
+# Filler — experiences.
+[[memory]]
+content = "The March outage came from a connection pool sized below the export concurrency"
+category = "experience"
+tags = ["incident"]
+
+[[memory]]
+content = "A misconfigured rate limiter once blocked legitimate traffic for twenty minutes"
+category = "experience"
+tags = ["incident"]
+
+[[memory]]
+content = "The GraphQL prototype was dropped because caching it correctly cost more than plain HTTP endpoints"
+category = "experience"
+tags = ["api"]
+
+[[memory]]
+content = "A leaked file handle in the export worker caused weeks of flaky integration tests"
+category = "experience"
+tags = ["testing"]
+
+# Filler — skills and references.
+[[memory]]
+content = "Rolling back a release is deploy-prod with the previous sha and takes three minutes"
+category = "skill"
+tags = ["deployment"]
+
+[[memory]]
+content = "Rebuilding the search index means the reindex command with the daemon stopped"
+category = "skill"
+tags = ["search", "operations"]
+
+[[memory]]
+content = "Rotating an API key means issuing a replacement and deleting the old row"
+category = "skill"
+tags = ["security"]
+
+[[memory]]
+content = "The runbook for the search cluster sits in the wiki under ops/search"
+category = "reference"
+tags = ["docs"]
+
+[[memory]]
+content = "The API contract is generated from openapi.yaml at the repository root"
+category = "reference"
+tags = ["api", "docs"]
+
+[[memory]]
+content = "Postgres tuning notes live at https://example.com/notes/pg-tuning"
+category = "reference"
+tags = ["docs", "postgres"]
+
+[[memory]]
+content = "Brand assets live on the shared drive under brand/2026"
+category = "reference"
+tags = ["design"]
+
+# Filler — people and personal preferences.
+[[memory]]
+content = "Jonas handles the vendor relationships for infrastructure contracts"
+category = "fact.person"
+tags = ["team"]
+
+[[memory]]
+content = "Amara is on parental leave until March"
+category = "fact.person"
+tags = ["team"]
+
+[[memory]]
+content = "Sam co-hosts the Thursday backend guild"
+category = "fact.person"
+tags = ["team"]
+
+[[memory]]
+content = "Theo joined from the payments team last year"
+category = "fact.person"
+tags = ["team"]
+
+[[memory]]
+content = "User drinks oolong tea and keeps a kettle at the desk"
+category = "preference.personal"
+tags = ["habits"]
+
+[[memory]]
+content = "User books deep work before noon and meetings after"
+category = "preference.personal"
+tags = ["habits"]
+
+[[memory]]
+content = "User cycles to work whenever the forecast stays dry"
+category = "preference.personal"
+tags = ["habits"]
+
+[[memory]]
+content = "One-on-ones happen standing, walking around the block"
+category = "preference.personal"
+tags = ["habits"]
+
+[[memory]]
+content = "User reads physical books and refuses an e-reader"
+category = "preference.personal"
+tags = ["habits"]
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 7.1 cases (reranking-plan.md).
+#
+# These measure what the second stage is for: heads where fusion puts a
+# near-lookalike first. They are scored on this grown corpus, and the
+# Phase 7 grid compares them off-vs-on, so a case whose gold moved with
+# the expansion must be corrected *here*, not quietly in the baseline.
+#
+#   `near-miss` — the query has a distractor memory that shares its
+#     shape ("waits N seconds", "reviews every pull request") and only
+#     the right memory answers it.
+#
+#   `statement` — declarative situation phrasing ("I am about to X"),
+#     the cross-encoder's blind spot by training (question→passage), so
+#     its distribution is measured explicitly in task 7.4.
+# ─────────────────────────────────────────────────────────────────────
+
+[[case]]
+name = "near-miss: slow upstream call"
+kind = "near-miss"
+# The two-seconds database memory shares the "fails after N seconds"
+# shape; only the HTTP memory answers an upstream call.
+query = "how long does a request wait when the upstream API is slow"
+expect = ["The HTTP client gives up on an API request after ten seconds and retries twice"]
+
+[[case]]
+name = "near-miss: stale assets after deploy"
+kind = "near-miss"
+query = "why is the site still serving old static assets days after a deploy"
+expect = ["Static assets are served from the CDN with a seven day cache header"]
+
+[[case]]
+name = "near-miss: charge stuck in the queue"
+kind = "near-miss"
+query = "what happens when a payment job fails processing"
+expect = ["The payment worker requeues a failed job up to three times with exponential backoff"]
+
+[[case]]
+name = "near-miss: renewing the certificate"
+kind = "near-miss"
+query = "where do I renew the HTTPS certificate"
+expect = ["The TLS certificate for the apex domain is renewed by the load balancer certificate manager"]
+
+[[case]]
+name = "near-miss: shared component review"
+kind = "near-miss"
+# Sam ("reviewer for anything touching authentication") is the distractor.
+query = "who reviews a pull request that changes a shared button component"
+expect = ["Ines owns the design system and reviews every pull request touching shared components"]
+
+[[case]]
+name = "near-miss: what search runs on"
+kind = "near-miss"
+# The failed pgvector migration memory is the distractor.
+query = "what powers product search right now"
+expect = ["Product search runs on the pgvector extension in Postgres since retiring Elasticsearch"]
+
+[[case]]
+name = "near-miss: cursor pagination why"
+kind = "near-miss"
+# The export-scoped decision is the distractor; the public-API rule answers.
+query = "what is the rule about pagination in the public API"
+expect = ["Public API pagination uses cursors, not offsets, past the first thousand rows"]
+
+[[case]]
+name = "statement: raw SQL in Go"
+kind = "statement"
+query = "I am pasting user input straight into a SQL query for Postgres from Go"
+expect = ["Only parameterized queries are permitted for database operations"]
+
+[[case]]
+name = "statement: many exports in one file"
+kind = "statement"
+query = "my TypeScript module exports a dozen helper functions from one file"
+expect = ["User requires one export per file in TypeScript projects"]
+
+[[case]]
+name = "statement: hand-run migration"
+kind = "statement"
+query = "a teammate is about to run a schema change directly on production"
+expect = ["Migrations run inside the deploy job, never by hand against production"]
+
+[[case]]
+name = "statement: nervous about shipping"
+kind = "statement"
+query = "we are shipping a risky backend change we are not confident in"
+expect = ["Feature flags wrap risky backend changes until they have survived a week of traffic"]
+
+[[case]]
+name = "nl-category: errors and logging"
+kind = "nl-category"
+query = "anything about errors and logging"
+expect = [
+    "The team wraps errors with anyhow context at the boundary and never swallows one",
+    "Every 500 response logs a trace id linking to the OpenTelemetry span",
+    "Alerts page only on sustained error rates and post to the platform channel otherwise",
+]
+
+[[case]]
+name = "nl-category: public API rules"
+kind = "nl-category"
+query = "rules for our public HTTP API"
+expect = [
+    "Public API pagination uses cursors, not offsets, past the first thousand rows",
+    "Breaking changes to a public endpoint require a new version segment under /v1",
+    "Error payloads follow the RFC 9457 problem-details shape",
+]
+
+[[case]]
+name = "nl-category: setting up my machine"
+kind = "nl-category"
+query = "getting my laptop set up for this project"
+expect = [
+    "A fresh laptop needs rustup, just and docker before the first build succeeds",
+    "Dotenv files load through direnv and are never exported by hand",
+    "The devcontainer runs the daemon on port 7070 with the local model mounted",
+]
+
+[[case]]
+name = "nl-category: how reviews move"
+kind = "nl-category"
+query = "how pull requests get reviewed around here"
+expect = [
+    "Pull requests merge after one approval and green CI",
+    "Reviewers self-assign and turn reviews around the same day",
+]
+
+[[case]]
+name = "negative: succulents"
+kind = "negative"
+expect_empty = true
+query = "how long should indoor succulents rest over winter"
+
+[[case]]
+name = "negative: moka pot grind"
+kind = "negative"
+expect_empty = true
+query = "grind size for a moka pot"
+
+[[case]]
+name = "negative: world cup nineteen ninety eight"
+kind = "negative"
+expect_empty = true
+query = "who won the world cup final in nineteen ninety eight"
