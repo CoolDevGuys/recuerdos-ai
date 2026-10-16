@@ -58,6 +58,7 @@ use crate::bootstrap::wiring;
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
 use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
+use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{RerankStrategy, ScoredMemory};
@@ -148,12 +149,38 @@ pub struct QueryAudit {
     /// is a different memory. Everything else moving is noise by comparison;
     /// this is what a client's answer is built from.
     pub top1_changed: bool,
+    /// Whether the second stage actually contributed to `after`.
+    ///
+    /// The agreement figures are hard to read without it: `before` and `after`
+    /// are identical both when reranking agrees and when the stage produced
+    /// nothing at all — a model that failed every call, or a `--depth 1` run
+    /// where no head was ever two wide. Metered calls cannot tell those apart,
+    /// because a call that failed really did happen.
+    ///
+    /// (The audit runs with no deadline, on purpose — measuring what the model
+    /// costs is half the point — so `deadline` cannot appear here today. It is
+    /// reported rather than assumed away, because a future audit that replays
+    /// with the deployment's own deadline would otherwise inherit this blind
+    /// spot.)
+    pub contributed: bool,
+    /// Why it did not contribute, when it did not: `deadline` (past
+    /// `[rerank].timeout_ms`), `model`, or `not-needed` (fewer than two
+    /// candidates to reorder).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
     /// 1-based rank of the first memory containing `expect` before / after,
     /// `None` when there was no expectation or it was not in the window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_before: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_after: Option<usize>,
+}
+
+impl QueryAudit {
+    /// Whether this query's second stage gave up for exactly this reason.
+    fn died_at(&self, reason: &str) -> bool {
+        self.skip_reason.as_deref() == Some(reason)
+    }
 }
 
 /// One result within an ordering.
@@ -196,7 +223,26 @@ pub struct AuditSummary {
     /// Reranker calls that ran — one per query whose fused head had two or
     /// more candidates to reorder. Zero means the stage never fired, and the
     /// latency lines below have nothing to say.
+    ///
+    /// Read it beside `contributed`: a call that missed its deadline is metered
+    /// here because it really did run, and still changed nothing.
     pub rerank_calls: usize,
+    /// Queries where the stage's order is actually in the "after" column. Any
+    /// figure below `queries` means part of this report compares a reranked
+    /// list with itself, which is why [`print_human`] says so out loud.
+    pub contributed: usize,
+    /// Of the queries that did not contribute: how many ran out of time. The
+    /// audit runs deadline-free today (see [`QueryAudit::contributed`]), so
+    /// this is zero unless that policy changes — it is counted rather than
+    /// assumed away, because the blind spot is the interesting part.
+    pub skipped_deadline: usize,
+    /// …how many failed inside the model (including scores that did not line
+    /// up with the candidates given). The one a real audit can hit today.
+    pub skipped_model: usize,
+    /// …and how many had fewer than two candidates to reorder: `--depth 1`, or
+    /// a store where each query matches one memory. A fact about the run and
+    /// the corpus, not about the stage's quality.
+    pub not_needed: usize,
     /// The range of candidates the reranker actually judged per call.
     /// `[rerank].depth` is the ceiling; on a small store the corpus is, and
     /// latency scales with this number rather than with the ceiling — which
@@ -347,7 +393,26 @@ fn audit_one(
     let request = RecallQuery::new(&query.text, limit as i64)?;
     // Untracked, both sides: this is the whole reason 6.1 exists.
     let before = recall.plain.execute_untracked(context, &request)?;
-    let after = recall.reranked.execute_untracked(context, &request)?;
+    let report = recall
+        .reranked
+        .execute_untracked_traced(context, &request)?;
+    let after = report.results;
+
+    // Whether the "after" column is actually reranked. `None` means no stage
+    // ran at all, which for the audit can only be a wiring bug — treated as
+    // "did not contribute", because that is what the reader needs to know.
+    let (contributed, skip_reason) = match &report.rerank {
+        Some(RerankTrace::Applied { .. }) => (true, None),
+        Some(RerankTrace::Skipped { reason, .. }) => (
+            false,
+            Some(match reason {
+                RerankSkip::Deadline => "deadline",
+                RerankSkip::Model => "model",
+            }),
+        ),
+        Some(RerankTrace::NotNeeded { .. }) => (false, Some("not-needed")),
+        Some(RerankTrace::Shadow { .. }) | None => (false, Some("not-applied")),
+    };
 
     let (before_positions, after_positions) = (ranks(&before), ranks(&after));
     Ok(QueryAudit {
@@ -356,6 +421,8 @@ fn audit_one(
         before: lines(&before, &after_positions),
         after: lines(&after, &before_positions),
         top1_changed: changed_top1(&before, &after),
+        contributed,
+        skip_reason: skip_reason.map(str::to_string),
         expected_before: expected_rank(&before, query.expect.as_deref()),
         expected_after: expected_rank(&after, query.expect.as_deref()),
     })
@@ -488,6 +555,10 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
         },
         mean_rank_displacement: mean_rank_displacement(rows),
         rerank_calls: timings.len(),
+        contributed: rows.iter().filter(|row| row.contributed).count(),
+        skipped_deadline: rows.iter().filter(|row| row.died_at("deadline")).count(),
+        skipped_model: rows.iter().filter(|row| row.died_at("model")).count(),
+        not_needed: rows.iter().filter(|row| row.died_at("not-needed")).count(),
         rerank_candidates_low: percentile(&judged, 0.0).map(|value| value as usize),
         rerank_candidates_high: percentile(&judged, 100.0).map(|value| value as usize),
         rerank_ms_p50: percentile(
@@ -728,6 +799,39 @@ pub fn print_human(report: &AuditReport) {
 
     let summary = &report.summary;
     println!("\n{}", "─".repeat(78));
+    if summary.contributed < summary.queries {
+        // Before any number, because this is the case where the numbers
+        // describe nothing: a stage that missed its deadline served the
+        // `before` order, so the two columns agree for a reason that has
+        // nothing to do with reranking quality — and a metered call cannot
+        // tell that apart from a stage that agreed.
+        let quiet = summary.queries - summary.contributed;
+        println!(
+            "⚠ the stage contributed to {}/{} queries: {} served the pre-rerank order, \
+             so the agreement above is not evidence.",
+            summary.contributed, summary.queries, quiet
+        );
+        let mut reasons: Vec<String> = Vec::new();
+        if summary.skipped_deadline > 0 {
+            reasons.push(format!(
+                "{} ran out of time (raise [rerank].timeout_ms, or lower [rerank].depth)",
+                summary.skipped_deadline
+            ));
+        }
+        if summary.skipped_model > 0 {
+            reasons.push(format!("{} failed inside the model", summary.skipped_model));
+        }
+        if summary.not_needed > 0 {
+            reasons.push(format!(
+                "{} had fewer than two candidates to reorder — the floor and the store, \
+                 not the stage",
+                summary.not_needed
+            ));
+        }
+        if !reasons.is_empty() {
+            println!("   {}", reasons.join("; "));
+        }
+    }
     println!(
         "top-1 changed: {}/{} ({:.1}%)   mean rank displacement: {:.2}",
         summary.top1_changed,
