@@ -170,6 +170,9 @@ volume.
 
 ## 6. Upgrade
 
+Take the backup from step 5 first — cheap insurance, and the one thing
+you cannot redo afterwards. Then:
+
 ```bash
 docker pull ghcr.io/cooldevguys/recuerdos-ai
 docker stop recuerdos-ai && docker rm recuerdos-ai
@@ -178,6 +181,64 @@ docker stop recuerdos-ai && docker rm recuerdos-ai
 
 The storage format migrates itself forward on start; it has done so
 cleanly across every release so far.
+
+### What `v0.4.0` does on its first start
+
+Upgrading from `v0.3.x` or earlier, two things happen before the daemon
+serves its first request. Both are worth watching once, because the first
+one prints:
+
+- **The keyword index is rebuilt.** `v0.4.0` changed the BM25 analyzer (it
+  no longer indexes stopwords like "what" and "the"), and the index lives in
+  a new versioned directory, so an existing store's keyword leg is rebuilt
+  from the `memories` table. It is derived state: nothing in the table is
+  modified, and it makes no model calls — at personal scale, seconds.
+
+  ```
+  rebuilt the keyword index for 1 users (108 memories)
+  ```
+
+  If the rebuild fails, the start **fails with it** rather than serving a
+  silently crippled keyword leg, and the message names the repair —
+  `stop the daemon and run \`recuerdos-ai reindex --text\` with the same
+  config`. Which is what to do: stop the container, rebuild against the same
+  volume, start again:
+
+  ```bash
+  docker stop recuerdos-ai
+  docker run --rm -v recuerdos-ai-data:/data \
+    ghcr.io/cooldevguys/recuerdos-ai reindex --text
+  ```
+
+  The daemon has to be the one that is stopped, not the rebuild: run
+  `reindex --text` while the daemon is up and tantivy refuses the writer,
+  exactly as it should —
+
+  ```
+  error: internal error: failed to open a text index writer: Failed to
+  acquire Lockfile: LockBusy. Some("Failed to acquire index lock. …")
+  ```
+
+  `reindex --text` is also the repair for an interrupted rebuild: it rebuilds
+  unconditionally and is safe to repeat.
+
+- **Nothing needs re-embedding.** Relevance is now calibrated per embedding
+  model instead of assuming one constant, and that is a change to how stored
+  vectors are *read*, not to the vectors: `v0.4.0` verified (`recuerdos-ai
+  calibrate`, min/max/mean norms all `1.0000` at 3072 dims) that hosted
+  embeddings arrive unit-normalised, so the new baseline needed no embedder
+  change and **no reindex**. `recuerdos-ai reindex` remains what you run when
+  you change the embedding *model*, nothing more.
+
+  Do look at the number in force once after upgrading, if you use a hosted
+  embedder: `recuerdos-ai calibrate` prints the baseline and the noise floor
+  it measured, and [configuration.md](configuration.md) explains what the
+  baseline does and what it looks like when it is wrong.
+
+The reranker is not part of an upgrade: `mode = off` is the default, so
+`v0.4.0` downloads no rerank model and loads no extra weights until you ask
+for them. See [Optional: second-stage reranking](#optional-second-stage-reranking)
+when you want it.
 
 ---
 
@@ -238,6 +299,144 @@ Confirm what is actually in force at any time — no secrets printed:
 ```bash
 docker exec recuerdos-ai recuerdos-ai config
 ```
+
+---
+
+## Optional: second-stage reranking
+
+The recall legs embed the query and each memory *separately* and compare
+the result. A cross-encoder does something the legs structurally cannot: it
+reads the query and one candidate **together** and scores the pair, which
+catches the memory that shares no words with the question and is not linked
+in the graph either. On the eval set that is worth **+5.8 precision@1**.
+
+It is opt-in, and deliberately stays that way. The stage costs a second ONNX
+model on the request path, and the gain is real but not free:
+
+| | Default (`bge-reranker-base`) | Smallest (`jina-reranker-v1-turbo-en`) |
+|---|---|---|
+| Weights | 1.1 GB | 147 MB |
+| RAM per concurrent inference | ~1.5 GiB | ~180 MiB |
+| Added recall latency (p50 / p95) | +59 / +71 ms | +16 / +20 ms |
+| Measured precision@1 gain | **+5.8** | +1.9 (inside noise) |
+
+There is no middle tier that keeps the gain: the small model is cheap because
+it is weak, not because it is compact. If your box cannot hold 1.5 GiB for a
+second stage, the honest setting is `mode = "off"`. Language is the other axis
+to choose on: the default ranks English and Chinese, and the multilingual
+candidates are costed beside it in
+[configuration.md](configuration.md#language-what-the-default-model-actually-speaks).
+
+### 1. Judge it on your own store first
+
+The eval corpus is not your memories. `rerank audit` replays your queries
+over your real store twice — as served today, and with the stage on — and
+prints both orderings, how often the head moved, and what it cost. It writes
+nothing (no access counters, no index writes), so **the daemon can stay
+running** while it works, and it loads the model whatever `mode` says.
+
+Write a query file — one query per line, or TOML blocks with an `expect`
+substring naming the memory that *should* come first:
+
+```toml
+# queries.toml
+[[query]]
+text = "what database is behind the billing service"
+expect = "ledger-db"
+
+[[query]]
+text = "does alex prefer short answers"
+expect = "short answers"
+```
+
+```bash
+docker run --rm -v recuerdos-ai-data:/data \
+  ghcr.io/cooldevguys/recuerdos-ai rerank audit \
+  --queries queries.toml --user alex
+```
+
+Read the `top-1 changed` count and the p@1/MRR before-and-after pair. If the
+stage does not improve *your* queries on *your* store, it will not improve
+your agent's either — that is a legitimate answer, and the eval found the
+same about corpora where the fused order is already right.
+
+Shadow mode is the same judgment on traffic you did not have to invent: set
+`mode = "shadow"` and the daemon scores every real recall and logs one
+`rerank_shadow` line per query (ids and ranks, never content) while serving
+the old order. A week of that, then `grep -c 'changed=true'`. Details in
+[`docs/evaluation.md`](evaluation.md).
+
+### 2. Give it the weights
+
+The model has to be on disk. `/models` inside the image is a **baked
+directory, not a volume**, so an unbaked model is downloaded at first start,
+into the container's own writable layer — lost on the next `docker rm`, and
+fatal on a host with no network. Two ways to have it there:
+
+**Bake it into the image** (what a personal deployment wants — no runtime
+download, and the image is self-contained):
+
+```bash
+docker build -f docker/Dockerfile \
+  --build-arg RERANK_MODEL=bge-reranker-base \
+  -t recuerdos-ai:rerank .
+```
+
+That adds ~1.1 GB to the image. The default published image carries no rerank
+model at all, because most deployments never turn the stage on and should not
+pay for it.
+
+**Or mount the model cache** so one download survives recreates (and can be
+pre-warmed with the `warm-models` command):
+
+```bash
+docker run -d --name recuerdos-ai \
+  --restart unless-stopped \
+  -p 127.0.0.1:7070:7070 \
+  -v recuerdos-ai-data:/data \
+  -v recuerdos-ai-models:/models \
+  ghcr.io/cooldevguys/recuerdos-ai
+docker run --rm -v recuerdos-ai-models:/models \
+  -e RECUERDOS_AI_RERANK__MODE=on \
+  ghcr.io/cooldevguys/recuerdos-ai warm-models
+```
+
+If the stage is enabled and the weights are genuinely unavailable, startup
+fails with the model named and the remedy in the message:
+
+```
+error: internal error: failed to load rerank model "bge-reranker-base"
+(from BAAI/bge-reranker-base) into /models: Failed to retrieve model file:
+onnx/model.onnx. If this host has no internet access, pre-populate the cache
+with `recuerdos-ai warm-models` or bake the model into the image.
+```
+
+It never quietly falls back: a deployment that asked for a second stage and
+cannot load one finds out at boot, not in the middle of a recall.
+
+### 3. Turn it on
+
+```toml
+[rerank]
+mode = "on"
+```
+
+or, without editing the file, `-e RECUERDOS_AI_RERANK__MODE=on`. Restart, and
+confirm the block expanded (it shows one line while off):
+
+```bash
+docker exec recuerdos-ai recuerdos-ai config
+```
+
+Expect recall latency to rise by roughly the table's numbers, idle RSS to
+rise by the model's, and every other behaviour to be unchanged: a rerank
+deadline overrun drops the stage and serves the fused order with a warning,
+so the second stage can cost you milliseconds but never a failed request.
+
+Turning it off is the same edit in reverse — `mode = "off"` and restart.
+Nothing about it is persisted into your memories: a rerank score is a property
+of one query against one candidate list, not of a stored memory, which is why
+there is no "rerank everything" command and no migration to undo.
 
 ---
 
