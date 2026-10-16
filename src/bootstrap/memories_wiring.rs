@@ -1,6 +1,7 @@
 //! Composition root for the memories context.
 
 use crate::bootstrap::config::AppConfig;
+use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::memory_exporter::MemoryExporter;
 use crate::memories::application::memory_finder::MemoryFinder;
@@ -124,37 +125,23 @@ impl Memories {
         embedder: Arc<dyn Embedder>,
         reranker: Option<WiredReranker>,
     ) -> Result<Self> {
-        let concrete_repository = SqliteMemoryRepository::new(
-            Arc::clone(&database),
-            embedder.model_id(),
-            embedder.dimensions(),
-        );
-        // Fail fast, before the vector table is opened at the new width:
-        // a store built by a different model must send the operator to
-        // `reindex` with a clear message, not surface later as a raw
-        // dimension-mismatch on the first recall.
-        concrete_repository.verify_pin()?;
-        let repository: Arc<dyn MemoryRepository> = Arc::new(concrete_repository);
-        let vectors: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::open(
-            Arc::clone(&database),
-            embedder.dimensions(),
-        )?);
-        let text: Arc<dyn TextIndex> = Arc::new(TantivyTextIndex::open(
-            config.data_dir().join(TEXT_INDEX_DIR),
-        )?);
-        // Built only when enabled. Off (the default) leaves it `None`, so
-        // no edge is ever written and recall is byte-identical to a build
-        // without the graph — the "inert until asked for" guarantee.
-        let graph: Option<Arc<dyn EntityGraph>> = if config.graph.enabled {
-            Some(Arc::new(SqliteEntityGraph::new(Arc::clone(&database))))
-        } else {
-            None
-        };
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        // Indexes, repository, graph, clock and the tuned ranker come from
+        // one place, shared with the audit's read-only pair
+        // (`assemble_audit_recall`): the audit compares two pipelines and
+        // that comparison is worthless if only one of them is the one the
+        // daemon runs.
+        let RecallCore {
+            repository,
+            vectors,
+            text,
+            graph,
+            clock,
+            ranker,
+        } = RecallCore::open(config, &database, &embedder, false)?;
 
-        // The rerank knobs travel the whole way here — the strategy and
-        // weight onto the ranker, the reranker itself plus mode/depth/
-        // timeout onto the recaller — because a placeholder value lost
+        // The rerank knobs travel the whole way here — the reranker itself
+        // plus mode/depth/timeout onto the recaller, the strategy and weight
+        // already carried by `ranker` — because a placeholder value lost
         // between config and a struct default is exactly the drift the
         // Phase 2 baseline map exists to prevent. `with_rerank_strategy`
         // is inert while the recaller has no reranker to score with
@@ -166,13 +153,7 @@ impl Memories {
             Arc::clone(&vectors),
             Arc::clone(&text),
             Arc::clone(&embedder),
-            RecallRanker::new(config.retrieval.recency_half_life_days)
-                .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
-                .with_relevance_calibration(RelevanceCalibration::new(resolve_similarity_baseline(
-                    config,
-                    embedder.model_id(),
-                )))
-                .with_rerank_strategy(rerank_strategy(&config.rerank)),
+            ranker,
             Arc::clone(&clock),
             graph.clone(),
             config.graph.max_hops,
@@ -226,6 +207,149 @@ impl Memories {
             min_relevance: config.retrieval.min_relevance,
         })
     }
+}
+
+/// The read side of a memories instance: the indexes, the system of
+/// record, the graph and the tuned ranker, with nothing that writes.
+///
+/// Extracted from [`Memories::assemble_with_reranker`] so that
+/// [`assemble_audit_recall`] builds its pipelines from the *same* parts in
+/// the *same* order. An audit whose "before" pipeline had drifted from the
+/// served one would report a difference that was only the drift.
+struct RecallCore {
+    repository: Arc<dyn MemoryRepository>,
+    vectors: Arc<dyn VectorIndex>,
+    text: Arc<dyn TextIndex>,
+    graph: Option<Arc<dyn EntityGraph>>,
+    clock: Arc<dyn Clock>,
+    /// The ranker exactly as `[retrieval]`, `[graph]` and `[rerank]`
+    /// configure it, including the rerank strategy and weight.
+    ranker: RecallRanker,
+}
+
+impl RecallCore {
+    /// Opens the retrieval stack. `read_only_text` decides how the keyword
+    /// index is opened: `false` for the daemon (it writes), `true` for
+    /// [`assemble_audit_recall`], which must neither write nor take the
+    /// writer lock a running daemon is holding.
+    fn open(
+        config: &AppConfig,
+        database: &Arc<SqliteDatabase>,
+        embedder: &Arc<dyn Embedder>,
+        read_only_text: bool,
+    ) -> Result<Self> {
+        let concrete_repository = SqliteMemoryRepository::new(
+            Arc::clone(database),
+            embedder.model_id(),
+            embedder.dimensions(),
+        );
+        // Fail fast, before the vector table is opened at the new width:
+        // a store built by a different model must send the operator to
+        // `reindex` with a clear message, not surface later as a raw
+        // dimension-mismatch on the first recall.
+        concrete_repository.verify_pin()?;
+        let repository: Arc<dyn MemoryRepository> = Arc::new(concrete_repository);
+        let vectors: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::open(
+            Arc::clone(database),
+            embedder.dimensions(),
+        )?);
+        let text: Arc<dyn TextIndex> = if read_only_text {
+            Arc::new(TantivyTextIndex::open_read_only(
+                config.data_dir().join(TEXT_INDEX_DIR),
+            )?)
+        } else {
+            Arc::new(TantivyTextIndex::open(
+                config.data_dir().join(TEXT_INDEX_DIR),
+            )?)
+        };
+        // Built only when enabled. Off (the default) leaves it `None`, so
+        // no edge is ever written and recall is byte-identical to a build
+        // without the graph — the "inert until asked for" guarantee.
+        let graph: Option<Arc<dyn EntityGraph>> = if config.graph.enabled {
+            Some(Arc::new(SqliteEntityGraph::new(Arc::clone(database))))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            repository,
+            vectors,
+            text,
+            graph,
+            clock: Arc::new(SystemClock),
+            ranker: RecallRanker::new(config.retrieval.recency_half_life_days)
+                .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
+                .with_relevance_calibration(RelevanceCalibration::new(resolve_similarity_baseline(
+                    config,
+                    embedder.model_id(),
+                )))
+                .with_rerank_strategy(rerank_strategy(&config.rerank)),
+        })
+    }
+}
+
+/// One recall pipeline per side of the audit's comparison
+/// (`reranking-plan.md` Phase 6.2).
+pub(crate) struct AuditRecall {
+    /// No second stage: the ordering a client sees today in a deployment
+    /// with `[rerank].mode = "off"`, and the ordering the operator is
+    /// comparing against in any other.
+    pub plain: MemoryRecaller,
+    /// The same pipeline with the reranker attached and `mode = On`, so
+    /// what it prints is what enabling the stage would serve.
+    pub reranked: MemoryRecaller,
+}
+
+/// Builds the audit's two pipelines over a store opened for reading
+/// (`reranking-plan.md` Phase 6.2).
+///
+/// Deliberately not a `Memories`: that context carries the saver, updater
+/// and forgetter, and a command whose entire promise is that it cannot
+/// change a store should not be handed the objects that would.
+///
+/// `depth` is the audit's own (`--depth`, defaulting to `[rerank].depth`)
+/// and the timeout is *none*: this is an offline tool, so measuring what
+/// the model actually costs matters more than bounding a request nobody is
+/// waiting for. The configured `timeout_ms` is still what a live
+/// deployment would enforce, which is why the report prints both.
+pub(crate) fn assemble_audit_recall(
+    config: &AppConfig,
+    database: &Arc<SqliteDatabase>,
+    embedder: Arc<dyn Embedder>,
+    reranker: Arc<dyn Reranker>,
+    context: &UserContext,
+    depth: usize,
+) -> Result<AuditRecall> {
+    let core = RecallCore::open(config, database, &embedder, true)?;
+    // Refuse a store whose keyword leg is dead rather than audit it. The
+    // recaller treats a failing keyword search as degradation — right for a
+    // request, wrong for a measurement: the "before" column would be a
+    // vector-only ordering while reading like the hybrid one the daemon
+    // serves, and every rank delta in the report would be an artefact.
+    if !core.text.is_populated(context) {
+        return Err(RaError::Validation(format!(
+            "user {:?} has no keyword index to read. Stop the daemon and run \
+             `recuerdos-ai reindex --text`, then audit again.",
+            context.handle()
+        )));
+    }
+    let base = MemoryRecaller::new(
+        Arc::clone(&core.repository),
+        Arc::clone(&core.vectors),
+        Arc::clone(&core.text),
+        Arc::clone(&embedder),
+        core.ranker,
+        Arc::clone(&core.clock),
+        core.graph,
+        config.graph.max_hops,
+        config.graph.hop_limit,
+    );
+    // One handle without the stage, one with — from the same clone, so the
+    // only difference between the two orderings is the thing being judged.
+    Ok(AuditRecall {
+        plain: base.with_second_stage(None, RerankMode::Off, depth, Duration::ZERO),
+        reranked: base.with_second_stage(Some(reranker), RerankMode::On, depth, Duration::ZERO),
+    })
 }
 
 /// Resolve the vector-leg relevance baseline for one instance (task 2.2).
@@ -306,12 +430,7 @@ pub(crate) fn build_reranker(config: &AppConfig) -> Result<Option<WiredReranker>
     if mode == RerankMode::Off {
         return Ok(None);
     }
-    let reranker = FastembedReranker::load(
-        &config.rerank.model,
-        config.model_cache_dir(),
-        config.rerank.max_concurrency,
-        config.rerank.batch_size,
-    )?;
+    let reranker = load_reranker(config, config.rerank.max_concurrency)?;
     tracing::info!(
         model = reranker.model_id(),
         ?mode,
@@ -323,6 +442,36 @@ pub(crate) fn build_reranker(config: &AppConfig) -> Result<Option<WiredReranker>
         reranker: Arc::new(reranker),
         mode,
     }))
+}
+
+/// Loads `[rerank].model` for a tool that is not the daemon
+/// (`rerank audit`, reranking-plan.md Phase 6.2).
+///
+/// Unlike [`build_reranker`] this ignores `[rerank].mode` entirely: the
+/// audit exists to *decide* whether the stage is worth enabling, so it has
+/// to work on a deployment where the honest config answer is still `off`.
+/// What it keeps is everything that decides the ordering — model,
+/// strategy, weight, depth — so the "after" column is what enabling the
+/// stage would actually serve.
+///
+/// One inference at a time: nothing else is waiting on this process, and
+/// every unit of concurrency is another copy of the model in RAM on the
+/// small box this command is meant for.
+pub(crate) fn load_reranker_for_audit(config: &AppConfig) -> Result<FastembedReranker> {
+    load_reranker(config, 1)
+}
+
+/// The one place the rerank model is resolved and loaded, so the daemon and
+/// the audit cannot end up judging a different model from the one the
+/// deployment would run. A load failure (missing file, no network to
+/// download it) is an error either way, and names the model.
+fn load_reranker(config: &AppConfig, max_concurrency: usize) -> Result<FastembedReranker> {
+    FastembedReranker::load(
+        &config.rerank.model,
+        config.model_cache_dir(),
+        max_concurrency,
+        config.rerank.batch_size,
+    )
 }
 
 pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {

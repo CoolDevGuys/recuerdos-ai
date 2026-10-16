@@ -222,6 +222,13 @@ pub struct ScoredMemory {
     pub match_detail: MatchDetail,
 }
 
+/// The fusion tuning, as a value.
+///
+/// `Clone` (every field is a `Copy` number) because the audit hands a copy
+/// of one configured ranker to two recallers — the pipeline with the rerank
+/// stage and the pipeline without it (reranking-plan.md Phase 6.2) — and the
+/// comparison is only worth making if both sides fuse identically.
+#[derive(Clone)]
 pub struct RecallRanker {
     recency_half_life_days: f32,
     /// Weight on the graph leg's RRF term (Task 7.3.7). `1.0` is the raw

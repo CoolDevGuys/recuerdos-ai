@@ -101,6 +101,30 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Compare recall with and without the reranker, over memories that
+    /// already exist.
+    ///
+    /// Hidden, like `eval` and `calibrate`: an operator measuring a decision,
+    /// not something a client calls. Replays every query in `--queries` twice
+    /// over the store `--config` points at — once through the pipeline as it
+    /// serves today, once with the second stage switched on — and prints both
+    /// orderings, what moved, and the cost.
+    ///
+    /// It changes nothing: the keyword index is opened read-only and both
+    /// recalls are untracked, so memories, access counters and importance are
+    /// byte-identical afterwards. The daemon may stay running.
+    ///
+    /// This is also the only supported way to run the reranker over an
+    /// existing corpus: there is no `rerank all` command, deliberately —
+    /// rerank scores are a property of a candidate list, not of a stored
+    /// memory (reranking-plan.md §4).
+    #[command(hide = true)]
+    Rerank {
+        #[command(subcommand)]
+        command: RerankCommand,
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+    },
     /// Rebuild derived indexes from the `memories` table.
     ///
     /// With no flags this is the vector reindex: re-embed every memory
@@ -162,6 +186,38 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum RerankCommand {
+    /// Replay queries over one user's real memories and report the two
+    /// orderings: the pipeline as it serves today, and with the reranker on.
+    ///
+    /// Writes nothing — no access counters, no index writes — so the daemon
+    /// may stay running. Loading the rerank model is the point, so it happens
+    /// whatever `[rerank].mode` says.
+    Audit {
+        /// Query file: one query per line (`#` comments allowed), or TOML
+        /// `[[query]]` blocks with `text` and optional `expect` — a substring
+        /// of the memory that *should* come first.
+        #[arg(long)]
+        queries: PathBuf,
+        /// Whose memories to audit. Required when the store has more than one
+        /// user; never guessed.
+        #[arg(long)]
+        user: Option<String>,
+        /// Results per query to print and score.
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        /// How many fused candidates the reranker judges. Defaults to
+        /// `[rerank].depth`, which is what a live request would use.
+        #[arg(long)]
+        depth: Option<usize>,
+        /// The machine-readable report instead of the table: ids, ranks and
+        /// scores, no memory content, safe to commit or paste.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum GraphCommand {
     /// Backfill the graph from what memories already carry.
     Backfill {
@@ -205,6 +261,7 @@ async fn main() {
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::Calibrate { cases, config } => run_calibrate(&cases, config.as_deref()),
+        Command::Rerank { command, config } => run_rerank(command, config.as_deref()),
         Command::Reindex {
             text,
             vectors,
@@ -553,6 +610,43 @@ fn run_eval(
     }
     if let Some(path) = baseline {
         return bootstrap::eval::compare(&report, path, max_drop).map_err(|e| e.to_string());
+    }
+    Ok(())
+}
+
+/// `rerank audit`: the report, on stdout, and nothing else on stdout.
+///
+/// No tracing initialisation, unlike `consolidate` or `reindex` — the audit's
+/// progress line goes to stderr precisely so `--json > run.json` stays
+/// parseable, and a logging layer would put it back on the wrong stream.
+fn run_rerank(command: RerankCommand, config_path: Option<&Path>) -> Result<(), String> {
+    let RerankCommand::Audit {
+        queries,
+        user,
+        limit,
+        depth,
+        json,
+    } = command;
+    // Same config semantics as `eval` and `calibrate`: `--config` decides
+    // which embedder, which rerank model and which tuning is being measured,
+    // so judging production means passing production's config.
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    let report = bootstrap::rerank_audit::run(
+        &config,
+        &bootstrap::rerank_audit::AuditOptions {
+            queries: &queries,
+            user: user.as_deref(),
+            limit,
+            depth,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    if json {
+        let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        println!("{encoded}");
+    } else {
+        bootstrap::rerank_audit::print_human(&report);
     }
     Ok(())
 }

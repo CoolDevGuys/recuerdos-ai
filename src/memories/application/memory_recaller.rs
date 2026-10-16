@@ -15,6 +15,20 @@
 //! because the matching memories never made the candidate window. Pushing
 //! filters into both indexes is the fix, and is worth doing when filtered
 //! recall becomes a common path rather than an occasional one.
+//!
+//! # Reading without leaving a mark
+//!
+//! A real read is a fact about the user's life: the memories it returns
+//! are stamped as accessed, and those counters are the whole input to
+//! importance decay. So [`MemoryRecaller::execute`] writes, deliberately.
+//!
+//! Measuring a store is not. `rerank audit` and the eval harness replay
+//! someone's queries over their *real* memories to compare orderings, and
+//! a replay that bumped the access counters would change the store it came
+//! to observe — and change the answer on the second run, because decay
+//! feeds the ranking it is ranking. [`MemoryRecaller::execute_untracked`]
+//! is that read: identical results, identical order, no bookkeeping
+//! (reranking-plan.md Phase 6.1, invariant I-6).
 
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
@@ -48,6 +62,40 @@ const DEFAULT_RERANK_DEPTH: usize = 30;
 /// The fallback deadline, matching the planned `[rerank].timeout_ms`.
 const DEFAULT_RERANK_TIMEOUT: Duration = Duration::from_millis(400);
 
+/// Whether a recall leaves the access bookkeeping behind (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecuteOptions {
+    /// Stamp `last_accessed_at` and bump `access_count` on the memories
+    /// that were returned.
+    ///
+    /// `true` is what every client-facing read does: those two numbers are
+    /// the entire input to importance decay, so a read that did not record
+    /// itself would quietly age a memory the user clearly still uses.
+    /// `false` is for replaying queries over a store in order to *measure*
+    /// it — an audit or an eval — where recording the replay would change
+    /// the thing being measured (reranking-plan.md Phase 6.1).
+    pub track_access: bool,
+}
+
+impl Default for ExecuteOptions {
+    /// Real requests, tracked. The untracked path is opt-in, never the
+    /// default: forgetting to pass an option must not silently stop decay
+    /// from seeing real reads.
+    fn default() -> Self {
+        Self { track_access: true }
+    }
+}
+
+/// The recall pipeline: indexes in, fused (and optionally reranked)
+/// memories out.
+///
+/// `Clone` is cheap and deliberate — every field is an `Arc` or a copyable
+/// value. It exists for `rerank audit` (reranking-plan.md Phase 6.2), which
+/// compares the pipeline *with* a second stage against the pipeline without
+/// one, over one open store. Duplicating the wiring instead would let the
+/// two sides of that comparison drift apart, which is the whole comparison.
+#[derive(Clone)]
 pub struct MemoryRecaller {
     memories: Arc<dyn MemoryRepository>,
     vectors: Arc<dyn VectorIndex>,
@@ -117,6 +165,27 @@ impl MemoryRecaller {
         }
     }
 
+    /// The same pipeline with its second stage reconfigured
+    /// (reranking-plan.md Phase 6.2). Every component is shared — indexes,
+    /// repository, ranker, clock — so the two handles differ *only* in the
+    /// thing being audited. `rerank audit` builds the pair: this method with
+    /// `None`/`Off` is the pipeline a client gets today, and with the loaded
+    /// reranker in `On` it is the pipeline the operator is judging.
+    pub fn with_second_stage(
+        &self,
+        reranker: Option<Arc<dyn Reranker>>,
+        mode: RerankMode,
+        depth: usize,
+        timeout: Duration,
+    ) -> Self {
+        let mut pipeline = self.clone();
+        pipeline.reranker = reranker;
+        pipeline.rerank_mode = mode;
+        pipeline.rerank_depth = depth;
+        pipeline.rerank_timeout = timeout;
+        pipeline
+    }
+
     /// Attaches a second-stage reranker (reranking-plan.md Phase 4). Not
     /// calling it — or calling it with `RerankMode::Off` — is the identity
     /// guarantee: recall takes its pre-rerank path, and no model runs.
@@ -135,7 +204,41 @@ impl MemoryRecaller {
         self
     }
 
+    /// Runs one recall and records that the returned memories were
+    /// accessed. This is what a client-facing read does, and the behaviour
+    /// every path had before [`ExecuteOptions`] existed.
     pub fn execute(&self, context: &UserContext, query: &RecallQuery) -> Result<Vec<ScoredMemory>> {
+        self.execute_with(context, query, ExecuteOptions::default())
+    }
+
+    /// Runs one recall that changes nothing: same candidates, same fusion,
+    /// same rerank leg, same order — and no `touch_accessed`.
+    ///
+    /// The point is invariant I-6 of reranking-plan.md: an operator or the
+    /// eval harness replaying queries over real memories is measuring, and
+    /// a measurement that bumps access counts feeds importance decay, which
+    /// feeds the ranking the next measurement reads. Every audit and eval
+    /// replay goes through here.
+    pub fn execute_untracked(
+        &self,
+        context: &UserContext,
+        query: &RecallQuery,
+    ) -> Result<Vec<ScoredMemory>> {
+        self.execute_with(
+            context,
+            query,
+            ExecuteOptions {
+                track_access: false,
+            },
+        )
+    }
+
+    fn execute_with(
+        &self,
+        context: &UserContext,
+        query: &RecallQuery,
+        options: ExecuteOptions,
+    ) -> Result<Vec<ScoredMemory>> {
         let depth = query.candidate_depth();
         let now = self.clock.now();
 
@@ -228,10 +331,14 @@ impl MemoryRecaller {
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
-        // failure must not fail the read the caller actually made.
-        let returned: Vec<_> = ranked.iter().map(|scored| scored.memory.id()).collect();
-        if let Err(error) = self.memories.touch_accessed(context, &returned, now) {
-            tracing::warn!(%error, "failed to record memory access");
+        // failure must not fail the read the caller actually made — and
+        // skipped entirely for an untracked read, which exists precisely
+        // so that replaying a query cannot move the store it measures.
+        if options.track_access {
+            let returned: Vec<_> = ranked.iter().map(|scored| scored.memory.id()).collect();
+            if let Err(error) = self.memories.touch_accessed(context, &returned, now) {
+                tracing::warn!(%error, "failed to record memory access");
+            }
         }
 
         Ok(ranked)
@@ -1627,5 +1734,140 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ids(&floored), vec![answering.id()]);
+    }
+
+    // Phase 6.1: measuring a store must not change it.
+
+    #[test]
+    fn a_tracked_read_stamps_what_it_returns_and_an_untracked_one_stamps_nothing() {
+        let fixture = Fixture::new();
+        let saved = fixture.save(
+            &fixture.alex,
+            "the user prefers pnpm for javascript packages",
+        );
+        let question = query("pnpm");
+        let stored = || {
+            fixture
+                .memories
+                .find(&fixture.alex, saved.id())
+                .unwrap()
+                .unwrap()
+        };
+
+        let tracked = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        assert!(
+            ids(&tracked).contains(&saved.id()),
+            "the fixture must return the memory it saved"
+        );
+        assert_eq!(
+            stored().access_count(),
+            1,
+            "a client-facing read is the input to importance decay"
+        );
+        assert_eq!(stored().last_accessed_at(), Some(now()));
+
+        // The audit's path, over the same stores and the same query.
+        let untracked = fixture
+            .recaller()
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert_eq!(
+            ids(&untracked),
+            ids(&tracked),
+            "an untracked recall must order exactly like a tracked one"
+        );
+        assert_eq!(
+            stored().access_count(),
+            1,
+            "an untracked recall bumped the access counter it exists to avoid"
+        );
+        assert_eq!(
+            stored().last_accessed_at(),
+            Some(now()),
+            "an untracked recall restamped last_accessed_at"
+        );
+    }
+
+    #[test]
+    fn an_untracked_recall_still_runs_the_second_stage() {
+        // The audit compares orderings, so switching off the bookkeeping must
+        // not switch off the leg being audited — otherwise every report would
+        // say the reranker changed nothing.
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let before = ids(&fixture
+            .recaller()
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap());
+
+        let fake = reranker(FakeReranker::reversing());
+        let after = replace_recaller(
+            &fixture,
+            fake.clone() as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::ZERO,
+        )
+        .execute_untracked(&fixture.alex, &question)
+        .unwrap();
+
+        assert_eq!(fake.calls(), 1, "the untracked path skipped the reranker");
+        let mut reversed = before;
+        reversed.reverse();
+        assert_eq!(ids(&after), reversed);
+    }
+
+    #[test]
+    fn a_cloned_recaller_reads_the_same_stores_and_can_drop_the_stage() {
+        // The audit's two handles, and the guarantee they are built on:
+        // `with_second_stage` shares everything else, so a difference between
+        // the two orderings can only be the stage.
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+
+        let fused = fixture
+            .recaller()
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        let with_stage = fixture.recaller().with_reranker(
+            reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        );
+
+        let without = with_stage
+            .with_second_stage(None, RerankMode::Off, 30, Duration::from_secs(5))
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert_eq!(
+            fingerprint(&without),
+            fingerprint(&fused),
+            "`with_second_stage(None)` was not the plain pipeline"
+        );
+
+        let reranked = with_stage
+            .with_second_stage(
+                Some(reranker(FakeReranker::reversing()) as Arc<dyn Reranker>),
+                RerankMode::On,
+                30,
+                Duration::from_secs(5),
+            )
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert_ne!(
+            ids(&reranked),
+            ids(&without),
+            "attaching the stage through the clone did nothing"
+        );
     }
 }

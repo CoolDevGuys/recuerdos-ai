@@ -259,10 +259,13 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
 
     // One untimed recall before timing any: the first call pays
     // connection setup (remote providers), index open and cache misses,
-    // and with ~40 samples a single cold call lands straight in p95. The
-    // store is a throwaway, so the touch this one makes costs nothing.
+    // and with ~40 samples a single cold call lands straight in p95.
     let warmup = RecallQuery::new("warm up", 1)?;
-    memories.recaller.execute(&context, &warmup)?;
+    // Untracked, like every replay in this process (reranking-plan.md
+    // Phase 6.1): a warmup is not a user reading their memories, and
+    // stamping them as accessed would feed importance decay from a
+    // measurement run — throwaway store or not.
+    memories.recaller.execute_untracked(&context, &warmup)?;
 
     let mut results = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
@@ -437,7 +440,11 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
     }
 
     let started = std::time::Instant::now();
-    let hits = memories.recaller.execute(context, &query)?;
+    // Untracked (reranking-plan.md Phase 6.1): the eval replays queries over
+    // memories it seeded, and a replay that recorded each hit as an access
+    // would move the counters importance decay reads — so scoring the same
+    // corpus twice would not measure the same thing twice.
+    let hits = memories.recaller.execute_untracked(context, &query)?;
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();
 
@@ -595,7 +602,9 @@ fn summarise(results: &[CaseResult]) -> Report {
 /// `1` rather than an interpolation between the two — a latency figure a
 /// human can reproduce from the sorted list. `None` for an empty sample,
 /// so a summary line can say so instead of claiming a `0 ms` median.
-fn percentile(values: &[f64], p: f64) -> Option<f64> {
+/// Shared with `rerank audit`, which reports the same p50/p95 pair for the
+/// rerank stage (reranking-plan.md Phase 6.2).
+pub(crate) fn percentile(values: &[f64], p: f64) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
@@ -660,7 +669,10 @@ fn print_report(results: &[CaseResult]) {
     }
 }
 
-fn truncate(text: &str, limit: usize) -> String {
+/// Shortens to `limit` characters with an ellipsis, counting *characters*
+/// so a memory containing an emoji cannot be cut mid-codepoint. Shared with
+/// `rerank audit`, which prints the same kind of one-line snippet.
+pub(crate) fn truncate(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_string();
     }
