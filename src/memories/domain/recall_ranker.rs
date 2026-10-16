@@ -68,7 +68,8 @@
 //!
 //! The rerank list joins the RRF sum as `weight × 1/(k + rank)`, so the
 //! bounded recency/quality band applies to it exactly as to the other
-//! legs. The calibration of `weight` follows from the leg arithmetic:
+//! legs. The leg arithmetic says what each weight *means*; the Phase 7
+//! grid (§12) says what it *buys*, and above 1 the two disagreed:
 //!
 //! - one retrieval leg at rank 1 contributes `1/61 ≈ 0.0164`; two legs
 //!   agreeing at rank 1, `2/61 ≈ 0.0328`.
@@ -76,12 +77,17 @@
 //!   survives untouched (pinned by test).
 //! - `weight = 1` lets the reranker break ties *against a single leg* but
 //!   never overrule vector+BM25 agreement.
-//! - `weight ≥ 2` overvotes that agreement — which is precisely the
-//!   failure this whole plan exists to fix ("right memory in the top 5
-//!   but not first"), so the tuned range *includes* values above 1 and
-//!   spans 0.5–4 (Phase 7 grid). Rejecting >1 a priori is the plan's
-//!   §2-row-4 mistake: at low weight a *good* rerank is muted exactly
-//!   when vector and BM25 agree on a wrong answer.
+//! - `weight ≥ 2` overvotes that agreement. The plan expected the wins to
+//!   live there, on the theory that vector and BM25 can agree on a wrong
+//!   answer; measured on the expanded 108-memory eval set, they nearly
+//!   never do. The quality plateau is 0.5–1.0 (identical p@1 and MRR
+//!   across it); `2` gives back 2 points of p@1 and a third of the
+//!   `needle` kind's, and `4` costs the category filter half its
+//!   precision too. A leg strong enough to let a confident dissent beat
+//!   two agreeing index signals is strong enough to lose the memory both
+//!   of them found — and task 7.4's distribution shows how often this
+//!   model *is* the dissenter: it scores correct pairs near 0.006 as
+//!   readily as near 0.99. The default is the plateau's top: 1.0.
 //!
 //! ## `Replace` — the rerank score becomes the head's head
 //!
@@ -95,8 +101,19 @@
 //! signal instead of a new band (invariant from §"Why importance shares
 //! confidence's band"). The raw scores must therefore be non-negative and
 //! comparable across candidates of one call — adapters on logit-scale
-//! models must squash them first; that is a Phase 5 obligation, and Phase
-//! 7's grid decides whether `Replace` survives at all.
+//! models must squash them first; that is a Phase 5 obligation.
+//!
+//! Phase 7's grid answered the survival question: not as a default. Its
+//! premise — that a raw score's *gaps* mean something — is exactly what
+//! task 7.4's distribution denies: expected-pair scores span the full
+//! range with a pile-up near zero, so on three of four grid models the
+//! banded raw scores lost precision (worst −9.6) — a head of near-zero
+//! scores reorders into band noise. The one model crisp enough to gain
+//! from `Replace` (+5.8 p@1, §12) needed a depth that spent 96% of the
+//! latency budget, and its gain sat on a cliff: one step shallower and
+//! the `needle` kind regressed by a third. `Rrf`, reading only the
+//! *order* the scores imply, delivered the same +5.8 on the chosen model
+//! at depth 10 for half the cost, flat across depths.
 //!
 //! Neither strategy touches `relevance`: the cross-encoder value is
 //! reported beside it as [`ScoredMemory::rerank_score`] (invariant I-4 —
@@ -135,8 +152,9 @@ const DEFAULT_GRAPH_UNANCHORED_FLOOR: usize = 0;
 #[derive(Debug, Clone, Copy)]
 pub enum RerankStrategy {
     /// The rerank list joins the RRF sum as a fourth leg, damped by
-    /// `weight`. `weight = 0` is off; the interesting tuned range runs
-    /// from 0.5 to 4 (module docs — and note *why* it runs above 1).
+    /// `weight`. `weight = 0` is off; the *measured* plateau is 0.5–1.0
+    /// and values ≥ 2 are measured harm (the module docs carry the
+    /// grid numbers behind that).
     Rrf { weight: f32 },
     /// The reranked head is ordered by raw score × the bounded
     /// recency/quality band; everything the reranker never saw follows
@@ -146,12 +164,13 @@ pub enum RerankStrategy {
     Replace,
 }
 
-/// The un-tuned default: a full-weight fourth RRF leg. `1.0` lets the
-/// reranker break ties against a single retrieval leg without ever
-/// overruling vector+keyword agreement — the conservative choice while
-/// there are no measurements; Phase 7's grid replaces it, above *and*
-/// below 1, and this constant exists only so the default is stated in
-/// the calibrated style rather than inline.
+/// A full-weight fourth RRF leg — and the Phase 7 grid's chosen value,
+/// unchanged: `1.0` is the top of the measured 0.5–1.0 plateau, the
+/// semantics where the reranker breaks ties against a single retrieval
+/// leg without ever overruling vector+keyword agreement (the module docs
+/// carry the grid numbers, including what heavier weights cost). The
+/// constant stays so the default is stated in the calibrated style
+/// rather than inline.
 const DEFAULT_RERANK_WEIGHT: f32 = 1.0;
 
 impl Default for RerankStrategy {

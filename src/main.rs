@@ -80,11 +80,13 @@ enum Command {
         /// with the baseline flags — a grid is a measurement, not a gate.
         #[arg(long)]
         grid: bool,
-        /// Comma list of rerank models for the grid. Deliberately not the
-        /// full built-in list: the large multilingual models need gigabytes
-        /// of weights and RAM, so the operator names the set they can
-        /// afford. Every name `[rerank].model` accepts works.
-        #[arg(long, default_value = "jina-reranker-v1-turbo-en")]
+        /// Comma list of rerank models for the grid. Defaults to
+        /// `[rerank].model` — the grid's tuned winner — because a bare
+        /// `eval --grid` should measure what ships. The large multilingual
+        /// models need gigabytes of weights and RAM, so the operator names
+        /// the set they can afford. Every name `[rerank].model` accepts
+        /// works.
+        #[arg(long, default_value = "bge-reranker-base")]
         grid_models: String,
         /// Comma list of head depths for the grid (the plan's table).
         #[arg(long, default_value = "10,20,30,50")]

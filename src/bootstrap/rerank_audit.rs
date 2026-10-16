@@ -43,7 +43,7 @@
 //!   trying to judge, and dropping results before the rerank leg would
 //!   change which candidates the reranker ever sees.
 //! * **No rerank deadline.** The command exists partly to measure what the
-//!   model costs; a 400 ms timeout would report "400 ms and a fallback"
+//!   model costs; a tight timeout would report "deadline and a fallback"
 //!   instead. The configured `timeout_ms` is what a live request would
 //!   enforce, so it is reported beside the percentiles it has to contain.
 //!

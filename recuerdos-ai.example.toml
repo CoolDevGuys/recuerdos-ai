@@ -196,26 +196,38 @@ mode = "off"
 # One of: bge-reranker-base, bge-reranker-v2-m3,
 # jina-reranker-v1-turbo-en, jina-reranker-v2-base-multilingual
 # (or their HuggingFace repo ids), or a path to an .onnx file for a
-# bring-your-own model. The default is the plan's placeholder — the
-# smallest — until measurements (Phase 7) pick a winner. The model
-# downloads into [embeddings].cache_dir.
-model = "jina-reranker-v1-turbo-en"
+# bring-your-own model. The default is the Phase 7 grid's winner: the
+# only candidate that gained the ship gate's +5 precision@1 (+5.8, with
+# no kind regressing) while leaving latency budget room. It costs 1.1 GB
+# of weights (into [embeddings].cache_dir) and ~1.5 GiB RAM per session
+# — a box that cannot pay should stay "off" rather than drop to the
+# smaller model, whose measured gain (+1.9) is a coin flip.
+model = "bge-reranker-base"
 # How many fused candidates per recall the reranker judges. Its ceiling
-# on cost — and on how deep a correction it can make.
-depth = 30
-# "rrf": a fourth fusion leg, damped by weight (default; degrades
-# gently). "replace": the rerank score orders the head outright.
+# on cost — and on how deep a correction it can make. Measured: the
+# whole gain lands by 10; deeper costs linearly (added p95 +71 ms at 10,
+# +270 ms at 50) and bought nothing on the eval corpus. Raise it if your
+# own shadow data shows wins arriving from deeper in a large store.
+depth = 10
+# "rrf": a fourth fusion leg, damped by weight (the grid's choice).
+# "replace": raw scores order the head outright — it lost precision on
+# three of four models, because the models' score gaps mean nothing on
+# memories (rerank distribution shows why).
 strategy = "rrf"
 # rrf weight: 1 breaks ties against a single retrieval leg but cannot
-# overrule vector+BM25 agreement; >= 2 can (that is the point — see the
-# recall_ranker module docs). Tuned against the eval, range 0.5-4.
+# overrule vector+BM25 agreement; >= 2 can. Measured: agreement is
+# nearly always right, so the gain plateau is 0.5-1 and 2+ actively
+# loses points (2 costs the needle kind a third of its precision).
 weight = 1.0
 # Beyond this the rerank leg is dropped and the pre-rerank order served
 # with a warning — the request never fails because of the second stage.
-timeout_ms = 400
+# 250 ms is ~3.5x the chosen model's measured p95 at the default depth
+# (71 ms, p50 59 ms): a tail bound, not a cost.
+timeout_ms = 250
 # Concurrent rerank inferences. Each one is another copy of the model in
-# RAM; 1 on a small box.
-max_concurrency = 2
+# RAM — ~1.5 GiB for the default model, so the default keeps the second
+# stage under one budget. Raise only if recalls queue and the box fits.
+max_concurrency = 1
 # Candidates per forward pass (the forward pass pads to the longest
 # pair in the batch, so smaller batches keep the padding short).
 batch_size = 16

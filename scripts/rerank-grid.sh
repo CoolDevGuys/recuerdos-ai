@@ -14,13 +14,14 @@
 #   depths      10,20,30,50   (50 clamps to the candidate pool — limit 5
 #                              implies a pool of 40 — exactly like production)
 #   weights     0.5,1,2,4     (rrf rows only; replace has no weight)
-#   models      jina-reranker-v1-turbo-en
+#   models      bge-reranker-base  (the tuned [rerank].model — a bare grid
+#                              run measures what ships)
 #
 # The model axis is opt-in past the default because the larger candidates
 # cost ~1.1–2.2 GB on disk and ~1.5 GiB RAM per session (Phase 7 record).
-# Full grid over the two models the deployment box can hold:
+# To compare against the old placeholder on the cheap (147 MB):
 #
-#   scripts/rerank-grid.sh --grid-models jina-reranker-v1-turbo-en,bge-reranker-base
+#   scripts/rerank-grid.sh --grid-models bge-reranker-base,jina-reranker-v1-turbo-en
 #
 # Paired latency reading (the ship gate's "added latency"): subtract the
 # `off` row's p95 from the chosen cell's p95 — same machine, same embedder,
