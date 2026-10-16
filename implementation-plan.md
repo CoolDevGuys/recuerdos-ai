@@ -878,7 +878,13 @@ Docker image + install script.
 <a name="phase-7"></a>
 ## Phase 7 — Memory-science performance & capability upgrades
 
-**Branch:** `phase/7-memory-science` · **Status:** 🚧 IN PROGRESS — Tasks 7.1 & 7.2 ✅ shipped, Task 7.3 planned (breakdown below)
+**Branch:** `phase/7-memory-science` (Task 7.4 ran one branch per phase, PRs #20–#27 and
+`docs/rerank-release`) ·
+**Status:** ✅ Tasks 7.1, 7.2 and 7.3.0–7.3.7 shipped (`v0.2.0`–`v0.3.1`), and Task 7.4
+shipped in `v0.4.0` under its own plan
+([`ai-specs/reranking-plan.md`](ai-specs/reranking-plan.md)). The queued work in this
+phase is done; the one thing still outstanding is deliberate — the real-traffic shadow
+period Task 7.4 requires before its reranker default can flip.
 **Shippable outcome (target):** consolidation that spends its LLM budget on the
 memories that actually need it, an optional finer label users can filter on, and a
 clear, de-risked path to the graph layer — without regressing the dedup guarantees
@@ -1649,6 +1655,81 @@ delta being large enough that ingest cost dominates; or 7.3.6 showing a relation
 that costs a regression elsewhere. Any of the three is a legitimate outcome, and the
 eval slice from 7.3.0 stays in the repo either way as the tripwire.
 
+### Task 7.4 — Recall quality: keyword stopwords, per-model relevance, optional cross-encoder reranking (L) ✅ DONE (`v0.4.0`)
+
+- **Goal:** two recall defects were measured and reported in
+  [`ai-specs/reranking-plan.md` §1](ai-specs/reranking-plan.md): the keyword leg
+  indexed stopwords, so "what do I use for data storage" topped with a memory
+  about *pnpm* because it contained "do" and "use"; and relevance subtracted one
+  hardcoded cosine baseline (0.5, measured against the default embedder), so
+  changing `[embeddings].model` silently miscalibrated every relevance number.
+  Only after both were fixed did the task re-ask the question Task 7.3.7 had
+  declined: is a cross-encoder worth its cost?
+- **Why it lives in its own plan file.** Task 7.3.7 built a reranker, measured it
+  **neutral** on a 24-memory corpus, and reverted it (option 3) — correctly,
+  because it was reranking a fused list that was itself wrong. Rebuilding it
+  needed a fixed fusion, a bigger corpus, a ship gate, a tuning grid and a
+  documented default decision: nine phases, which is more structure than a row in
+  this table. So [`ai-specs/reranking-plan.md`](ai-specs/reranking-plan.md) holds
+  the spec, the gate definitions and the complete results log (§12); this entry is
+  the pointer plus the decisions that belong in the build record.
+- **Shipped, one PR per phase:**
+
+  | Phase | Delivered | PR |
+  |---|---|---|
+  | 0 | eval instrumented: `--config` follows the production embedder, per-kind table, gate exit code | #20 |
+  | 1 | `ra_text_v2` analyzer (Lucene stopwords + question words + auxiliaries; `use`/`user`/`prefer` kept), versioned index dir, startup auto-rebuild, `reindex --text` | #21 |
+  | 2 | `calibrate` command; per-model `similarity_baseline` map (`gemini-embedding-2` → 0.46), warning for unmeasured models | #22 |
+  | 3 | **gate: GO, cautiously** — headroom (recall@5 − p@1) +21.6 bge / +8.1 gemini; real-data shadow made a hard prerequisite for any default change | #23 |
+  | 4 | `Reranker` trait, `FakeReranker`, both strategies, recaller integration, additive REST/SDK surface — `None` keeps the pre-existing path byte-identical | #24 |
+  | 5 | `FastembedReranker` (session pool, deadline, `align_scores`), `[rerank]` config, wiring, `warm-models`, `Dockerfile` bake arg | #25 |
+  | 6 | `shadow` telemetry (ids/ranks only) and `rerank audit` — read-only replay over a live store, verified by `cksum` on a copy | #26 |
+  | 7 | the grid: 81 cells (4 models × 2 strategies × 3 depths × 4 weights) on a grown 108-memory / 59-case corpus, paired against an explicit `off` row; tuned defaults; ship decision; **relevance left alone** | #27 |
+  | 8 | operator docs, upgrade notes, `v0.4.0`, release smoke (`docs/rerank-release`) | this |
+
+- **The number that decided it:** `bge-reranker-base`, fused as an RRF leg at
+  weight 1.0, depth 10 → **+5.8 precision@1, +2.7 MRR, +0.3 recall@5** with no
+  `by_kind` regression, for 1.1 GB of weights, ~1.5 GiB RAM per inference and
+  **+70.6 ms added p95** against a 150 ms budget written before the run.
+- **Three findings that inverted the plan's expectations** (each is in the plan's
+  §12 with its table; recorded here because they change what a future contributor
+  should try):
+  1. **Weight ≥ 2 loses points.** The plan bet that the wins live where the
+     reranker can overrule vector+BM25 agreement. The plateau is 0.5–1.0; at 2 the
+     `needle` kind gives up a third of its precision. Agreement is nearly always
+     right on this corpus.
+  2. **`replace` is the wrong strategy** — it lost precision on 3 of 4 models
+     (worst −9.6), because a cross-encoder's raw-score *gaps* mean nothing across
+     memories. `rerank distribution` showed the score distribution to be bimodal
+     with 27 of 52 expected pairs scoring below the corpus's own noise ceiling.
+  3. **Deeper is not better.** The whole gain lands by depth 10; depth 50 costs
+     +270 ms and buys nothing, because fusion already places every recoverable
+     memory inside the head's first ten.
+- **`relevance` was deliberately not touched**, and the measurement that
+  justified the restraint is on record: the model cannot separate declarative
+  memories from noise on this corpus, so rescaling relevance by its score would
+  have been noise with a decimal point.
+- **Default decision:** `mode` stays **`off`**. The ship gate passed offline, but
+  Phase 3 made a real-traffic shadow run a hard prerequisite for changing what
+  clients see, and the operator has not accepted 1.1 GB + ~70 ms. Everything else
+  (`timeout_ms` 250, `max_concurrency` 1, model/depth/strategy/weight) is set to
+  the measured values, so flipping `mode` is the only dial left.
+- **Open, recorded not hidden:** a production-parity re-check on
+  `gemini-embedding-2` was quota-blocked (HTTP 429, free tier) across the whole
+  Phase 7 session. It gates `mode = on`, not this release: the default path was
+  re-verified on the grown corpus, and the reranker is unreachable by default.
+- **DoD:**
+  - [x] `just check-native` and `just eval-native` green at the end of every
+        phase; the gate never weakened — where a bet failed, the docs carry the
+        measurement instead of the bet.
+  - [x] Shipped-behind-a-flag invariant held: with `mode = off` the recall path is
+        byte-identical to pre-Phase-4, asserted by a `reranker: None` identity test
+        and by the release image carrying no rerank weights (292 MB, same as before).
+  - [x] `just sdk-test`, `just docker-build`, and a clean container from the release
+        image answering recall in both `off` and baked `on` modes (§12, Phase 8).
+  - [x] Docs reviewed against the final config keys; the upgrade path (keyword-index
+        rebuild) exercised on a store with memories in it.
+
 ### Sequencing & risk
 
 | Task | Effort | Risk | Status | Real payoff |
@@ -1656,6 +1737,7 @@ eval slice from 7.3.0 stays in the repo either way as the tripwire.
 | 7.1 Budget + skip-unchanged | M | Low | ✅ Done | Fewer LLM merge calls; bounded run time — the honest version of the framework plan's Phase 1 |
 | 7.2 Optional sub-label | M | Low–Med | ✅ Done | Tighter clusters + a subcategory recall filter, exercised by the eval harness |
 | 7.3 Graph (Strategy B) | L | Med–High | ✅ Done | Relational recall — `ai-specs/project-plan.md`'s moat item, delivered across 7.3.0–7.3.6; the eval put relational recall@5 at 85.7% (vs 71.4% without the graph), so it ships on by default in `v0.2.0` |
+| 7.4 Recall quality + optional rerank | L | Low–Med | ✅ Done | Two recall defects fixed (`precision@1` 62.5% → 65.4%, unanswerable questions abstain 25% → 75%) and relevance calibrated per embedding model; the cross-encoder earned +5.8 `precision@1` and ships **opt-in** in `v0.4.0`, default `off` until a shadow period on real traffic — record in [`ai-specs/reranking-plan.md`](ai-specs/reranking-plan.md) |
 
 Do **not** carry over the framework plan's cumulative "125× / 3×" projections. Each
 task above ships behind the Phase 4.6 eval gate and is described by the number it

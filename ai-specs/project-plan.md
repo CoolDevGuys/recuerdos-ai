@@ -17,9 +17,20 @@ Agent, LangChain agents, custom bots — via **REST API** or **MCP**.
 > half **shipped**, leaving alternate backends as the open frontier. The
 > task-level build record lives in
 > [implementation-plan.md](../implementation-plan.md) (its Phases 0–6, all shipped,
-> plus Phase 7.3 graph); this document stays the *product & architecture
-> reference* — kept separate from `../implementation-plan.md` on purpose (see that
-> file's header for the rationale).
+> plus Phase 7.3 graph and 7.4 recall quality & optional reranking); this document
+> stays the *product & architecture reference* — kept separate from
+> `../implementation-plan.md` on purpose (see that file's header for the rationale).
+
+> **Status (2026-10-16): `v0.4.0`, the recall-quality release.** Two measured
+> defects were fixed: the keyword leg indexed stopwords (so "what database do we
+> use" matched anything containing *the*), and relevance assumed one embedding
+> model's cosine scale, which silently miscalibrated every other model. The
+> optional second stage analysed in §7.9 is built, measured over 81 grid cells,
+> and ships **off by default** — its numbers, its costs and the reason for the
+> default are in [reranking-plan.md](reranking-plan.md), with the build log as
+> Task 7.4 of [implementation-plan.md](../implementation-plan.md). Nothing in the
+> architecture below changed shape: retrieval gained a calibration and an
+> optional stage after fusion.
 
 ---
 
@@ -204,7 +215,7 @@ reserves entity/relation tables and supersedence links so no migration pain late
   LangChain ─── REST/SDK ─────▶ │  │ axum+rmcp│─▶│  ingest → understand │    │
                                 │  │ auth mw  │  │  → label → store     │    │
                                 │  └──────────┘  │  retrieve: hybrid    │    │
-                                │        │       │  (vector+BM25+filter)│    │
+                                │        │       │  (vector+BM25+graph) │    │
                                 │        ▼       └──────┬───────────────┘    │
                                 │  ┌──────────┐         │   ┌─────────────┐  │
                                 │  │ Job queue│◀────────┘   │ Provider hub│  │
@@ -241,9 +252,14 @@ reserves entity/relation tables and supersedence links so no migration pain late
 **Retrieve (read path — hot, no LLM required):**
 1. `GET/POST /v1/memories/search` (or MCP `memory_recall`) with a query +
    optional category/tag/time filters.
-2. Query embedded (cached) → parallel vector ANN + BM25 → reciprocal-rank fusion →
-   metadata filter → optional cross-encoder-free rerank via recency/confidence
-   boost → return in < ~15 ms locally (excluding embedding call if remote).
+2. Query embedded (cached) → parallel vector ANN + BM25 + graph hop →
+   reciprocal-rank fusion → metadata filter → recency/quality multiplier →
+   **optional second-stage cross-encoder** (`[rerank]`, off by default: a local
+   model reads query and candidate jointly and re-scores the head) → return in
+   < ~15 ms locally without the stage (excluding embedding call if remote).
+   Shipped as
+   [reranking-plan.md](reranking-plan.md); the stage is additive, so with
+   `mode = "off"` this flow is exactly the one this section described before.
 3. Optional `synthesize=true`: an LLM compresses the top hits into a compact
    context paragraph (costs a call; off by default).
 
@@ -362,6 +378,39 @@ cluster by similarity ≥ threshold → LLM merges clusters → originals linked
 `superseded_by` (never hard-deleted; audit trail preserved). The ADD/UPDATE/DELETE
 reconcile step at ingest time (7.1) already prevents ~80% of the mess; the nightly
 job catches drift.
+
+### 7.9 "Re-rank the results with a cross-encoder" — BUILT, OFF BY DEFAULT (measured)
+
+- **How (shipped):** a `Reranker` trait in `memories/domain`, a
+  `fastembed` ONNX adapter in `providers/infrastructure`, wired at the
+  composition root and applied to the **head of the fused list** after RRF.
+  Unlike the three legs, which embed query and memory separately, it reads the
+  pair jointly. Configured by `[rerank]` (`mode`, `model`, `depth`,
+  `strategy`, `weight`, `timeout_ms`, `max_concurrency`); it can reorder the
+  head but never filter it, and a deadline overrun serves the fused order.
+- **Is it necessary? Not for the product's differentiation — and that is why
+  it is off.** An earlier attempt (implementation-plan.md Task 7.3.7, option 3)
+  was built and reverted: neutral on a small corpus, a second gigabyte on the
+  hot path. Before rebuilding it we fixed the two defects that were corrupting
+  the fused list in the first place (keyword stopwords, one-size-fits-all
+  relevance), then measured 81 grid cells — 4 models × 2 strategies × 3 depths
+  × 4 weights — on a 108-memory corpus with paired `off` baselines.
+- **The measurement** ([reranking-plan.md §12](reranking-plan.md)):
+  `bge-reranker-base` at RRF weight 1.0, depth 10 gives **+5.8 precision@1,
+  +2.7 MRR, +0.3 recall@5**, no case kind regressing — for **1.1 GB** of
+  weights, **~1.5 GiB** RAM per concurrent inference and **+71 ms** added p95.
+  Two of the four models broke a case kind in every cell; `replace` (raw scores
+  order the head) lost on three of four; weight ≥ 2 lost points, inverting this
+  plan's expectation. The best multilingual model costs the same footprint and
+  about the same latency for two thirds of the gain (+3.8 p@1); the largest buys
+  +1.9 — what the 147 MB model buys — at 2.2 GB. All at the default depth 10.
+- **So: shipped, opt-in, judge-before-enabling.** `mode = "shadow"` scores real
+  traffic and logs what would have changed; `rerank audit` replays an operator's
+  own queries over their own store read-only. The default stays `off` because
+  the evidence for it is an offline corpus, and a reranker that is wrong does so
+  with more confidence than the legs.
+  [reranking-plan.md](reranking-plan.md) is the full record;
+  [implementation-plan.md Task 7.4](../implementation-plan.md) the build log.
 
 ---
 
