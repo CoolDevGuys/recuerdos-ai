@@ -2418,10 +2418,26 @@ keyless local endpoint should leave the key empty rather than name one; and an
 embedder outside `SIMILARITY_BASELINES` runs on the 0.5 fallback with the Phase 2
 warning, which is the case that warning exists for.
 
-**Release consequence, not yet taken:** `recuerdos-ai init` writes the broken
-template, so this is user-facing rather than cosmetic and warrants a `v0.4.1`
-patch. The CHANGELOG section is written; `Cargo.toml` and `Cargo.lock` still say
-`0.4.0` because cutting a release is the operator's call, not this branch's.
+**Release consequence — taken.** `v0.4.1` is out: PR #29 merged as `a1bff55` with
+all five checks green (check / test / eval / sdk / docker), lightweight tag on
+the merge commit matching how `v0.4.0` and `v0.3.1` were cut, `release.yml`
+8/8 jobs. Verified from the published release rather than from the workflow's
+own green tick: three tarballs download and `sha256sum -c` clean, the published
+darwin/arm64 binary reports `recuerdos-ai 0.4.1`, and run against a config with
+one retrieval key left under `[rerank]` it logs the warning *and* reaches
+`listening` — the warn-but-do-not-brick contract, exercised on the artifact
+rather than in a unit test. The multi-arch image is published at `0.4.1` and
+`latest`; the SDK publish skipped `recuerdos_ai-0.3.0` as an existing duplicate,
+which is the intended no-op because nothing client-facing changed.
+
+The release notes were rewritten by hand rather than left as the generated PR
+bullet list, for one reason: what a `v0.4.0` operator needs is the two-line
+config move, and a generated list of commit titles would not have said it.
+
+Smoke evidence behind the fix, on a container built from this tree: an
+operator-shaped config (two retrieval keys under `[rerank]`, plus a `[rerrank]`
+typo) logs three named warnings then `listening`; the shipped example, as a
+control, logs none — no false positives on the file `init` writes.
 
 
 ### `VERIFY` items resolved
