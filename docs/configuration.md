@@ -361,6 +361,50 @@ serving it, because the corpus here could not tell you how it behaves in your
 language. If you would rather spend no latency on an unproven second opinion,
 `mode = "off"` is the correct setting, not a failure to configure.
 
+### Sizing `timeout_ms` for your machine
+
+`[rerank].timeout_ms` (default `250`) is a tail bound, not a cost target. Past
+it the stage is dropped, the pre-rerank order is served, and the request goes
+on its way — a second opinion is never worth a failed recall. The default is
+about 3.5× the p95 measured during tuning (71 ms at `depth = 10`), and that
+tuning box was **idle**, which is the part that does not travel.
+
+The cost is per candidate pair, so what matters is your machine's number:
+
+| Machine | Cost per judged candidate | What `depth = 10` needs | Against 250 ms |
+|---|---|---|---|
+| the tuning box (nothing else running) | ~7 ms | ~71 ms | comfortable |
+| a home server also serving a 9B LLM and a local embedding server | ~34 ms | ~350 ms | **dropped every time** |
+
+The second row is a real deployment, not a worst case invented for a warning:
+its `mode = "on"` never contributed once, because every query worth asking had
+more than about seven candidates above the floor and the stage missed its
+deadline each time. Nothing in the response said so — until `v0.4.2` added the
+`rerank` field. Check yours in one request:
+
+```bash
+curl -s $BASE/v1/memories/search \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"what are my programming preferences","limit":8}' | jq '.rerank'
+```
+
+```json
+{"state": "skipped", "reason": "deadline", "candidates": 10, "took_ms": 251}
+```
+
+Then size by measuring and doubling: read `rerank.took_ms` across a handful of
+your own queries at your real `depth`, and set `timeout_ms` near **2×** that so
+a busy moment does not quietly delete the stage. For the machine above that is
+`800`, which turns a ~260 ms recall into ~360 ms — the honest price of
+reranking on a box that is also doing something else. If that price is too
+high, `depth = 5` (~180 ms there) is the alternative rather than a free lunch:
+the +5.8 precision@1 was measured at depth 10, so shortening the head trades
+away part of the gain.
+
+`timeout_ms = 0` is rejected at startup, not treated as "no deadline": a
+deadline-free stage on a contended machine is a recall with no bound, and the
+fallback this whole path is built around only exists if there is a deadline.
+
 ### Recall quality: "results look random"
 
 When recall returns things that have nothing to do with the question, it is

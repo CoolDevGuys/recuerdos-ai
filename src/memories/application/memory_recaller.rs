@@ -80,6 +80,72 @@ pub struct ExecuteOptions {
     pub track_access: bool,
 }
 
+/// What the optional second stage actually did for one recall.
+///
+/// It exists because `mode = "on"` and `mode = "off"` were indistinguishable
+/// from the client's side. The deadline path serves the pre-rerank order and
+/// warns in the daemon's log, so an operator who paid for a second stage sees
+/// an ordinary response whether or not it ran. Not hypothetical: a host also
+/// serving two local models paid ~34 ms per candidate pair, so its depth-10
+/// head crossed the 250 ms deadline on every real query — `mode = "on"`
+/// behaving exactly like `off`. `rerank audit` could not rescue it either: it
+/// measures with no deadline, so it reported a working stage while production
+/// discarded the same answer at 250 ms.
+///
+/// Reported only when a stage is configured. `off` stays invisible, which is
+/// what "off is a hard no-op" has always promised the response to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RerankTrace {
+    /// Configured, and there was nothing to reorder: fewer than two
+    /// candidates survived `[retrieval].min_relevance`, or the depth clamped
+    /// below two. Not a failure — the stage has no work at a head of one.
+    NotNeeded { candidates: usize },
+    /// Judged the head and folded its order into the ranking.
+    Applied { judged: usize, took_ms: u64 },
+    /// Judged the head and logged the comparison, serving the old order —
+    /// which is what `mode = "shadow"` exists to do.
+    Shadow {
+        judged: usize,
+        /// Whether the reranker would have moved the top result. The same
+        /// `changed` the `rerank_shadow` log line carries.
+        changed: bool,
+        took_ms: u64,
+    },
+    /// Asked, and it did not contribute. The pre-rerank order was served,
+    /// which is the point — a recall never fails because of the second
+    /// stage — but "the stage is not happening" is a fact the operator
+    /// needs from somewhere other than a log line they have to think to
+    /// grep.
+    Skipped {
+        reason: RerankSkip,
+        /// How many candidates it was about to judge when it gave up.
+        candidates: usize,
+        took_ms: u64,
+    },
+}
+
+/// Why a configured stage declined to contribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerankSkip {
+    /// Past `[rerank].timeout_ms`. On a machine that is not idle this is the
+    /// ordinary outcome for a deep head, not a rare one: the default is sized
+    /// to a quiet benchmark box, and inference time scales with the number of
+    /// pairs judged.
+    Deadline,
+    /// The model failed, or answered with a number of scores that did not
+    /// line up with the candidates it was given.
+    Model,
+}
+
+/// A recall's results, plus what the optional second stage did with them.
+#[derive(Debug)]
+pub struct RecallReport {
+    pub results: Vec<ScoredMemory>,
+    /// `None` when nothing is wired or `mode = "off"`: nothing ran, and
+    /// nothing is reported.
+    pub rerank: Option<RerankTrace>,
+}
+
 impl Default for ExecuteOptions {
     /// Real requests, tracked. The untracked path is opt-in, never the
     /// default: forgetting to pass an option must not silently stop decay
@@ -221,7 +287,9 @@ impl MemoryRecaller {
     /// accessed. This is what a client-facing read does, and the behaviour
     /// every path had before [`ExecuteOptions`] existed.
     pub fn execute(&self, context: &UserContext, query: &RecallQuery) -> Result<Vec<ScoredMemory>> {
-        self.execute_with(context, query, ExecuteOptions::default())
+        Ok(self
+            .execute_with(context, query, ExecuteOptions::default())?
+            .results)
     }
 
     /// Runs one recall that changes nothing: same candidates, same fusion,
@@ -237,6 +305,30 @@ impl MemoryRecaller {
         context: &UserContext,
         query: &RecallQuery,
     ) -> Result<Vec<ScoredMemory>> {
+        Ok(self.execute_untracked_traced(context, query)?.results)
+    }
+
+    /// [`Self::execute`], plus what the optional second stage did.
+    ///
+    /// For the surfaces that must not present a dropped second stage as a
+    /// working one: the REST response, and anything else that reports recall
+    /// quality back to an operator.
+    pub fn execute_traced(
+        &self,
+        context: &UserContext,
+        query: &RecallQuery,
+    ) -> Result<RecallReport> {
+        self.execute_with(context, query, ExecuteOptions::default())
+    }
+
+    /// [`Self::execute_untracked`], plus the [`RerankTrace`]. This is what
+    /// `rerank audit` runs, so the audit can say when it measured nothing
+    /// because the stage never finished.
+    pub fn execute_untracked_traced(
+        &self,
+        context: &UserContext,
+        query: &RecallQuery,
+    ) -> Result<RecallReport> {
         self.execute_with(
             context,
             query,
@@ -251,7 +343,7 @@ impl MemoryRecaller {
         context: &UserContext,
         query: &RecallQuery,
         options: ExecuteOptions,
-    ) -> Result<Vec<ScoredMemory>> {
+    ) -> Result<RecallReport> {
         let depth = query.candidate_depth();
         let now = self.clock.now();
 
@@ -286,7 +378,16 @@ impl MemoryRecaller {
             }
         }
         if candidate_ids.is_empty() {
-            return Ok(Vec::new());
+            // Nothing to judge. When a stage is configured that is still worth
+            // saying (`not-needed`, zero candidates) — a store the query found
+            // nothing in is a different fact from a stage that was never
+            // wired, and `None` means the latter.
+            return Ok(RecallReport {
+                results: Vec::new(),
+                rerank: self
+                    .stage_configured()
+                    .then_some(RerankTrace::NotNeeded { candidates: 0 }),
+            });
         }
 
         let candidates: Vec<Memory> = self
@@ -340,7 +441,7 @@ impl MemoryRecaller {
         // client-visible truncation rather than padded back in. `reranker:
         // None` and `mode = Off` return `ranked` untouched — the identity
         // path.
-        let mut ranked = self.rerank_leg(query, ranked, now);
+        let (mut ranked, rerank) = self.rerank_leg(query, ranked, now);
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
@@ -354,7 +455,10 @@ impl MemoryRecaller {
             }
         }
 
-        Ok(ranked)
+        Ok(RecallReport {
+            results: ranked,
+            rerank,
+        })
     }
 
     /// Runs the graph hop, or nothing when there is no graph. Best-effort:
@@ -397,24 +501,37 @@ impl MemoryRecaller {
 
     /// Runs the rerank leg over the fused head, or nothing. Mirrors
     /// [`graph_leg`](Self::graph_leg): a failure or an expired deadline
-    /// warns and returns `ranked` unchanged — three-quarters of a hybrid
-    /// search still answers. `Off` (and `reranker: None`) is checked
-    /// first and returns immediately, so the pre-existing path pays
-    /// nothing; `Shadow` scores, logs the comparison, and likewise
-    /// returns `ranked` — what every client sees is the pre-rerank
-    /// order, down to the absent `rerank_score` fields (Phase 6).
+    /// warns and leaves `ranked` as fusion served it — three-quarters of a
+    /// hybrid search still answers. Unlike the graph leg it also reports
+    /// *what happened*, because a stage that quietly never runs is
+    /// indistinguishable from one that was never turned on: see
+    /// [`RerankTrace`]. `Off` (and `reranker: None`) returns `None` — the
+    /// pre-existing path pays nothing and says nothing.
+    /// A skipped or shadowed leg means the client sees the pre-rerank order,
+    /// down to the absent `rerank_score` fields (Phase 6) — which is exactly
+    /// why the trace exists.
     fn rerank_leg(
         &self,
         query: &RecallQuery,
         mut ranked: Vec<ScoredMemory>,
         now: DateTime<Utc>,
-    ) -> Vec<ScoredMemory> {
+    ) -> (Vec<ScoredMemory>, Option<RerankTrace>) {
+        // Nothing wired, or `Off`: no stage exists for this recall, so there
+        // is nothing to report and the response stays the pre-rerank build's
+        // response, field for field.
         let Some(reranker) = &self.reranker else {
-            return ranked;
+            return (ranked, None);
         };
-        if self.rerank_mode == RerankMode::Off || ranked.len() < 2 {
-            // Reranking one candidate cannot reorder anything.
-            return ranked;
+        if self.rerank_mode == RerankMode::Off {
+            return (ranked, None);
+        }
+        if ranked.len() < 2 {
+            // Reranking one candidate cannot reorder anything. Reported as
+            // "not needed" rather than silence, because a head of one is also
+            // what a mis-set `[retrieval].min_relevance` produces — and that
+            // looks identical to the stage not running unless it says which.
+            let candidates = ranked.len();
+            return (ranked, Some(RerankTrace::NotNeeded { candidates }));
         }
 
         // Clamped both ways: never more than the caller's own candidate
@@ -424,26 +541,57 @@ impl MemoryRecaller {
             .min(ranked.len())
             .min(query.candidate_depth());
         if depth < 2 {
-            return ranked;
+            let candidates = ranked.len();
+            return (ranked, Some(RerankTrace::NotNeeded { candidates }));
         }
 
         let started = std::time::Instant::now();
         let leg = match self.rerank_scores(reranker, query.text(), &ranked[..depth]) {
             Ok(leg) => leg,
-            Err(error) => {
-                tracing::warn!(%error, "rerank leg failed; falling back to the pre-rerank order");
-                return ranked;
+            Err(failure) => {
+                let took_ms = started.elapsed().as_millis() as u64;
+                // The reason is logged and returned because the remedies
+                // differ: a deadline is met by raising `timeout_ms` or
+                // shortening `depth`, a model error by neither.
+                tracing::warn!(
+                    error = %failure.error,
+                    candidates = depth,
+                    rerank_ms = took_ms,
+                    "rerank leg failed; falling back to the pre-rerank order"
+                );
+                return (
+                    ranked,
+                    Some(RerankTrace::Skipped {
+                        reason: failure.skip,
+                        candidates: depth,
+                        took_ms,
+                    }),
+                );
             }
         };
         let rerank_ms = started.elapsed().as_millis() as u64;
 
         if self.rerank_mode == RerankMode::Shadow {
-            self.log_shadow_comparison(query.text(), &ranked[..depth], &leg, rerank_ms);
-            return ranked;
+            let changed =
+                self.log_shadow_comparison(query.text(), &ranked[..depth], &leg, rerank_ms);
+            return (
+                ranked,
+                Some(RerankTrace::Shadow {
+                    judged: leg.len(),
+                    changed,
+                    took_ms: rerank_ms,
+                }),
+            );
         }
 
         self.ranker.apply_rerank(&mut ranked, &leg, now);
-        ranked
+        (
+            ranked,
+            Some(RerankTrace::Applied {
+                judged: leg.len(),
+                took_ms: rerank_ms,
+            }),
+        )
     }
 
     /// Asks the reranker to score the head, honouring
@@ -457,7 +605,7 @@ impl MemoryRecaller {
         reranker: &Arc<dyn Reranker>,
         query: &str,
         head: &[ScoredMemory],
-    ) -> Result<Vec<(MemoryId, f32)>> {
+    ) -> std::result::Result<Vec<(MemoryId, f32)>, RerankFailure> {
         if self.rerank_timeout.is_zero() {
             let candidates: Vec<RerankCandidate> = head
                 .iter()
@@ -466,7 +614,10 @@ impl MemoryRecaller {
                     text: scored.memory.content(),
                 })
                 .collect();
-            return align_rerank(head, reranker.score(query, &candidates)?);
+            return reranker
+                .score(query, &candidates)
+                .and_then(|scores| align_rerank(head, scores))
+                .map_err(RerankFailure::model);
         }
 
         let reranker = Arc::clone(reranker);
@@ -486,15 +637,20 @@ impl MemoryRecaller {
         });
 
         match receiver.recv_timeout(self.rerank_timeout) {
-            Ok(scores) => align_rerank(head, scores?),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RaError::Internal(format!(
-                "rerank exceeded its {} ms deadline",
-                self.rerank_timeout.as_millis()
-            ))),
+            Ok(scores) => scores
+                .and_then(|scores| align_rerank(head, scores))
+                .map_err(RerankFailure::model),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RerankFailure {
+                skip: RerankSkip::Deadline,
+                error: RaError::Internal(format!(
+                    "rerank exceeded its {} ms deadline",
+                    self.rerank_timeout.as_millis()
+                )),
+            }),
             // The scoring thread panicked (or died) rather than answering.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(RaError::Internal("rerank thread died".to_string()))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(RerankFailure::model(
+                RaError::Internal("rerank thread died".to_string()),
+            )),
         }
     }
 
@@ -505,13 +661,20 @@ impl MemoryRecaller {
     /// provoked it, and these logs will outlive the memories they
     /// describe. Event name `rerank_shadow` so Phase 6 can grep a
     /// disagreement rate straight out of the daemon's log.
+    /// Whether a second stage exists for this recall: a model is wired and
+    /// `mode` is not `off`. `off` reports nothing, so a deployment without the
+    /// stage keeps returning exactly what it always returned, field for field.
+    fn stage_configured(&self) -> bool {
+        self.reranker.is_some() && self.rerank_mode != RerankMode::Off
+    }
+
     fn log_shadow_comparison(
         &self,
         query: &str,
         head: &[ScoredMemory],
         leg: &[(MemoryId, f32)],
         rerank_ms: u64,
-    ) {
+    ) -> bool {
         // The *tails* of the ids, not the heads: these are UUIDv7, whose
         // leading bits are the creation timestamp — the head is identical
         // for every memory saved in the same millisecond, which would make
@@ -522,6 +685,7 @@ impl MemoryRecaller {
         };
         let top1_before = short(head[0].memory.id());
         let top1_after = short(leg[0].0);
+        let changed = top1_before != top1_after;
         tracing::info!(
             name: "rerank_shadow",
             query_hash = %query_hash(query),
@@ -529,11 +693,30 @@ impl MemoryRecaller {
             rerank_ms,
             top1_before = %top1_before,
             top1_after = %top1_after,
-            changed = top1_before != top1_after,
+            changed,
             before = %head.iter().map(|s| short(s.memory.id())).collect::<Vec<_>>().join(","),
             after = %leg.iter().map(|(id, _)| short(*id)).collect::<Vec<_>>().join(","),
             "rerank_shadow",
         );
+        changed
+    }
+}
+
+/// Why the rerank leg gave up: the machine-readable reason a response
+/// reports, and the error worth putting in the log beside it.
+struct RerankFailure {
+    skip: RerankSkip,
+    error: RaError,
+}
+
+impl RerankFailure {
+    /// Anything that is not the deadline — the model failing, or answering
+    /// with scores that do not line up with the candidates it was given.
+    fn model(error: RaError) -> Self {
+        Self {
+            skip: RerankSkip::Model,
+            error,
+        }
     }
 }
 
@@ -1881,6 +2064,210 @@ mod tests {
             ids(&reranked),
             ids(&without),
             "attaching the stage through the clone did nothing"
+        );
+    }
+
+    // ── What a response says about the second stage ──────────────────────
+    //
+    // A stage that missed its deadline served the pre-rerank order and
+    // mentioned it only in the daemon's log, so from the client's side
+    // `mode = "on"` on a slow machine was indistinguishable from
+    // `mode = "off"`. That is not a hypothetical: a host serving two local
+    // models paid ~34 ms per candidate pair and so lost its depth-10 head to
+    // the 250 ms deadline on every real query. These tests pin the report,
+    // one per way the leg can end.
+
+    #[test]
+    fn an_applied_stage_reports_the_head_it_judged() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+
+        let report = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::reversing()),
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &query("pnpm"))
+        .unwrap();
+
+        let Some(RerankTrace::Applied { judged, took_ms }) = report.rerank else {
+            panic!("expected an applied stage, got {:?}", report.rerank);
+        };
+        assert!(
+            judged >= 2,
+            "a head of {judged} was called applied; the leg needs two to reorder"
+        );
+        assert!(
+            took_ms < 5_000,
+            "a fake taking {took_ms} ms is the test's fault"
+        );
+    }
+
+    #[test]
+    fn a_stage_that_misses_its_deadline_is_reported_as_skipped() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+
+        let traced = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::sleeping(Duration::from_millis(150))),
+            RerankMode::On,
+            30,
+            Duration::from_millis(20),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        // The safety valve: a late stage serves what fusion produced.
+        assert_eq!(
+            fingerprint(&traced.results),
+            fingerprint(&plain),
+            "a timed-out stage changed the order it had given up on"
+        );
+        // The report: which is exactly what the client could not see before.
+        assert!(
+            matches!(
+                traced.rerank,
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
+                    ..
+                })
+            ),
+            "a missed deadline should be reported as such, got {:?}",
+            traced.rerank
+        );
+    }
+
+    #[test]
+    fn a_model_that_fails_is_reported_apart_from_one_that_is_slow() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+
+        let report = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::failing()),
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &query("pnpm"))
+        .unwrap();
+
+        // The remedies differ — a deadline is raised, a broken model is not —
+        // so the two must not share a reason string.
+        assert!(
+            matches!(
+                report.rerank,
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Model,
+                    ..
+                })
+            ),
+            "expected a model failure, got {:?}",
+            report.rerank
+        );
+    }
+
+    #[test]
+    fn a_head_of_one_reports_not_needed_rather_than_silence() {
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "the only note about pnpm");
+
+        let report = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::reversing()),
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &query("pnpm"))
+        .unwrap();
+
+        assert_eq!(report.results.len(), 1, "the fixture is not one memory");
+        assert_eq!(
+            report.rerank,
+            Some(RerankTrace::NotNeeded { candidates: 1 }),
+            "a single candidate is a fact about the head, not evidence the \
+             stage is missing"
+        );
+    }
+
+    #[test]
+    fn mode_off_reports_nothing_even_with_a_model_wired() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let fake = reranker(FakeReranker::reversing());
+
+        let report = replace_recaller(
+            &fixture,
+            fake as Arc<dyn Reranker>,
+            RerankMode::Off,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &query("pnpm"))
+        .unwrap();
+
+        // `None` is what keeps the response of a stage-less deployment
+        // exactly what it has always been: no field, no cost, no mention.
+        assert_eq!(report.rerank, None, "mode `Off` reported a stage");
+    }
+
+    #[test]
+    fn shadow_reports_the_head_it_judged_and_what_it_would_have_moved() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        let report = replace_recaller(
+            &fixture,
+            reranker(FakeReranker::reversing()),
+            RerankMode::Shadow,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+
+        assert_eq!(
+            fingerprint(&report.results),
+            fingerprint(&plain),
+            "shadow mode changed what the client sees"
+        );
+        // `changed` is the disagreement rate an operator shadows *for*, so it
+        // belongs in the response as well as the log line.
+        assert!(
+            matches!(
+                report.rerank,
+                Some(RerankTrace::Shadow {
+                    changed: true,
+                    judged,
+                    ..
+                }) if judged >= 2
+            ),
+            "a reversing fake in shadow should report a would-be move, got {:?}",
+            report.rerank
         );
     }
 }

@@ -9,8 +9,8 @@
 //! its call on `spawn_blocking` rather than stalling a runtime worker.
 
 use super::dto::{
-    AuditEntryResponse, AuditResponse, MemoryResponse, SaveMemoryRequest, SearchHit, SearchRequest,
-    SearchResponse, UpdateMemoryRequest,
+    AuditEntryResponse, AuditResponse, MemoryResponse, RerankResponse, SaveMemoryRequest,
+    SearchHit, SearchRequest, SearchResponse, UpdateMemoryRequest,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
@@ -93,12 +93,15 @@ pub async fn search_memories(
     }
 
     let started = Instant::now();
-    let results = blocking(move || memories.recaller.execute(&context, &query)).await?;
+    // Traced, so a second stage that was configured and did not run is
+    // visible in the response rather than only in the daemon's log.
+    let report = blocking(move || memories.recaller.execute_traced(&context, &query)).await?;
 
     Ok(Json(SearchResponse {
-        results: results.iter().map(SearchHit::from).collect(),
+        results: report.results.iter().map(SearchHit::from).collect(),
         took_ms: started.elapsed().as_millis() as u64,
         min_relevance,
+        rerank: report.rerank.map(RerankResponse::from),
     }))
 }
 

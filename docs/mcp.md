@@ -189,6 +189,14 @@ reorg?" — and affects only the graph-connected results.
 An empty result says so explicitly rather than returning nothing: a blank
 string reads to a model as a failure rather than as an answer.
 
+One thing this text deliberately does not carry is whether an enabled second
+stage actually reordered the list. The reranker's outcome is an operator fact
+rather than the agent's business, so it lives in the REST response as a top-level
+`rerank` field ([api.md](api.md)) and in the daemon's log. If you set
+`[rerank].mode = "on"` and want to know whether it is contributing, look there —
+[deployment.md](deployment.md#4-confirm-it-is-actually-running) has the one
+request that answers it.
+
 ### `memory_forget`
 
 Two-step, and the server enforces it.

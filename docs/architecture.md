@@ -146,8 +146,10 @@ never builds the adapter, so the recall path is the one above and a
 build without the feature would behave identically. When it is on it is
 still additive — the reranker reorders the fused list, it never filters
 it, and a deadline overrun drops the stage rather than failing the
-request. See `reranking-plan.md` for the measurements that set its
-defaults.
+request. Because a dropped stage and an absent one look the same in the
+ordering, the leg reports which it was — `applied`, `shadow`, `not_needed`
+or `skipped`, in the response, and per query in `rerank audit`. See
+`reranking-plan.md` for the measurements that set its defaults.
 
 The graph leg (Task 7.3, "Strategy B") is what reaches a memory that
 answers a question it shares no words with: it scans the query for entity

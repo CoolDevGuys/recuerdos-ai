@@ -453,6 +453,33 @@ Nothing about it is persisted into your memories: a rerank score is a property
 of one query against one candidate list, not of a stored memory, which is why
 there is no "rerank everything" command and no migration to undo.
 
+### 4. Confirm it is actually running
+
+The sentence above — "a rerank deadline overrun drops the stage and serves the
+fused order with a warning" — is the whole feature and the whole trap. Dropping
+the stage is correct behaviour, and on a machine slower than the one that picked
+the default deadline it is also what happens *every time*, which looks exactly
+like `mode = "off"`. One request answers it:
+
+```bash
+curl -s $BASE/v1/memories/search \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"query":"what are my programming preferences","limit":8}' | jq '.rerank'
+```
+
+```json
+{"state": "applied", "judged": 10, "took_ms": 342}
+```
+
+If instead it reads `{"state": "skipped", "reason": "deadline", …}`, the stage is
+loaded, judging, and being thrown away: raise `[rerank].timeout_ms` above the
+`took_ms` you measure (2× is a sensible margin) or lower `[rerank].depth`. The
+journal says the same thing as a `WARN` on each affected recall, so
+`journalctl -u recuerdos-ai | grep 'rerank leg failed'` is the other way to see
+it — and note that `rerank audit` will *not* show it, because the audit measures
+with no deadline on purpose. Sizing the deadline against your own machine:
+[configuration.md](configuration.md#sizing-timeout_ms-for-your-machine).
+
 ---
 
 ## A note on running more than one person

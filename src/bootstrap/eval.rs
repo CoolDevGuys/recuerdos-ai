@@ -24,7 +24,7 @@ use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::application::memory_recaller::MemoryRecaller;
+use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, RerankTrace};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::Relation;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
@@ -35,6 +35,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+/// Set the first time an eval run discovers its rerank stage was skipped, so
+/// the operator hears about it once rather than once per case. Process-wide by
+/// design: the eval is a CLI run, and "warn me the first time" is the ask.
+static RERANK_SKIP_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// The cut-off the gate is defined at.
 ///
@@ -477,8 +483,26 @@ pub(crate) fn score(
     // memories it seeded, and a replay that recorded each hit as an access
     // would move the counters importance decay reads — so scoring the same
     // corpus twice would not measure the same thing twice.
-    let hits = recaller.execute_untracked(context, &query)?;
+    let report = recaller.execute_untracked_traced(context, &query)?;
+    let hits = report.results;
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // Once per run, because this is the worst kind of green: an eval whose
+    // second stage never finished reports reranking's measured gain as 0.0 and
+    // its cost as nothing. The gain was +5.8 p@1 precisely because it *ran*.
+    if matches!(report.rerank, Some(RerankTrace::Skipped { .. }))
+        && !RERANK_SKIP_WARNED.swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        eprintln!(
+            "⚠ rerank stage skipped ({}) — the numbers below describe the pre-rerank order",
+            match report.rerank {
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
+                    ..
+                }) => "past [rerank].timeout_ms",
+                _ => "model failure",
+            }
+        );
+    }
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();
 
     // Ranker-tuning aid (added in Task 7.3.7): with RA_EVAL_DEBUG set, dump

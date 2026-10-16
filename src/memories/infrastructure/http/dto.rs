@@ -4,6 +4,7 @@
 //! shape; the wire contract is a promise to clients, and these structs
 //! are where that promise is written down.
 
+use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::recall_ranker::ScoredMemory;
@@ -200,6 +201,79 @@ pub struct SearchResponse {
     /// "nothing matched at all" and lets a client decide between giving up
     /// and retrying with `min_relevance: 0.0`.
     pub min_relevance: f32,
+    /// What the optional second stage did for this recall — absent when no
+    /// stage is configured, so a `mode = "off"` response is exactly what it
+    /// always was.
+    ///
+    /// It is here because the failure mode was invisible: a reranker that
+    /// misses `[rerank].timeout_ms` serves the pre-rerank order by design,
+    /// and the only sign was a log line. `"state": "skipped"` is that sign
+    /// where a client can see it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<RerankResponse>,
+}
+
+/// The wire shape of the domain's `RerankTrace`. Kept separate so the
+/// response contract can evolve (and be documented) without the recall path
+/// knowing about JSON.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum RerankResponse {
+    /// Configured, but the head was too short to reorder.
+    NotNeeded { candidates: usize },
+    /// Judged the head and folded its order in.
+    Applied { judged: usize, took_ms: u64 },
+    /// Judged the head and logged the comparison; the old order was served.
+    Shadow {
+        judged: usize,
+        changed: bool,
+        took_ms: u64,
+    },
+    /// Asked, and it did not contribute. The results are the pre-rerank order.
+    Skipped {
+        reason: RerankSkipReason,
+        candidates: usize,
+        took_ms: u64,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankSkipReason {
+    /// Past `[rerank].timeout_ms`. Raise it, or lower `[rerank].depth`.
+    Deadline,
+    /// The model failed or misaligned its scores.
+    Model,
+}
+
+impl From<RerankTrace> for RerankResponse {
+    fn from(trace: RerankTrace) -> Self {
+        match trace {
+            RerankTrace::NotNeeded { candidates } => Self::NotNeeded { candidates },
+            RerankTrace::Applied { judged, took_ms } => Self::Applied { judged, took_ms },
+            RerankTrace::Shadow {
+                judged,
+                changed,
+                took_ms,
+            } => Self::Shadow {
+                judged,
+                changed,
+                took_ms,
+            },
+            RerankTrace::Skipped {
+                reason,
+                candidates,
+                took_ms,
+            } => Self::Skipped {
+                reason: match reason {
+                    RerankSkip::Deadline => RerankSkipReason::Deadline,
+                    RerankSkip::Model => RerankSkipReason::Model,
+                },
+                candidates,
+                took_ms,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -379,5 +453,82 @@ mod tests {
         assert_eq!(json["matched"]["rerank_rank"], 1);
         let emitted = json["matched"]["rerank_score"].as_f64().unwrap() as f32;
         assert!((emitted - 0.97).abs() < 1e-6, "{emitted}");
+    }
+
+    // ── The second stage, on the wire ────────────────────────────────────
+    //
+    // The promise these pin is the one the fix was for: a client can tell a
+    // working reranker from an absent one from a dropped one without reading
+    // the daemon's log — and a deployment that never turned one on gets the
+    // response it always got.
+
+    fn response_with(rerank: Option<RerankTrace>) -> serde_json::Value {
+        serde_json::to_value(SearchResponse {
+            results: Vec::new(),
+            took_ms: 12,
+            min_relevance: 0.25,
+            rerank: rerank.map(RerankResponse::from),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_response_without_a_second_stage_says_nothing_about_one() {
+        let json = response_with(None);
+        assert!(
+            json.get("rerank").is_none(),
+            "an absent stage must not add a field: {json}"
+        );
+    }
+
+    #[test]
+    fn a_second_stage_that_ran_reports_what_it_judged() {
+        let json = response_with(Some(RerankTrace::Applied {
+            judged: 10,
+            took_ms: 71,
+        }));
+        assert_eq!(json["rerank"]["state"], "applied");
+        assert_eq!(json["rerank"]["judged"], 10);
+        assert_eq!(json["rerank"]["took_ms"], 71);
+    }
+
+    #[test]
+    fn a_second_stage_that_missed_its_deadline_names_the_reason() {
+        // The shape an operator on a busy box sees, and the reason they can
+        // act on: `timeout_ms`, or a smaller `depth`.
+        let json = response_with(Some(RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            candidates: 10,
+            took_ms: 251,
+        }));
+        assert_eq!(json["rerank"]["state"], "skipped");
+        assert_eq!(json["rerank"]["reason"], "deadline");
+        assert_eq!(json["rerank"]["candidates"], 10);
+
+        let model = response_with(Some(RerankTrace::Skipped {
+            reason: RerankSkip::Model,
+            candidates: 10,
+            took_ms: 4,
+        }));
+        assert_eq!(model["rerank"]["reason"], "model");
+    }
+
+    #[test]
+    fn a_head_too_short_to_reorder_says_so() {
+        let json = response_with(Some(RerankTrace::NotNeeded { candidates: 1 }));
+        assert_eq!(json["rerank"]["state"], "not_needed");
+        assert_eq!(json["rerank"]["candidates"], 1);
+    }
+
+    #[test]
+    fn shadow_reports_the_move_it_declined_to_make() {
+        let json = response_with(Some(RerankTrace::Shadow {
+            judged: 6,
+            changed: true,
+            took_ms: 180,
+        }));
+        assert_eq!(json["rerank"]["state"], "shadow");
+        assert_eq!(json["rerank"]["changed"], true);
+        assert_eq!(json["rerank"]["judged"], 6);
     }
 }

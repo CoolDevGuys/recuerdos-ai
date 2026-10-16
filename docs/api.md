@@ -296,6 +296,35 @@ their absence does not mean the stage is off. Off by default, and never
 visible in `shadow` mode: a server without a reranker, or one running shadow
 mode, produces exactly the `matched` objects above.
 
+What the stage *did*, as opposed to what it did to each row, is reported once
+per response in a top-level `rerank` object. It is present whenever a stage is
+configured and absent when `mode = "off"`, so a deployment without a reranker
+gets back exactly the response it has always got:
+
+```json
+{
+  "results": [ … ],
+  "took_ms": 258,
+  "min_relevance": 0.25,
+  "rerank": {"state": "skipped", "reason": "deadline", "candidates": 10, "took_ms": 251}
+}
+```
+
+| `state` | Meaning |
+|---|---|
+| `applied` | Judged `judged` candidates in `took_ms`, and its order is folded into the list above |
+| `shadow` | Judged them and logged what it *would* have served; `changed` says whether the top result would have moved |
+| `not_needed` | Fewer than two candidates cleared `min_relevance`, so there was nothing to reorder |
+| `skipped` | Asked, and it did not contribute — `reason` is `deadline` (past `[rerank].timeout_ms`) or `model`. The results above are the pre-rerank order |
+
+`skipped` is the one worth noticing. It exists because its absence cost an
+operator an afternoon: a stage that misses its deadline serves the pre-rerank
+order *by design* — the request must never fail because of the second stage —
+and that looks exactly like `mode = "off"` from the client's side. On a machine
+that is not idle it is the ordinary outcome for a deep head, not a rare one;
+[size it against your own recalls](configuration.md#sizing-timeout_ms-for-your-machine)
+rather than trusting the default, which was measured on a quiet benchmark box.
+
 | Field | Notes |
 |---|---|
 | `query` | Required, 1–1000 characters |

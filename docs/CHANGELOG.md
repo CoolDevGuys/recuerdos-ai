@@ -81,6 +81,50 @@ memories before you spend either.
   `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
   carries no rerank model, since the default does not use one.
 
+## v0.4.2 — The second stage now says whether it ran
+
+The same deployment that surfaced the v0.4.1 template defect turned up a second
+one, and this one was not a config mistake: with `[rerank].mode = "on"`, its
+reranker had never once contributed to a recall, and nothing a client could see
+said so.
+
+The stage misses its `[rerank].timeout_ms` by design and serves the pre-rerank
+order — a second opinion is never worth a failed request — and the only trace
+was a `WARN` in the journal. From the client's side that is indistinguishable
+from `mode = "off"`. On that host, which also serves a 9B model and a local
+embedding server, judging one candidate costs ~34 ms rather than the ~7 ms the
+idle benchmark box managed, so a `depth = 10` head needs ~350 ms against a
+250 ms deadline and every query worth asking lost the stage. `rerank audit`
+aggravated it: measured deadline-free, it reported the stage as running while
+the live path threw its answer away.
+
+- **A recall that has a second stage now reports what it did**, as a top-level
+  `rerank` object on `POST /v1/memories/search`: `applied` with how many
+  candidates it judged and in how long, `shadow` with whether it *would* have
+  moved the top result, `not_needed` when fewer than two cleared the floor, or
+  `skipped` with `reason = "deadline"` or `"model"`. The field is **absent**
+  when `mode = "off"`, so a deployment without a reranker gets the response it
+  has always got, byte for byte. SDK models already tolerate unknown fields.
+- **`rerank audit` says how many queries the stage actually contributed to**,
+  and opens with that when it is not all of them. A run where the stage did
+  nothing used to be indistinguishable from a run where reranking agreed with
+  fusion, and "no disagreements found" is the wrong conclusion to draw from it
+  ([evaluation.md](evaluation.md#judging-a-second-stage-on-your-own-memories)).
+- **An eval whose stage was skipped says so once**, on stderr, instead of
+  reporting reranking's measured gain as 0.0 and its cost as nothing.
+- **`timeout_ms` is documented as what it is**: a tail bound measured on an idle
+  machine, sized in pairs of milliseconds per candidate, with the two machines
+  above side by side and a recipe — read `rerank.took_ms` across your own
+  queries and set the deadline near twice that
+  ([configuration.md](configuration.md#sizing-timeout_ms-for-your-machine)).
+
+**For operators who turned reranking on and saw no difference:** send one search
+and read `.rerank`. If it says `skipped`/`deadline`, raise
+`[rerank].timeout_ms` to roughly 2× the `took_ms` you measure, or lower
+`[rerank].depth` — understanding that the +5.8 precision@1 was measured at
+depth 10, so a shorter head trades away part of the gain rather than getting it
+cheaper.
+
 ## v0.4.1 — Two relevance settings that were being dropped
 
 A review of a real deployment's `recuerdos-ai.toml` found that the example file
