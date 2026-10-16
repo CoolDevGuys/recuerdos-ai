@@ -34,11 +34,18 @@ Because env vars override the file, the config a running daemon actually
 uses is not always what the file says. `recuerdos-ai config` (or
 `make config`) prints the **resolved** result — which embeddings and
 understanding provider are selected, their models and endpoints, the MCP
-transports, storage path, and auth mode:
+transports, the second-stage reranker, storage path, and auth mode:
 
 ```bash
 recuerdos-ai config
 ```
+
+The rerank block prints one line, `mode off`, unless the stage is actually
+enabled — the point of the command is to show what a running daemon pays,
+and with the stage off it pays nothing. When it is on, the same block shows
+the model, depth, strategy, weight and deadline in force, so the two numbers
+an operator needs when a recall is slow (which model, how deep) are one
+command away and reflect env overrides, not the file you meant to edit.
 
 It prints no secrets. For a provider API key it shows only the env var
 holding it and whether that var is set — so a `GEMINI_API_KEY (NOT SET)`
@@ -282,10 +289,79 @@ at 50 regardless.
 
 There is also an optional second stage, `[rerank]` (documented in
 `recuerdos-ai.example.toml`): a local cross-encoder that re-scores the head of
-the fused list. It is off by default, and `recuerdos-ai rerank audit` is how
-you judge it on your own store before turning it on — a read-only replay that
-runs *without* `min_relevance`, so it shows you the near-misses your clients
-would never see ([`docs/evaluation.md`](evaluation.md)).
+the result list — the candidates that survived `min_relevance`, up to `depth` of
+them, never the whole fused list. It is off by default, and
+`recuerdos-ai rerank audit` is how you judge it on your own store before turning
+it on — a read-only replay that runs *without* `min_relevance`, so it shows you
+the near-misses your clients would never see
+([`docs/evaluation.md`](evaluation.md)).
+
+### If a model is too big for your box
+
+The default rerank model was chosen on quality, not on size: it earns
+**+5.8 precision@1** on the eval set and costs **1.1 GB of weights**
+(downloaded into `[embeddings].cache_dir`, or baked into the image) and about
+**1.5 GiB of RAM** per concurrent inference. A machine that cannot pay that
+should leave `mode = "off"`. The measured alternative is not a graceful
+degradation: the small model's whole gain is **+1.9 points**, which the grid
+showed to be inside run-to-run noise. There is no quality tier to step down
+through — you either want the stage or you do not.
+
+### Language: what the default model actually speaks
+
+`bge-reranker-base` is a **Chinese-and-English** reranker: an XLM-R backbone
+whose ranking fine-tuning is English plus Chinese. It will happily return a score
+for text in any language — that is the trap — but its judgement of *relevance*
+was only ever trained in two. Outside those two, treat its ordering as untested,
+not merely a bit worse: our whole +5.8 was measured on English cases, so for,
+say, German or Japanese memories there is no number here to lean on, only the
+honest statement that nobody measured it.
+
+| Model | Languages it was trained to rank | Weights | Added p95 | Measured gain |
+|---|---|---|---|---|
+| `bge-reranker-base` (default) | English, Chinese | 1.1 GB | +71 ms | **+5.8 p@1** — the only candidate that clears the ship gate |
+| `jina-reranker-v2-base-multilingual` | broad multilingual | 1.1 GB | +76 ms | +3.8 p@1, and only with `strategy = "rrf"` |
+| `bge-reranker-v2-m3` | widest of the four (BGE's multilingual line) | 2.2 GB | +157 ms | +1.9 — the same as the 147 MB model, for fifteen times the RAM |
+| `jina-reranker-v1-turbo-en` | English only | 147 MB | +20 ms | +1.9 (inside noise) |
+
+So for a store that is not English or Chinese, the multilingual option costs
+about what the default costs — the same footprint, a little more latency — and
+returns roughly two thirds of a gain that was itself measured in English. That
+makes it the default choice for a multilingual store, with the caveat attached,
+not hidden: set it, then **shadow it on your own data** and read the audit before
+serving it, because the corpus here could not tell you how it behaves in your
+language. If you would rather spend no latency on an unproven second opinion,
+`mode = "off"` is the correct setting, not a failure to configure.
+
+### Recall quality: "results look random"
+
+When recall returns things that have nothing to do with the question, it is
+almost never the ranking. Three checks, in this order:
+
+1. **Are the tokens you typed even in the index?** A memory matching the exact
+   identifier you searched for is the keyword leg's job. Up to `v0.3.x` that
+   leg indexed stopwords too, so "what database do we use" matched every
+   memory containing "the". `v0.4.0` fixed it; the fix needs a one-time keyword
+   index rebuild, which happens automatically on the first start after the
+   upgrade (see [`docs/deployment.md`](deployment.md) if it reports a lock).
+2. **Is the relevance baseline right for *your* embedding model?** Relevance
+   is a cosine rescaled from the model's own noise floor, and that floor moves
+   enormously between models — the same pair of memories scores 0.15 on one
+   model and 0.65 on another. Getting it wrong looks exactly like random
+   results, because either everything clears the floor or nothing does.
+   `recuerdos-ai calibrate` measures it and tells you what is in force;
+   `[retrieval].similarity_baseline` sets it by hand. The models in common use
+   ship with measured defaults; a model nobody has measured falls back to 0.5
+   with a warning at startup — that warning is the second symptom of this
+   problem, and the first is the recall you are looking at.
+3. **Is the answer in there at all?** `recuerdos-ai eval` runs a corpus of
+   known-answer questions; `rerank audit` replays your own queries and shows
+   the full candidate list *without* the floor, so a correct answer stuck at
+   rank 9 looks different from a correct answer that does not exist.
+
+Turning the reranker on is not a fix for any of these. It reorders what
+retrieval already found; it cannot surface a memory the legs missed, and
+`depth` is not a knob for "wider" — candidates outside it are never judged.
 
 ## Storage
 

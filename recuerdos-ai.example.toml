@@ -202,9 +202,17 @@ mode = "off"
 # of weights (into [embeddings].cache_dir) and ~1.5 GiB RAM per session
 # — a box that cannot pay should stay "off" rather than drop to the
 # smaller model, whose measured gain (+1.9) is a coin flip.
+# Language: this one ranks English and Chinese. It will score any language
+# without complaining, which is not the same as scoring it well — the eval
+# corpus is English, so nothing here certifies it further. For another
+# language, jina-reranker-v2-base-multilingual is the measured alternative
+# (same 1.1 GB, +76 ms instead of +71, +3.8 rather than +5.8), and it too
+# should be shadowed on your own text before you trust it.
 model = "bge-reranker-base"
-# How many fused candidates per recall the reranker judges. Its ceiling
-# on cost — and on how deep a correction it can make. Measured: the
+# How many candidates per recall the reranker judges — drawn from what already
+# survived [retrieval].min_relevance, so a memory the floor dropped is never
+# re-scored: this stage reorders, it does not rescue. It is its ceiling on
+# cost — and on how deep a correction it can make. Measured: the
 # whole gain lands by 10; deeper costs linearly (added p95 +71 ms at 10,
 # +270 ms at 50) and bought nothing on the eval corpus. Raise it if your
 # own shadow data shows wins arriving from deeper in a large store.
