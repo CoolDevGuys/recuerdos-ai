@@ -10,11 +10,12 @@
 //! promises to configure that bound, not to discover it from ONNX. So the
 //! adapter loads `max_concurrency` sessions and each scores on its own.
 //! The honest cost is RAM: every session holds its own copy of the model
-//! weights, which is why the number defaults to 2 and the plan's Phase 5
-//! DoD makes the memory delta a documented measurement rather than a
-//! surprise. The benefit is the one the semaphore exists for: a burst of
-//! recalls cannot starve the ingest embedder on the shared blocking pool
-//! beyond that fixed number of concurrent inferences.
+//! weights, which is why the number defaults to 1 for a model whose
+//! sessions measure ~1.5 GiB each, and the plan's Phase 5 DoD makes the
+//! memory delta a documented measurement rather than a surprise. The
+//! benefit is the one the semaphore exists for: a burst of recalls cannot
+//! starve the ingest embedder on the shared blocking pool beyond that
+//! fixed number of concurrent inferences.
 //!
 //! # Why the scores are squashed
 //!
