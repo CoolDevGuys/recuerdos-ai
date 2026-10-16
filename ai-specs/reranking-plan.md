@@ -582,13 +582,13 @@ time and concurrency. Off by default.
 
 #### Definition of Done
 
-- [ ] `just check-native` passes (default build downloads nothing; boundary script passes).
-- [ ] With the default config the binary behaves exactly like before (identity test from Phase 4 passes
+- [x] `just check-native` passes (default build downloads nothing; boundary script passes).
+- [x] With the default config the binary behaves exactly like before (identity test from Phase 4 passes
       through the real wiring).
-- [ ] With `mode = "on"` and the model warmed, `recuerdos-ai eval` runs end to end and prints the
+- [x] With `mode = "on"` and the model warmed, `recuerdos-ai eval` runs end to end and prints the
       reranked metrics + latency (numbers recorded in §12; not yet judged).
-- [ ] `recuerdos-ai warm-models` downloads the rerank model when configured.
-- [ ] Documented measurements: model size on disk, RAM delta at idle and under load, cold-start time.
+- [x] `recuerdos-ai warm-models` downloads the rerank model when configured.
+- [x] Documented measurements: model size on disk, RAM delta at idle and under load, cold-start time.
 
 #### Expected state after this phase
 
@@ -1573,7 +1573,76 @@ reranker is wired, as required.
 - [x] Module docs in `recall_ranker.rs` describe both strategies and the weight calibration.
 
 ### Phase 5 — adapter
-- Model size / idle RAM / loaded RAM / cold start: _TBD_ · `eval` with `mode=on`: _TBD_
+
+**Measurements** (`jina-reranker-v1-turbo-en`, the config default; dev container
+on the M4 Pro, model cache on the `models` volume; RSS from `/proc/self/status`,
+printed by `warm-models` itself — Linux only):
+
+| what | number | how |
+| --- | --- | --- |
+| model size on disk | **147 MB** (`/models/models--jinaai--jina-reranker-v1-turbo-en`) | `du -sh /models/*` |
+| cold start (load, warm cache) | **283 ms** (9.4 s on the first-ever run, download included) | `warm-models` timed print around `FastembedReranker::load` |
+| smoke score (2 candidates) | 7 ms | same |
+| RAM at idle with `mode = off` | 219 MiB RSS (embedding model loaded, no rerank session) | same, before-load line |
+| RAM loaded (1 session) | **404 MiB → +180 MiB per `max_concurrency` session** | same, after-load line |
+
+`recuerdos-ai warm-models` downloads the rerank model **only when the loaded
+config enables it** (`-e RECUERDOS_AI_RERANK__MODE=on`); the default run is
+byte-identical to before the phase and pulls nothing new (no `[rerank]` in the
+default config).
+
+**`eval` with `mode = on`** — paired, same machine and embedder (§12 Run 1's
+bge-small default config; depth 30, `rrf` weight 1, 1 session, everything else
+default; the 5-case `by_kind` deltas all sit in the §9 tolerance, quality is
+explicitly *not* judged here):
+
+```
+mode off: recall@5: 86.5%   precision@1: 64.9%   MRR: 74.1%   latency p50: 10.3 ms p95: 11.7 ms   (37 scored, 4 negative)
+mode on:  recall@5: 86.5%   precision@1: 64.9%   MRR: 74.3%   latency p50: 55.2 ms p95: 67.2 ms   (37 scored, 4 negative)
+```
+
+Recall and p@1 unchanged; MRR +0.2 points (two `nl-question`/`relational`
+cases reshuffled inside the head). Cost: **+45 ms p50 per recall** scoring 30
+candidates with one session (the daemon's `max_concurrency = 2` exists to
+share that; the 400 ms deadline never fired — p95 67 ms). The `--config
+recuerdos-ai.toml` (gemini) pairing is deferred to Phase 7's grid, where the
+latency is dominated by the embedding API and belongs there.
+
+#### Adapter (`fastembed_reranker.rs`)
+
+**VERIFY resolved (§2 row 1 / task 5.1):** fastembed 5.17.3 needs **no Cargo
+feature** for rerank (the `hf-hub` default features already cover model
+download), `TextRerank::rerank(&mut self, query, docs, return_documents,
+batch_size)` takes **`&mut self`** and returns `Vec<RerankResult>` **sorted
+descending** with `index` back-references into the input. The adapter
+therefore keeps a pool of `max_concurrency` `TextRerank` sessions
+(`InstancePool`: first free `try_lock`, else block on the oldest — honest
+bound, no false parallelism), and `align_scores` restores candidate-order
+alignment. Scores pass through a sigmoid `squash()` — strictly monotonic, so
+RRF ranks never move because of the adapter; `Replace` gets its
+non-negative comparable contract; one `(0,1)` scale across models.
+`DEFAULT_MAX_LENGTH = 256` (memories are short; the 512 default only buys
+padding). Models: 4 built-ins by short name or HF repo id, plus any `.onnx`
+path read with its tokenizer files from the same directory
+(`UserDefinedRerankingModel`).
+
+#### Config and wiring
+
+`[rerank]` mirrors `GraphConfig`: defaults `off` / `jina-reranker-v1-turbo-en`
+/ 30 / `rrf` / 1.0 / 400 ms / 2 / 16; validation reports every bad knob at
+once (the graph precedent: `depth ≥ 1`, `weight ≥ 0`, `timeout_ms ≥ 1`,
+`max_concurrency ≥ 1`, known `mode`/`strategy`; an unknown `model` is fatal
+**only when `mode != off`**); env overrides follow `RECUERDOS_AI_RERANK__*`;
+`recuerdos-ai config` prints the effective block (`mode` alone for `off`, so
+the default echo names no model nobody loaded). `build_reranker` returns
+`Ok(None)` **before resolving anything** when `mode = off` — that is the gate
+for the no-network/no-weights/no-startup-cost DoD item, tested directly
+(`mode = off` with a deliberately bogus model still assembles). A load failure
+with `mode != off` aborts startup with a `Validation` error naming the model,
+like embeddings. Wiring test: `the_rerank_config_reaches_recall_through_the_
+real_wiring` runs the real `Memories::assemble_with_reranker` with the
+reversing fake — `on` + `replace` serves the exact reversed head and
+`depth = 2` bounds it to a top-two swap.
 
 ### Phase 6 — audit and shadow
 - `rerank audit` output: _TBD_ · shadow disagreement rate + latency: _TBD_
@@ -1597,6 +1666,13 @@ reranker is wired, as required.
       `recuerdos-ai calibrate --config recuerdos-ai.toml` measured document and query
       norms over the eval corpus at 3072 dims, min/max/mean all `1.0000`. No embedder
       change, no reindex. Details in the Phase 2 log above.
-- [ ] fastembed rerank feature flag; `TextRerank::rerank` receiver (`&self`/`&mut self`) (5.1)
-- [ ] Dockerfile warm-models step (5.4)
+- [x] fastembed rerank feature flag; `TextRerank::rerank` receiver (`&self`/`&mut self`) (5.1) —
+      **no extra Cargo feature** (fastembed 5.17.3's default features download rerank models), and
+      `rerank` takes **`&mut self`**, returning a descending-sorted `Vec<RerankResult>` with input
+      `index` back-references; the adapter answers with an `InstancePool` of `max_concurrency`
+      sessions plus `align_scores`. Details in the Phase 5 log above.
+- [x] Dockerfile warm-models step (5.4) — the release stage runs `warm-models` from the builder;
+      extended with an empty-default `ARG RERANK_MODEL=` guarding an if/else around the same step,
+      so the default image is byte-for-byte what it was and a bake-in is one build arg (~147 MB).
+      Details in the Phase 5 log above.
 - [ ] Read-only open of SQLite/tantivy while the daemon runs (6.2)

@@ -24,8 +24,26 @@ RUN cargo build --release
 # Bake the embedding model into the image. Without this the first
 # `POST /v1/memories` after `docker run` would block on a ~130 MB
 # HuggingFace download — and fail outright on an air-gapped host.
-RUN RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
-    ./target/release/recuerdos-ai warm-models
+#
+# `warm-models` also pulls the rerank model when the config it loads
+# enables one (reranking-plan.md Phase 5.4). The default build passes
+# no `[rerank]` config, so the default image carries no rerank model —
+# `mode = off` means no download, no resident weights, no image growth.
+# A deployment that wants the second stage baked in passes
+# `--build-arg RERANK_MODEL=jina-reranker-v1-turbo-en` (~300 MB added
+# to the image, and roughly that again in RSS per `max_concurrency`
+# session once serving); with an empty arg the step is exactly what it
+# always was.
+ARG RERANK_MODEL=
+RUN if [ -n "$RERANK_MODEL" ]; then \
+      RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+      RECUERDOS_AI_RERANK__MODE=on \
+      RECUERDOS_AI_RERANK__MODEL="$RERANK_MODEL" \
+      ./target/release/recuerdos-ai warm-models; \
+    else \
+      RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+      ./target/release/recuerdos-ai warm-models; \
+    fi
 
 FROM debian:trixie-slim AS runtime
 

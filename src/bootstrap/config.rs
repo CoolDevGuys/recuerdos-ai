@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub consolidation: ConsolidationConfig,
     pub retrieval: RetrievalConfig,
     pub graph: GraphConfig,
+    pub rerank: RerankConfig,
     pub auth: AuthConfig,
     pub rate_limit: RateLimitConfig,
 }
@@ -427,6 +428,100 @@ impl Default for GraphConfig {
     }
 }
 
+/// `[rerank]`: the optional second-stage cross-encoder
+/// (reranking-plan.md Phase 5). Mirrors [`GraphConfig`]'s "inert until
+/// asked for" shape: the default `mode = "off"` builds nothing — no
+/// model load, no download, no startup cost, and recall is byte-identical
+/// to a build without this section (the Phase 4 identity test pins it
+/// through the real wiring).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RerankConfig {
+    /// What recall does with the reranker: `off` (never consult it),
+    /// `shadow` (score and log the comparison — ids and ranks only — but
+    /// serve the pre-rerank order) or `on` (serve the reranked order).
+    /// `shadow` is how the feature gets judged on real traffic before any
+    /// client sees it change (Phase 6); `on` stays gated behind the
+    /// Phase 7 ship gate.
+    pub mode: String,
+    /// The cross-encoder: one of the four models `fastembed` ships
+    /// (`bge-reranker-base`, `bge-reranker-v2-m3`,
+    /// `jina-reranker-v1-turbo-en`, `jina-reranker-v2-base-multilingual`,
+    /// or their HuggingFace repo ids), or a path to an ONNX file ending
+    /// in `.onnx` for a bring-your-own model (its tokenizer files must
+    /// sit beside it). Which one *should* win is a Phase 7 grid question
+    /// (size vs latency vs quality, and the English-only vs multilingual
+    /// trade-off); `jina-reranker-v1-turbo-en` is the plan's placeholder
+    /// because it is the smallest, and the smallest is the right default
+    /// for a model nobody has measured yet on this corpus. An unknown
+    /// name with `mode != off` is a startup error.
+    pub model: String,
+    /// How many fused candidates the reranker judges per recall. It is a
+    /// cost dial with a quality cliff: candidates below it never get a
+    /// second look, so the reranker cannot promote the right memory from
+    /// rank 31. 30 covers every head the eval's `candidate_depth`
+    /// produces at its configured limits while bounding the batch a
+    /// personal CPU scores inside the timeout; the Phase 7 grid moves it
+    /// (10–50), not this comment.
+    pub depth: usize,
+    /// How the rerank scores reorder the head: `rrf` (a fourth fusion leg,
+    /// damped by `weight`) or `replace` (the rerank score, banded by the
+    /// recency/quality multiplier, orders the head outright). Both are
+    /// implemented and calibrated in `memories::domain::recall_ranker`;
+    /// `rrf` starts as the default because it degrades gently — the plan's
+    /// §2-row-4 lesson is that *which* strategy wins is measurable, and
+    /// Phase 7 measures it.
+    pub strategy: String,
+    /// Weight on the rerank leg when `strategy = "rrf"`. `0` is off; `1`
+    /// lets the reranker break ties against a single retrieval leg but
+    /// never overrule vector+BM25 agreement; only `>= 2` can do that,
+    /// which is exactly the "right memory in the top 5 but not first"
+    /// failure this feature exists to fix — so the tuned range spans
+    /// 0.5–4 (see the `recall_ranker` module docs; Phase 7 picks).
+    /// Must be `>= 0`. Ignored by `replace`.
+    pub weight: f32,
+    /// Beyond this, the rerank leg is abandoned and the pre-rerank order
+    /// served — with a warning, not an error (invariant I-2). 400 ms is
+    /// deliberately generous while unmeasured (it sits below the 30 s
+    /// read timeout with room for the remote embedder call that precedes
+    /// it); once Phase 5's own measurements land it should move above the
+    /// measured p95 and below the client-visible limit, and that value
+    /// belongs in §12 of the plan, not here.
+    pub timeout_ms: u64,
+    /// How many rerank inferences may run at once. Each permit is a
+    /// second copy of the model in RAM (one ONNX session cannot score two
+    /// batches at once), so this is the concurrency bound *and* the memory
+    /// knob: `1` for a small box, higher only if the box and the recall
+    /// rate justify the resident cost. `0` would mean "rerank but never
+    /// run", hence the validation.
+    pub max_concurrency: usize,
+    /// Candidates per model forward pass. Smaller than `depth` on
+    /// purpose: the forward pass pads to the longest pair in the batch,
+    /// so many small batches keep the padding short while a few large
+    /// ones waste compute — this trades between the two. Not sensitive
+    /// (the Phase 7 grid sweeps it only if the latency budget demands).
+    pub batch_size: usize,
+}
+
+impl Default for RerankConfig {
+    /// Every default is the *inert* choice: the feature ships compiled in
+    /// but switched off, and none of these numbers has behavioural effect
+    /// until `mode` says otherwise. See the field docs for what each
+    /// would do and where its tuned value comes from.
+    fn default() -> Self {
+        Self {
+            mode: "off".to_string(),
+            model: "jina-reranker-v1-turbo-en".to_string(),
+            depth: 30,
+            strategy: "rrf".to_string(),
+            weight: 1.0,
+            timeout_ms: 400,
+            max_concurrency: 2,
+            batch_size: 16,
+        }
+    }
+}
+
 const AUTH_MODES: &[&str] = &["api-key", "none"];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -617,6 +712,74 @@ impl AppConfig {
                     self.graph.rank_weight
                 ));
             }
+        }
+
+        // The rerank knobs are validated *unconditionally* (even with
+        // `mode = off`, where they are inert) except for `model`: naming
+        // a model you will never load is not a mistake worth refusing a
+        // start for, but a nonsense value next to it usually means the
+        // operator meant to turn the feature on and fat-fingered — the
+        // same argument graph validation makes for the hop knobs.
+        const RERANK_MODES: &[&str] = &["off", "shadow", "on"];
+        const RERANK_STRATEGIES: &[&str] = &["rrf", "replace"];
+        if !RERANK_MODES.contains(&self.rerank.mode.as_str()) {
+            issues.push(format!(
+                "[rerank].mode {:?} is not one of {RERANK_MODES:?}",
+                self.rerank.mode
+            ));
+        }
+        if !RERANK_STRATEGIES.contains(&self.rerank.strategy.as_str()) {
+            issues.push(format!(
+                "[rerank].strategy {:?} is not one of {RERANK_STRATEGIES:?}",
+                self.rerank.strategy
+            ));
+        }
+        if self.rerank.depth == 0 {
+            issues.push(
+                "[rerank].depth is 0 — the reranker would judge nothing and change nothing"
+                    .to_string(),
+            );
+        }
+        // Negatives *or* NaN, same as the graph weight: either would make
+        // the rerank leg subtract from or corrupt a memory's fused score.
+        if self.rerank.weight < 0.0 || self.rerank.weight.is_nan() {
+            issues.push(format!(
+                "[rerank].weight {} is invalid — it must be >= 0.0",
+                self.rerank.weight
+            ));
+        }
+        // A 0 timeout is never what the author meant and is never inert:
+        // every rerank leg would fall back with a warning that reads like
+        // a slow model, which is the one failure mode the knob should not
+        // be able to masquerade as. ("off" is spelled `mode = "off"`.)
+        if self.rerank.timeout_ms == 0 {
+            issues.push(
+                "[rerank].timeout_ms is 0 — every rerank leg would fall back unheard; \
+                 use mode = \"off\" to turn the stage off"
+                    .to_string(),
+            );
+        }
+        if self.rerank.max_concurrency == 0 {
+            issues.push(
+                "[rerank].max_concurrency is 0 — no rerank inference could ever run".to_string(),
+            );
+        }
+        if self.rerank.batch_size == 0 {
+            issues.push(
+                "[rerank].batch_size is 0 — the reranker could never score anything".to_string(),
+            );
+        }
+        if self.rerank.mode != "off"
+            && crate::providers::infrastructure::rerank::fastembed_reranker::resolve_model(
+                &self.rerank.model,
+            )
+            .is_err()
+        {
+            issues.push(format!(
+                "[rerank].model {:?} is not loadable (with mode {:?}) — see the rerank model list \
+                 or point it at an .onnx file",
+                self.rerank.model, self.rerank.mode
+            ));
         }
 
         if !AUTH_MODES.contains(&self.auth.mode.as_str()) {
@@ -918,6 +1081,116 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    #[test]
+    fn rerank_is_off_by_default_with_the_planned_inert_defaults() {
+        // The Phase 5 shape: the section exists, ships switched off, and
+        // its defaults are the plan's placeholder block (the numbers
+        // themselves carry behaviour only once `mode` is not "off").
+        Jail::expect_with(|_jail| {
+            let config = AppConfig::load(None).expect("defaults must be valid");
+            assert_eq!(config.rerank.mode, "off");
+            assert_eq!(config.rerank.model, "jina-reranker-v1-turbo-en");
+            assert_eq!(config.rerank.depth, 30);
+            assert_eq!(config.rerank.strategy, "rrf");
+            assert_eq!(config.rerank.weight, 1.0);
+            assert_eq!(config.rerank.timeout_ms, 400);
+            assert_eq!(config.rerank.max_concurrency, 2);
+            assert_eq!(config.rerank.batch_size, 16);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_rerank_block_overrides_the_defaults() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rerank]\nmode = \"shadow\"\nmodel = \"bge-reranker-base\"\ndepth = 10\nstrategy = \"replace\"\nweight = 2.5\ntimeout_ms = 200\n",
+            )?;
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
+            assert_eq!(config.rerank.mode, "shadow");
+            assert_eq!(config.rerank.model, "bge-reranker-base");
+            assert_eq!(config.rerank.depth, 10);
+            assert_eq!(config.rerank.strategy, "replace");
+            assert_eq!(config.rerank.weight, 2.5);
+            assert_eq!(config.rerank.timeout_ms, 200);
+            // Untouched fields keep their defaults.
+            assert_eq!(config.rerank.max_concurrency, 2);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rerank_keys_follow_the_env_override_convention() {
+        Jail::expect_with(|jail| {
+            jail.set_env("RECUERDOS_AI_RERANK__MODE", "on");
+            jail.set_env("RECUERDOS_AI_RERANK__MODEL", "jina-reranker-v1-turbo-en");
+            jail.set_env("RECUERDOS_AI_RERANK__MAX_CONCURRENCY", "1");
+            let config = AppConfig::load(None).unwrap();
+            assert_eq!(config.rerank.mode, "on");
+            assert_eq!(config.rerank.model, "jina-reranker-v1-turbo-en");
+            assert_eq!(config.rerank.max_concurrency, 1);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn impossible_rerank_knobs_are_all_reported_together() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rerank]\nmode = \"yes\"\nstrategy = \"rrff\"\ndepth = 0\nweight = -1.0\ntimeout_ms = 0\nmax_concurrency = 0\nbatch_size = 0\n",
+            )?;
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            for expected in [
+                "[rerank].mode",
+                "[rerank].strategy",
+                "[rerank].depth is 0",
+                "[rerank].weight",
+                "[rerank].timeout_ms is 0",
+                "[rerank].max_concurrency is 0",
+                "[rerank].batch_size is 0",
+            ] {
+                assert!(
+                    err.0.iter().any(|m| m.contains(expected)),
+                    "missing {expected} in {:?}",
+                    err.0
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_unknown_rerank_model_is_only_fatal_when_the_stage_is_on() {
+        // mode = off: a name you will never load is inert, not an error.
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rerank]\nmodel = \"no-such-reranker\"\n",
+            )?;
+            AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                .expect("an unconfigured rerank model with mode=off should load");
+            Ok(())
+        });
+        // mode = shadow: the name is load-bearing now, so it is checked —
+        // "you asked for this model and we could not find it" must stop
+        // startup, like embeddings (reranking-plan.md Phase 5.3).
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rerank]\nmode = \"shadow\"\nmodel = \"no-such-reranker\"\n",
+            )?;
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0.iter().any(|m| m.contains("[rerank].model")),
+                "{:?}",
+                err.0
+            );
+            Ok(())
+        })
     }
 
     #[test]

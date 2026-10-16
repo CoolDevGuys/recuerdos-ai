@@ -141,9 +141,8 @@ pub enum RerankStrategy {
     /// The reranked head is ordered by raw score × the bounded
     /// recency/quality band; everything the reranker never saw follows
     /// in its fused order. Assumes non-negative, mutually comparable
-    /// raw scores.
-    // Selected only by `[rerank].strategy` (Phase 5); pinned by tests here.
-    #[allow(dead_code)]
+    /// raw scores — the Phase 5 adapter squashes every model's logits into
+    /// `(0, 1)` for exactly this contract, monotonically so no rank moves.
     Replace,
 }
 
@@ -305,9 +304,6 @@ impl RecallRanker {
     /// [`RerankStrategy::default()`] — a full-weight fourth RRF leg. The
     /// module docs carry the calibration argument for the weight range and
     /// for the band's interaction with `Replace`.
-    // Selected by Phase 5's `[rerank].strategy`; both strategies are
-    // tested here in Phase 4.
-    #[allow(dead_code)]
     pub fn with_rerank_strategy(mut self, strategy: RerankStrategy) -> Self {
         self.rerank_strategy = strategy;
         self
@@ -326,8 +322,10 @@ impl RecallRanker {
     /// candidates. Sorting it is the caller's job — it belongs to the
     /// model's scale, and the ranker's contract is to rank candidates,
     /// not to re-adjudicate the ranker's own ordering.
-    // Phase 5's wiring calls it with the reranker's scores; until then the
-    // ranker tests are its callers.
+    // *not* used by the recaller — it fuses and then applies the rerank
+    // leg in two steps (the floor runs between them), so this stays the
+    // one-call entry point pinned by the ranker tests rather than the
+    // production path.
     #[allow(dead_code)]
     pub fn rank_with_legs(
         &self,
