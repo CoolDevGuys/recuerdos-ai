@@ -2372,6 +2372,57 @@ for the full record; the Phase 7 status line and its sequencing table now reflec
    skipped when those shipped. Backfilling them is a separate, honest chore; this
    release's entry is accurate, which is the most that can be claimed here.
 
+#### Found in the field, after `v0.4.0` (fixed on `fix/config-ignored-keys`)
+
+Reviewing an operator's real `recuerdos-ai.toml` — a systemd deployment running
+`mode = "on"` against a local OpenAI-compatible `embeddinggemma-300M` — surfaced
+three things. Two were ours.
+
+1. **The example template orphaned two retrieval keys** (added in Phase 5, still
+   there after the Phase 8 docs review). `[retrieval]` closes the moment
+   `[rerank]` opens, and `min_relevance`/`similarity_baseline` sat *below* the
+   rerank block, so they defined unknown `[rerank]` keys and serde dropped them. `recuerdos-ai init`
+   writes this same file via `include_str!`, so every template handed out had an
+   inert relevance floor and an inert baseline. **`v0.4.0` (tag `eaa7417`) shipped
+   it** — the tag was cut before this surfaced, so the release's own example and
+   `init` output carry it until a patch; the operator hit it by copying the
+   example from main. Fixed by moving both keys into `[retrieval]`, above
+   `[rerank]`, with a comment on the section saying a TOML section cannot be
+   reopened, and the shipped file is now pinned by a test.
+2. **Nothing in the loader could have reported it.** No config struct uses
+   `deny_unknown_fields`, which is the right call — a stray line must not stop a
+   server that is otherwise working — but it made a key in the wrong table
+   unobservable, which is how the template shipped that way through four
+   self-reviews. `AppConfig::load` now warns per unrecognised key
+   (`unrecognised_keys`): the schema is read from the serialised defaults, so a
+   new field cannot leave it behind, with one documented list for `Option` fields
+   that vanish while unset. It suggests the section where the key name really
+   lives (`[rerank].min_relevance … did you mean [retrieval].min_relevance?`),
+   reports an unknown section once rather than key-by-key, runs *after* the
+   extract so a genuinely broken file reports its real error first, and is never
+   fatal. Seven tests, including `the_shipped_example_reports_no_unknown_keys` —
+   the one that would have caught (1).
+3. **A first enabled boot looked hung.** `build_reranker` logged only *after* the
+   model loaded, so a log that stops at `remote embeddings enabled` for the
+   length of a 1.1 GB pull is indistinguishable from a deadlock — which is the
+   diagnosis the operator was working from. `load_reranker` now names the model
+   and the cache directory before loading (`rerank audit` gets it too, since it
+   pays the same pull), and `docs/deployment.md` says a log pausing there is a
+   healthy download, plus the `DynamicUser=`/`ProtectHome=` trap that leaves the
+   cache unwritable on a systemd unit.
+
+Also from that review, operator-side and correct as documented rather than code
+defects: `[understanding].api_key_env` naming an unset variable is fatal, and it
+fires *after* the rerank load (wiring order is memories → understanding), so a
+keyless local endpoint should leave the key empty rather than name one; and an
+embedder outside `SIMILARITY_BASELINES` runs on the 0.5 fallback with the Phase 2
+warning, which is the case that warning exists for.
+
+**Release consequence, not yet taken:** `recuerdos-ai init` writes the broken
+template, so this is user-facing rather than cosmetic and warrants a `v0.4.1`
+patch. The CHANGELOG section is written; `Cargo.toml` and `Cargo.lock` still say
+`0.4.0` because cutting a release is the operator's call, not this branch's.
+
 
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
