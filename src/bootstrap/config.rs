@@ -574,6 +574,122 @@ impl Default for AuthConfig {
     }
 }
 
+/// Optional config keys that disappear from the default tree while unset,
+/// because serialising `None` writes nothing. They have to be listed by hand
+/// so a file that sets them is not accused of inventing a key. Adding another
+/// `Option` field to a config struct means adding its dotted path here — and
+/// forgetting is caught: `the_shipped_example_reports_no_unknown_keys` loads
+/// the example file, which sets `retrieval.similarity_baseline`.
+const OPTIONAL_UNSET_KEYS: &[&str] = &["retrieval.similarity_baseline"];
+
+/// Names every key in a config file that the schema does not know.
+///
+/// An unrecognised key is ignored rather than fatal — a stray or mistyped
+/// line must not stop a server that is otherwise fine — but ignoring it
+/// silently is how a shipped template cost people real settings: through
+/// v0.4.0 the example wrote `min_relevance` and `similarity_baseline` *after*
+/// the `[rerank]` header, where they defined rerank settings nobody has, so
+/// everyone who copied it tuned two knobs that did nothing and heard no
+/// complaint. This is that complaint.
+///
+/// Unparsable text yields no report: that is `load`'s job, and it reports it
+/// properly. Suggestions come from where the same key name does live, because
+/// the usual reason a key is unknown is that it is in the wrong section.
+pub(crate) fn unrecognised_keys(text: &str) -> Vec<String> {
+    let Ok(parsed) = text.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    // The schema, read from what the defaults serialise *to* rather than from a
+    // hand-written list: a field that exists is a key that appears, so adding a
+    // setting cannot leave this validator behind. Rendered and re-parsed because
+    // that is the pair of conversions the `toml` crate actually offers, and the
+    // result is the same key tree a reader of the file would build.
+    let Ok(text_of_defaults) = toml::to_string(&AppConfig::default()) else {
+        return Vec::new();
+    };
+    let Ok(defaults) = text_of_defaults.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+
+    let mut known = std::collections::BTreeSet::new();
+    collect_paths(&defaults, "", &mut known);
+    known.extend(OPTIONAL_UNSET_KEYS.iter().map(|key| (*key).to_string()));
+
+    let mut owners: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+    for path in &known {
+        if let Some((section, key)) = path.rsplit_once('.') {
+            owners.entry(key).or_default().push(section);
+        }
+    }
+
+    let mut found = Vec::new();
+    report_unknown(&parsed, "", &known, &owners, &mut found);
+    found
+}
+
+fn collect_paths(value: &toml::Value, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+    let toml::Value::Table(table) = value else {
+        return;
+    };
+    for (key, child) in table {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        out.insert(path.clone());
+        collect_paths(child, &path, out);
+    }
+}
+
+fn report_unknown(
+    value: &toml::Value,
+    prefix: &str,
+    known: &std::collections::BTreeSet<String>,
+    owners: &std::collections::BTreeMap<&str, Vec<&str>>,
+    out: &mut Vec<String>,
+) {
+    if let toml::Value::Table(table) = value {
+        // A whole unknown section is one message, not one per key inside it:
+        // `[typo]` being wrong is the finding, and the keys are just evidence.
+        if !prefix.is_empty() && !known.contains(prefix) {
+            out.push(format!("[{prefix}] is not a known section and is ignored"));
+            return;
+        }
+        for (key, child) in table {
+            let path = if prefix.is_empty() {
+                key.to_string()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            report_unknown(child, &path, known, owners, out);
+        }
+        return;
+    }
+
+    if known.contains(prefix) {
+        return;
+    }
+    let Some((section, key)) = prefix.rsplit_once('.') else {
+        out.push(format!("`{prefix}` is not a known setting and is ignored"));
+        return;
+    };
+    let mut message = format!("[{section}].{key} is not a known setting and is ignored");
+    // The usual reason a key is unknown is that it belongs to another section,
+    // so name that section. Where a name exists in more than one, suggest the
+    // shallowest — `[retrieval]` before `[graph.backfill_budget]`.
+    if let Some(home) = owners.get(key).and_then(|sections| {
+        sections
+            .iter()
+            .filter(|&&other| other != section)
+            .min_by_key(|other| other.matches('.').count())
+            .copied()
+    }) {
+        message = format!("{message} — did you mean [{home}].{key}?");
+    }
+    out.push(message);
+}
+
 impl AppConfig {
     /// Load config from (in ascending precedence) built-in defaults, an
     /// optional TOML file, then `RECUERDOS_AI_*` env vars. Returns every
@@ -608,6 +724,21 @@ impl AppConfig {
         let issues = config.validate();
         if !issues.is_empty() {
             return Err(ConfigError(issues));
+        }
+
+        // Finally, the keys the file set that nothing reads. Checked after the
+        // extract so a genuinely broken file fails on its real problem first,
+        // and the file only: `RECUERDOS_AI_*` names are the operator's own
+        // business and figment ignores the ones that are not settings. Warn
+        // rather than error, because a stale line in a config a server is
+        // already running should never become downtime — it should become a
+        // log line the operator reads while it is still cheap to fix.
+        if let Some(path) = config_path.or(env_config.as_deref().map(Path::new)) {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                for warning in unrecognised_keys(&text) {
+                    tracing::warn!("recuerdos-ai.toml: {warning}");
+                }
+            }
         }
 
         Ok(config)
@@ -872,6 +1003,89 @@ mod tests {
             assert_eq!(config.server.ingest_timeout_secs, 180);
             assert_eq!(config.storage.backend, "embedded");
             assert_eq!(config.understanding.provider, "none");
+            Ok(())
+        });
+    }
+
+    /// The regression this whole check exists for: through v0.4.0 the shipped
+    /// example wrote two retrieval keys after `[rerank]` opened, so they set
+    /// nothing and said nothing. The example is what `init` writes, so the
+    /// test pins both halves — the file is right, and the check would have
+    /// caught it.
+    #[test]
+    fn the_shipped_example_reports_no_unknown_keys() {
+        let example = include_str!("../../recuerdos-ai.example.toml");
+        assert_eq!(unrecognised_keys(example), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_retrieval_key_left_after_the_rerank_header_is_named_and_placed() {
+        // The exact shape of the old example: `[rerank]` opens, and the
+        // retrieval keys trail after it.
+        let reports = unrecognised_keys(
+            "[retrieval]\nhybrid = true\n\n[rerank]\nmode = \"off\"\nmin_relevance = 0.25\n\
+             similarity_baseline = 0.5\n",
+        );
+        assert_eq!(
+            reports,
+            vec![
+                "[rerank].min_relevance is not a known setting and is ignored \
+                 — did you mean [retrieval].min_relevance?",
+                "[rerank].similarity_baseline is not a known setting and is ignored \
+                 — did you mean [retrieval].similarity_baseline?",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_optional_key_that_unsets_itself_is_still_known() {
+        // `similarity_baseline` is `None` by default, so it is absent from the
+        // default tree the schema is read from — setting it must not look like
+        // inventing a key.
+        assert!(unrecognised_keys("[retrieval]\nsimilarity_baseline = 0.46\n").is_empty());
+    }
+
+    #[test]
+    fn a_typo_or_a_forgotten_section_is_reported_once_not_key_by_key() {
+        let reports =
+            unrecognised_keys("[rerrank]\nmode = \"on\"\ndepth = 10\n\n[server]\nbogus = 1\n");
+        assert_eq!(
+            reports,
+            vec![
+                "[rerrank] is not a known section and is ignored",
+                "[server].bogus is not a known setting and is ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_nested_section_is_checked_against_its_own_keys() {
+        assert!(unrecognised_keys("[graph.backfill_budget]\nmax_llm_calls = 5\n").is_empty());
+        // Same key name, wrong budget: known to consolidation, not to the graph.
+        let reports = unrecognised_keys("[graph.backfill_budget]\nmax_merge_calls = 5\n");
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].starts_with("[graph.backfill_budget].max_merge_calls"));
+    }
+
+    #[test]
+    fn unparsable_toml_is_left_for_load_to_report() {
+        // Otherwise a syntax error would produce a list of bogus "unknown key"
+        // complaints on top of the real, precise one.
+        assert!(unrecognised_keys("[server\nport = ").is_empty());
+    }
+
+    #[test]
+    fn load_warns_without_rejecting_an_unknown_key() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[rerank]\nmode = \"on\"\nmin_relevance = 0.9\n",
+            )?;
+            // The server still starts, with the key having no effect: the
+            // finding is the warning, not a failed boot.
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
+            assert_eq!(config.rerank.mode, "on");
+            assert_eq!(config.retrieval.min_relevance, 0.25);
             Ok(())
         });
     }
