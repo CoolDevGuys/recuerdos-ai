@@ -1032,16 +1032,29 @@ mod tests {
     }
 
     fn replay_in(store: &Store, who: &UserContext, queries: &[AuditQuery]) -> AuditReport {
+        replay_at(store, who, Arc::new(FakeReranker::reversing()), 30, queries)
+    }
+
+    /// [`replay_in`] with the stage and the depth handed in, for the case the
+    /// contribution counters exist for: a report that reads as agreement
+    /// because the stage produced nothing.
+    fn replay_at(
+        store: &Store,
+        who: &UserContext,
+        reranker: Arc<dyn Reranker>,
+        depth: usize,
+        queries: &[AuditQuery],
+    ) -> AuditReport {
         replay_orderings(Replay {
             config: &store.config,
             database: &store.database,
             context: who,
             embedder: Arc::clone(&store.embedder),
-            reranker: Arc::new(FakeReranker::reversing()),
+            reranker,
             reranker_name: "fake-reranker".to_string(),
             queries,
             limit: 8,
-            depth: 30,
+            depth,
         })
         .expect("the audit should run over a seeded store")
     }
@@ -1175,6 +1188,51 @@ mod tests {
         assert_eq!(summary.expectations, 0);
         assert_eq!(summary.precision_at_1_before, None);
         assert_eq!(summary.mrr_after, None);
+    }
+
+    #[test]
+    fn a_stage_that_produced_nothing_is_counted_rather_than_read_as_agreement() {
+        // `before` and `after` are identical both when reranking agrees and
+        // when the stage delivered nothing, and the headline figure cannot
+        // tell them apart. A metered call cannot either: a call that failed
+        // really did happen. Only `contributed` separates them.
+        let store = three_memories();
+        let query = audit("which package manager", None);
+
+        let working = replay_in(&store, &store.alex, std::slice::from_ref(&query));
+        assert_eq!(
+            working.summary.contributed, 1,
+            "a working stage counted as idle"
+        );
+        assert_eq!(working.summary.top1_changed, 1);
+
+        let dead = replay_at(
+            &store,
+            &store.alex,
+            Arc::new(FakeReranker::failing()),
+            30,
+            std::slice::from_ref(&query),
+        );
+        // This is the shape of the lie: 0% disagreement, for a stage that
+        // never returned a score.
+        assert_eq!(dead.summary.top1_changed, 0);
+        assert_eq!(dead.summary.contributed, 0);
+        assert_eq!(dead.summary.skipped_model, 1);
+        assert_eq!(dead.queries[0].skip_reason.as_deref(), Some("model"));
+
+        // `--depth 1`: nothing is broken and nothing was measured. A fact
+        // about the run, which the report should not leave the reader to
+        // infer from an empty comparison.
+        let narrow = replay_at(
+            &store,
+            &store.alex,
+            Arc::new(FakeReranker::reversing()),
+            1,
+            std::slice::from_ref(&query),
+        );
+        assert_eq!(narrow.summary.contributed, 0);
+        assert_eq!(narrow.summary.not_needed, 1);
+        assert_eq!(narrow.queries[0].skip_reason.as_deref(), Some("not-needed"));
     }
 
     #[test]
