@@ -24,6 +24,7 @@ use crate::bootstrap::memories_wiring::Memories;
 use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::Relation;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
@@ -39,8 +40,28 @@ use std::sync::Arc;
 ///
 /// Five because that is roughly what fits in an agent's context budget
 /// alongside an actual conversation — a memory ranked eighth is not
-/// wrong, it is just never seen.
-const K: i64 = 5;
+/// wrong, it is just never seen. Also the `limit` the Phase 7 grid
+/// measures at, so grid rows stay comparable to the gated numbers.
+pub(crate) const K: i64 = 5;
+
+/// Reads and parses an eval set. Shared with `rerank audit`-style tools
+/// and the Phase 7 grid / distribution measurements, which all score the
+/// same text the quality gates score against.
+pub(crate) fn load_set(cases_path: &Path) -> Result<EvalSet> {
+    let raw = std::fs::read_to_string(cases_path).map_err(|e| {
+        RaError::Validation(format!("could not read {}: {e}", cases_path.display()))
+    })?;
+    let set: EvalSet = toml::from_str(&raw)
+        .map_err(|e| RaError::Validation(format!("{} is not valid: {e}", cases_path.display())))?;
+
+    if set.cases.is_empty() {
+        return Err(RaError::Validation(format!(
+            "{} contains no cases",
+            cases_path.display()
+        )));
+    }
+    Ok(set)
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct EvalSet {
@@ -120,9 +141,11 @@ pub(crate) struct Case {
     informational: bool,
 }
 
-/// What one case scored.
+/// What one case scored. Opaque outside `bootstrap::eval`: the grid and
+/// the distribution measurement collect these and hand them back to
+/// [`summarise`], the single definition of what a run's numbers mean.
 #[derive(Debug, Clone)]
-struct CaseResult {
+pub(crate) struct CaseResult {
     name: String,
     kind: String,
     /// Excluded from the gated summary a baseline is compared against;
@@ -232,18 +255,7 @@ pub struct Report {
 /// ranking against a different embedder than production does not
 /// transfer (reranking-plan.md Phase 0.1).
 pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
-    let raw = std::fs::read_to_string(cases_path).map_err(|e| {
-        RaError::Validation(format!("could not read {}: {e}", cases_path.display()))
-    })?;
-    let set: EvalSet = toml::from_str(&raw)
-        .map_err(|e| RaError::Validation(format!("{} is not valid: {e}", cases_path.display())))?;
-
-    if set.cases.is_empty() {
-        return Err(RaError::Validation(format!(
-            "{} contains no cases",
-            cases_path.display()
-        )));
-    }
+    let set = load_set(cases_path)?;
     validate(&set, cases_path)?;
 
     let (memories, context, _scratch) = seed(&set, config)?;
@@ -269,7 +281,12 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
 
     let mut results = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
-        results.push(score(&memories, &context, case)?);
+        results.push(score(
+            &memories.recaller,
+            memories.min_relevance,
+            &context,
+            case,
+        )?);
     }
 
     print_report(&results);
@@ -283,7 +300,7 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
 /// than only in the committed-file parse test: an `expect`-less
 /// non-negative case divides by zero and poisons every mean as NaN, and
 /// an `expect_empty` case with expectations has contradicted itself.
-fn validate(set: &EvalSet, path: &Path) -> Result<()> {
+pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     for case in &set.cases {
         match (case.expect_empty, case.expect.is_empty()) {
@@ -327,8 +344,12 @@ fn gate(results: &[CaseResult]) -> Vec<CaseResult> {
 /// The instance is assembled from the caller's `config` — embedder,
 /// relevance floor, ranker tuning and all — with exactly two overrides:
 /// the storage path, so the run can never touch a real store, and the
-/// graph (see below).
-fn seed(set: &EvalSet, config: &AppConfig) -> Result<(Memories, UserContext, tempfile::TempDir)> {
+/// graph (see below). Shared with the Phase 7 grid, which measures every
+/// cell against one seeded corpus rather than reseeding per cell.
+pub(crate) fn seed(
+    set: &EvalSet,
+    config: &AppConfig,
+) -> Result<(Memories, UserContext, tempfile::TempDir)> {
     let scratch = tempfile::tempdir()
         .map_err(|e| RaError::Internal(format!("could not create a scratch directory: {e}")))?;
 
@@ -419,7 +440,19 @@ fn seed(set: &EvalSet, config: &AppConfig) -> Result<(Memories, UserContext, tem
     Ok((memories, context, scratch))
 }
 
-fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<CaseResult> {
+/// Scores one case against one already-seeded pipeline.
+///
+/// The recaller is a parameter (not read off [`Memories`]) because the
+/// Phase 7 grid clones the seeded pipeline per cell — every cell differs
+/// from the reference only in its second stage, which is the property a
+/// paired measurement exists to isolate. `min_relevance` is the instance
+/// floor, applied to negative cases only (see below).
+pub(crate) fn score(
+    recaller: &MemoryRecaller,
+    min_relevance: f32,
+    context: &UserContext,
+    case: &Case,
+) -> Result<CaseResult> {
     let categories = case
         .categories
         .iter()
@@ -436,7 +469,7 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
     // indexes ranked, and dropping weak results would hide near-misses the
     // report exists to show.
     if case.expect_empty {
-        query = query.with_min_relevance(memories.min_relevance);
+        query = query.with_min_relevance(min_relevance);
     }
 
     let started = std::time::Instant::now();
@@ -444,7 +477,7 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
     // memories it seeded, and a replay that recorded each hit as an access
     // would move the counters importance decay reads — so scoring the same
     // corpus twice would not measure the same thing twice.
-    let hits = memories.recaller.execute_untracked(context, &query)?;
+    let hits = recaller.execute_untracked(context, &query)?;
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     let returned: Vec<&str> = hits.iter().map(|hit| hit.memory.content()).collect();
 
@@ -488,8 +521,7 @@ fn score(memories: &Memories, context: &UserContext, case: &Case) -> Result<Case
                 Vec::new()
             } else {
                 vec![format!(
-                    "(expected no results at the {:?} floor; got {})",
-                    memories.min_relevance,
+                    "(expected no results at the {min_relevance:?} floor; got {})",
                     returned.len()
                 )]
             },
@@ -535,7 +567,10 @@ fn nothing_returned_passes(returned: usize) -> bool {
     returned == 0
 }
 
-fn summarise(results: &[CaseResult]) -> Report {
+/// The report one set of case results produces — the single definition
+/// of recall/precision/MRR/latency means, shared by the bare `eval` run
+/// and every Phase 7 grid cell.
+pub(crate) fn summarise(results: &[CaseResult]) -> Report {
     let mean = |values: &[f64]| -> f64 {
         if values.is_empty() {
             return 0.0;
@@ -680,6 +715,46 @@ pub(crate) fn truncate(text: &str, limit: usize) -> String {
         .take(limit.saturating_sub(1))
         .collect::<String>()
         + "…"
+}
+
+/// A filter-less [`Case`] for sibling-module tests (`rerank_grid`,
+/// `rerank_distribution`) that build a small eval set in code instead of
+/// reading the committed file. Lives here so those modules never need
+/// `Case`'s private filter fields, and disappears from the binary with
+/// the test cfg.
+#[cfg(test)]
+pub(crate) fn test_case(
+    name: &str,
+    kind: &str,
+    query: &str,
+    expect: &[&str],
+    expect_empty: bool,
+) -> Case {
+    Case {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        query: query.to_string(),
+        expect: expect.iter().map(|content| content.to_string()).collect(),
+        categories: Vec::new(),
+        tags: Vec::new(),
+        subcategories: Vec::new(),
+        expect_empty,
+        informational: false,
+    }
+}
+
+/// A plain [`SeedMemory`] (no entities, tags or subcategory) — see
+/// [`test_case`] for why these builders live in this module.
+#[cfg(test)]
+pub(crate) fn test_memory(content: &str, category: &str) -> SeedMemory {
+    SeedMemory {
+        content: content.to_string(),
+        category: category.to_string(),
+        subcategory: None,
+        tags: Vec::new(),
+        entities: Vec::new(),
+        relations: Vec::new(),
+    }
 }
 
 /// Compares against a committed baseline and fails on a regression.

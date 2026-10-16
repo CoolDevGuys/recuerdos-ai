@@ -43,7 +43,7 @@
 //!   trying to judge, and dropping results before the rerank leg would
 //!   change which candidates the reranker ever sees.
 //! * **No rerank deadline.** The command exists partly to measure what the
-//!   model costs; a 400 ms timeout would report "400 ms and a fallback"
+//!   model costs; a tight timeout would report "deadline and a fallback"
 //!   instead. The configured `timeout_ms` is what a live request would
 //!   enforce, so it is reported beside the percentiles it has to contain.
 //!
@@ -517,8 +517,9 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
 /// the wall clock. Reporting that as "rerank latency" would blame the second
 /// stage for the first. On this boundary a sample is exactly the inference
 /// over `min(depth, candidates)` pairs — which is the number `timeout_ms` has
-/// to contain.
-struct MeteredReranker {
+/// to contain. Also used by `eval --grid` (reranking-plan.md Phase 7.2),
+/// which needs the same stage-only percentiles per cell.
+pub(crate) struct MeteredReranker {
     inner: Arc<dyn Reranker>,
     /// One entry per call: how long it took and how many pairs it judged.
     /// Latency without the second number is not comparable between stores —
@@ -530,20 +531,20 @@ struct MeteredReranker {
 
 /// One timed reranker call.
 #[derive(Debug, Clone, Copy)]
-struct Call {
-    millis: f64,
-    candidates: usize,
+pub(crate) struct Call {
+    pub(crate) millis: f64,
+    pub(crate) candidates: usize,
 }
 
 impl MeteredReranker {
-    fn new(inner: Arc<dyn Reranker>) -> Self {
+    pub(crate) fn new(inner: Arc<dyn Reranker>) -> Self {
         Self {
             inner,
             calls: Mutex::new(Vec::new()),
         }
     }
 
-    fn timings(&self) -> Vec<Call> {
+    pub(crate) fn timings(&self) -> Vec<Call> {
         // A panic in the model while scoring unwinds through this lock, and
         // the samples taken before it are still valid and still wanted: the
         // audit's own report matters more than the lock's bookkeeping.

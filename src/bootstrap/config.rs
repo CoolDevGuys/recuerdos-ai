@@ -449,74 +449,110 @@ pub struct RerankConfig {
     /// `jina-reranker-v1-turbo-en`, `jina-reranker-v2-base-multilingual`,
     /// or their HuggingFace repo ids), or a path to an ONNX file ending
     /// in `.onnx` for a bring-your-own model (its tokenizer files must
-    /// sit beside it). Which one *should* win is a Phase 7 grid question
-    /// (size vs latency vs quality, and the English-only vs multilingual
-    /// trade-off); `jina-reranker-v1-turbo-en` is the plan's placeholder
-    /// because it is the smallest, and the smallest is the right default
-    /// for a model nobody has measured yet on this corpus. An unknown
-    /// name with `mode != off` is a startup error.
+    /// sit beside it). An unknown name with `mode != off` is a startup
+    /// error.
+    ///
+    /// The Phase 7 grid picked the default (reranking-plan.md §12):
+    /// `bge-reranker-base` is the only candidate that clears the ship
+    /// gate's +5 precision@1 on the expanded 108-memory eval set
+    /// (+5.8, MRR +2.7, no `by_kind` regression) while leaving the
+    /// latency budget room (rerank p95 71 ms against 150). It pays for
+    /// that — 1.1 GB of weights, ~1.5 GiB RAM per session, where the
+    /// old placeholder needed 147 MB and 180 MiB — and a box that
+    /// cannot pay it should stay at `mode = "off"` rather than drop to
+    /// the smaller model: the placeholder's plateau tops out at +1.9,
+    /// which is a coin flip you pay 22 ms to make.
     pub model: String,
     /// How many fused candidates the reranker judges per recall. It is a
     /// cost dial with a quality cliff: candidates below it never get a
     /// second look, so the reranker cannot promote the right memory from
-    /// rank 31. 30 covers every head the eval's `candidate_depth`
-    /// produces at its configured limits while bounding the batch a
-    /// personal CPU scores inside the timeout; the Phase 7 grid moves it
-    /// (10–50), not this comment.
+    /// rank 31.
+    ///
+    /// The Phase 7 grid measured the other edge (§12): with the chosen
+    /// model the entire quality gain lands by depth 10 — deeper heads
+    /// cost linearly (added p95 +71 ms at 10 rising to +270 ms at 50)
+    /// and buy nothing, because fusion already places every recoverable
+    /// memory inside the head's first ten. 10 is therefore the default.
+    /// An operator whose own shadow data shows wins arriving from
+    /// deeper — a store much larger than the eval's 108 may — spends
+    /// latency for reach with the grid's numbers in hand, not guessing.
     pub depth: usize,
     /// How the rerank scores reorder the head: `rrf` (a fourth fusion leg,
     /// damped by `weight`) or `replace` (the rerank score, banded by the
     /// recency/quality multiplier, orders the head outright). Both are
-    /// implemented and calibrated in `memories::domain::recall_ranker`;
-    /// `rrf` starts as the default because it degrades gently — the plan's
-    /// §2-row-4 lesson is that *which* strategy wins is measurable, and
-    /// Phase 7 measures it.
+    /// implemented and calibrated in `memories::domain::recall_ranker`.
+    ///
+    /// Phase 7 measured the choice (§12) and `rrf` won it outright:
+    /// `replace` lost precision on three of the four grid models (worst
+    /// −9.6) because a cross-encoder's raw-score *gaps* mean nothing on
+    /// this corpus — the task-7.4 distribution shows expected pairs
+    /// scoring 0.006 as often as 0.99, so banded raw scores reorder a
+    /// near-zero head into noise. The one model that gained from
+    /// `replace` needed a depth whose latency spent the whole budget.
+    /// `rrf`, reading only the *order* the scores imply, is the default.
     pub strategy: String,
     /// Weight on the rerank leg when `strategy = "rrf"`. `0` is off; `1`
     /// lets the reranker break ties against a single retrieval leg but
-    /// never overrule vector+BM25 agreement; only `>= 2` can do that,
-    /// which is exactly the "right memory in the top 5 but not first"
-    /// failure this feature exists to fix — so the tuned range spans
-    /// 0.5–4 (see the `recall_ranker` module docs; Phase 7 picks).
+    /// never overrule vector+BM25 agreement; only `>= 2` can do that.
     /// Must be `>= 0`. Ignored by `replace`.
+    ///
+    /// Phase 7 measured this range (§12), and the plan's expectation —
+    /// that overruling agreement is where the wins live — inverted. The
+    /// quality plateau is 0.5–1.0 (identical p@1 and MRR across it);
+    /// past its edge precision *falls*: `2` gives back 2 points and a
+    /// third of the `needle` kind's, `4` drags the category filter down
+    /// too. On this data the index signals' agreement is nearly always
+    /// right, and a leg strong enough to let a 0.006-confident dissent
+    /// win is strong enough to bury the memory both lexical legs found.
+    /// 1.0 is the default: the top of the plateau, and the semantics
+    /// that keeps agreement supreme.
     pub weight: f32,
     /// Beyond this, the rerank leg is abandoned and the pre-rerank order
-    /// served — with a warning, not an error (invariant I-2). 400 ms is
-    /// deliberately generous while unmeasured (it sits below the 30 s
-    /// read timeout with room for the remote embedder call that precedes
-    /// it); once Phase 5's own measurements land it should move above the
-    /// measured p95 and below the client-visible limit, and that value
-    /// belongs in §12 of the plan, not here.
+    /// served — with a warning, not an error (invariant I-2). It must
+    /// sit above the measured rerank p95 and below the client-visible
+    /// ceiling; Phase 7 fixed both ends (§12): the chosen model at the
+    /// chosen depth measures p95 71 ms, p50 59 ms, so 250 ms is ~3.5×
+    /// the tail — room for real memories longer than the eval's and a
+    /// busy CPU, while an overrun still leaves the recall comfortably
+    /// inside a local request's budget. It is a tail bound, not a cost.
     pub timeout_ms: u64,
     /// How many rerank inferences may run at once. Each permit is a
-    /// second copy of the model in RAM (one ONNX session cannot score two
-    /// batches at once), so this is the concurrency bound *and* the memory
-    /// knob: `1` for a small box, higher only if the box and the recall
-    /// rate justify the resident cost. `0` would mean "rerank but never
-    /// run", hence the validation.
+    /// second copy of the model in RAM (one ONNX session cannot score
+    /// two batches at once), so this is the concurrency bound *and* the
+    /// memory knob. `0` would mean "rerank but never run", hence the
+    /// validation.
+    ///
+    /// The default is 1 because the chosen model is not small: the grid
+    /// measures ~1.5 GiB resident per session for `bge-reranker-base`,
+    /// so 2 would reserve 3 GiB for a second stage on a personal box.
+    /// Raise it only against a recall rate that queues on the semaphore
+    /// and a box that can hold it — the smaller placeholder this default
+    /// once served cost a tenth of that, which is why it used to be 2.
     pub max_concurrency: usize,
     /// Candidates per model forward pass. Smaller than `depth` on
     /// purpose: the forward pass pads to the longest pair in the batch,
     /// so many small batches keep the padding short while a few large
-    /// ones waste compute — this trades between the two. Not sensitive
-    /// (the Phase 7 grid sweeps it only if the latency budget demands).
+    /// ones waste compute — this trades between the two. Not sensitive;
+    /// the Phase 7 grid met its latency budget without sweeping it.
     pub batch_size: usize,
 }
 
 impl Default for RerankConfig {
-    /// Every default is the *inert* choice: the feature ships compiled in
-    /// but switched off, and none of these numbers has behavioural effect
-    /// until `mode` says otherwise. See the field docs for what each
-    /// would do and where its tuned value comes from.
+    /// `mode` is the *inert* choice — the feature ships compiled in but
+    /// switched off. The other values are the Phase 7 grid's tuned
+    /// winners (reranking-plan.md §12): picked on the expanded eval set,
+    /// they have behavioural effect the moment an operator flips `mode`.
+    /// See the field docs for what each does and where its number comes
+    /// from.
     fn default() -> Self {
         Self {
             mode: "off".to_string(),
-            model: "jina-reranker-v1-turbo-en".to_string(),
-            depth: 30,
+            model: "bge-reranker-base".to_string(),
+            depth: 10,
             strategy: "rrf".to_string(),
             weight: 1.0,
-            timeout_ms: 400,
-            max_concurrency: 2,
+            timeout_ms: 250,
+            max_concurrency: 1,
             batch_size: 16,
         }
     }
@@ -1084,19 +1120,20 @@ mod tests {
     }
 
     #[test]
-    fn rerank_is_off_by_default_with_the_planned_inert_defaults() {
-        // The Phase 5 shape: the section exists, ships switched off, and
-        // its defaults are the plan's placeholder block (the numbers
-        // themselves carry behaviour only once `mode` is not "off").
+    fn rerank_is_off_by_default_with_the_phase_7_tuned_defaults() {
+        // mode is still the Phase 5 inert switch; the other values are
+        // the Phase 7 grid's winners (reranking-plan.md §12). They carry
+        // behaviour only once `mode` is not "off" — flipping it is the
+        // Phase 8 decision, on shadow data.
         Jail::expect_with(|_jail| {
             let config = AppConfig::load(None).expect("defaults must be valid");
             assert_eq!(config.rerank.mode, "off");
-            assert_eq!(config.rerank.model, "jina-reranker-v1-turbo-en");
-            assert_eq!(config.rerank.depth, 30);
+            assert_eq!(config.rerank.model, "bge-reranker-base");
+            assert_eq!(config.rerank.depth, 10);
             assert_eq!(config.rerank.strategy, "rrf");
             assert_eq!(config.rerank.weight, 1.0);
-            assert_eq!(config.rerank.timeout_ms, 400);
-            assert_eq!(config.rerank.max_concurrency, 2);
+            assert_eq!(config.rerank.timeout_ms, 250);
+            assert_eq!(config.rerank.max_concurrency, 1);
             assert_eq!(config.rerank.batch_size, 16);
             Ok(())
         });
@@ -1117,7 +1154,7 @@ mod tests {
             assert_eq!(config.rerank.weight, 2.5);
             assert_eq!(config.rerank.timeout_ms, 200);
             // Untouched fields keep their defaults.
-            assert_eq!(config.rerank.max_concurrency, 2);
+            assert_eq!(config.rerank.max_concurrency, 1);
             Ok(())
         });
     }

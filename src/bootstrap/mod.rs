@@ -8,6 +8,8 @@ pub mod consolidation_wiring;
 pub mod eval;
 pub mod memories_wiring;
 pub mod rerank_audit;
+pub mod rerank_distribution;
+pub mod rerank_grid;
 pub mod server;
 pub mod state;
 pub mod understanding_wiring;

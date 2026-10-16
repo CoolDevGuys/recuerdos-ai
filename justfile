@@ -51,6 +51,12 @@ eval-record-native:
     cargo run -q --bin recuerdos-ai -- \
         eval --write-baseline eval/baseline.json
 
+# Phase 7.2 rerank tuning grid: model × strategy × depth × weight against
+# the eval corpus, with the off reference and Δ columns. See
+# scripts/rerank-grid.sh for the axes and the paired-latency reading.
+rerank-grid *args:
+    docker compose run --rm -T dev cargo run -q --bin recuerdos-ai -- eval --grid {{args}}
+
 check-native:
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings

@@ -73,6 +73,36 @@ enum Command {
         write_baseline: Option<PathBuf>,
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Run the Phase 7 tuning grid instead of one scored pass
+        /// (reranking-plan.md task 7.2): one seeded corpus, every
+        /// model × strategy × depth × weight row, the table printed as
+        /// cells finish with Δs against the `off` reference. Incompatible
+        /// with the baseline flags — a grid is a measurement, not a gate.
+        #[arg(long)]
+        grid: bool,
+        /// Comma list of rerank models for the grid. Defaults to
+        /// `[rerank].model` — the grid's tuned winner — because a bare
+        /// `eval --grid` should measure what ships. The large multilingual
+        /// models need gigabytes of weights and RAM, so the operator names
+        /// the set they can afford. Every name `[rerank].model` accepts
+        /// works.
+        #[arg(long, default_value = "bge-reranker-base")]
+        grid_models: String,
+        /// Comma list of head depths for the grid (the plan's table).
+        #[arg(long, default_value = "10,20,30,50")]
+        grid_depths: String,
+        /// Comma list of RRF weights for the grid; `replace` rows have no
+        /// weight and are measured once per depth.
+        #[arg(long, default_value = "0.5,1,2,4")]
+        grid_weights: String,
+        /// Comma list of fusion strategies for the grid: `rrf`, `replace`.
+        #[arg(long, default_value = "rrf,replace")]
+        grid_strategies: String,
+        /// The machine-readable grid artifact instead of the table: every
+        /// cell with its per-kind p@1 and both latency pairs, safe to
+        /// commit or re-gate offline. Grid mode only.
+        #[arg(long)]
+        json: bool,
     },
     /// Download the local embedding model (and the rerank model, when
     /// `[rerank].mode` is not `off`) into the cache directory.
@@ -215,6 +245,22 @@ enum RerankCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Report the cross-encoder's score distribution over the eval corpus:
+    /// expected pairs versus noise (reranking-plan.md task 7.4).
+    ///
+    /// Scores every case query against every corpus memory directly — no
+    /// indexes, no fusion, no floor — so the separability verdict the
+    /// relevance decision reads is measured against the worst the corpus
+    /// can do, not the head fusion happened to offer. Loads
+    /// `[rerank].model` whatever `[rerank].mode` says, like the audit.
+    Distribution {
+        #[arg(long, default_value = "eval/cases.toml")]
+        cases: PathBuf,
+        /// The machine-readable report instead of the table. Carries scores
+        /// only — no memory content.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -252,12 +298,26 @@ async fn main() {
             max_drop,
             write_baseline,
             config,
+            grid,
+            grid_models,
+            grid_depths,
+            grid_weights,
+            grid_strategies,
+            json,
         } => run_eval(
             &cases,
             baseline.as_deref(),
             max_drop,
             write_baseline.as_deref(),
             config.as_deref(),
+            GridInvocation {
+                grid,
+                models: &grid_models,
+                depths: &grid_depths,
+                weights: &grid_weights,
+                strategies: &grid_strategies,
+                json,
+            },
         ),
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::Calibrate { cases, config } => run_calibrate(&cases, config.as_deref()),
@@ -585,12 +645,24 @@ async fn run_mcp(client_name: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// The grid half of the `eval` flags, bundled so the scored path never has
+/// to look at them: `grid == false` means they do not exist.
+struct GridInvocation<'a> {
+    grid: bool,
+    models: &'a str,
+    depths: &'a str,
+    weights: &'a str,
+    strategies: &'a str,
+    json: bool,
+}
+
 fn run_eval(
     cases: &Path,
     baseline: Option<&Path>,
     max_drop: f64,
     write_baseline: Option<&Path>,
     config_path: Option<&Path>,
+    grid: GridInvocation<'_>,
 ) -> Result<(), String> {
     // The eval runs against the config's embedder, floor and ranker
     // tuning (reranking-plan.md Phase 0.1): production runs
@@ -598,6 +670,39 @@ fn run_eval(
     // do not transfer. The store itself stays a throwaway the eval seeds
     // and discards, so the config's `[storage].path` is never touched.
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+
+    if grid.grid {
+        // A grid is a measurement, not a gate: its reference is the `off`
+        // row inside it, so there is no baseline to compare against and no
+        // single run to record.
+        if baseline.is_some() || write_baseline.is_some() {
+            return Err(
+                "--grid cannot be combined with --baseline/--write-baseline — gate the scored \
+                 path with those; the grid carries its own off reference"
+                    .to_string(),
+            );
+        }
+        let options = bootstrap::rerank_grid::GridOptions::parse(
+            grid.models,
+            grid.strategies,
+            grid.depths,
+            grid.weights,
+        )
+        .map_err(|e| e.to_string())?;
+        let report = bootstrap::rerank_grid::run(cases, &config, &options, grid.json)
+            .map_err(|e| e.to_string())?;
+        if grid.json {
+            let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+            println!("{encoded}");
+        }
+        return Ok(());
+    }
+    if grid.json {
+        return Err(
+            "--json reports the grid; a scored eval prints its report and gates on --baseline"
+                .to_string(),
+        );
+    }
 
     // `run` yields the gated report — informational cases, which document
     // known defects and fail on purpose, are excluded from both writing
@@ -614,39 +719,53 @@ fn run_eval(
     Ok(())
 }
 
-/// `rerank audit`: the report, on stdout, and nothing else on stdout.
+/// `rerank` subcommands: the report, on stdout, and nothing else on stdout.
 ///
-/// No tracing initialisation, unlike `consolidate` or `reindex` — the audit's
-/// progress line goes to stderr precisely so `--json > run.json` stays
-/// parseable, and a logging layer would put it back on the wrong stream.
+/// No tracing initialisation, unlike `consolidate` or `reindex` — the
+/// audit's progress line goes to stderr precisely so `--json > run.json`
+/// stays parseable, and a logging layer would put it back on the wrong
+/// stream. The distribution subcommand keeps the same discipline.
 fn run_rerank(command: RerankCommand, config_path: Option<&Path>) -> Result<(), String> {
-    let RerankCommand::Audit {
-        queries,
-        user,
-        limit,
-        depth,
-        json,
-    } = command;
     // Same config semantics as `eval` and `calibrate`: `--config` decides
     // which embedder, which rerank model and which tuning is being measured,
     // so judging production means passing production's config.
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
-    let report = bootstrap::rerank_audit::run(
-        &config,
-        &bootstrap::rerank_audit::AuditOptions {
-            queries: &queries,
-            user: user.as_deref(),
+    match command {
+        RerankCommand::Audit {
+            queries,
+            user,
             limit,
             depth,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+            json,
+        } => {
+            let report = bootstrap::rerank_audit::run(
+                &config,
+                &bootstrap::rerank_audit::AuditOptions {
+                    queries: &queries,
+                    user: user.as_deref(),
+                    limit,
+                    depth,
+                },
+            )
+            .map_err(|e| e.to_string())?;
 
-    if json {
-        let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-        println!("{encoded}");
-    } else {
-        bootstrap::rerank_audit::print_human(&report);
+            if json {
+                let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+                println!("{encoded}");
+            } else {
+                bootstrap::rerank_audit::print_human(&report);
+            }
+        }
+        RerankCommand::Distribution { cases, json } => {
+            // The human table is printed by the module; `--json` prints
+            // only the artifact, like the audit.
+            let report = bootstrap::rerank_distribution::run(&cases, &config, json)
+                .map_err(|e| e.to_string())?;
+            if json {
+                let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+                println!("{encoded}");
+            }
+        }
     }
     Ok(())
 }

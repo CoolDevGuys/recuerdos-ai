@@ -1826,8 +1826,333 @@ recall@5 86.5%, precision@1 64.9%, MRR 74.1%, abstention 100% — which is the
 point of switching the eval to `execute_untracked`: it must score exactly what
 it scored before.
 
-### Phase 7 — tuning
-- Grid table: _TBD_ · winner + rationale: _TBD_ · relevance decision: _TBD_ · ship-gate checklist: _TBD_
+### Phase 7 — tuning (`feat/rerank-tuning`)
+
+#### The grown corpus comes first (7.1)
+
+Phase 6's rehearsal showed why 35 memories decide nothing: at that size
+fusion returns the whole store for every query, so a second stage has
+nowhere to win and nowhere to lose. The eval set grows to **108
+memories and 59 cases** (52 scored, 7 negative) carrying the pressures
+reranking is proposed against: 7 `near-miss` pairs whose distractor
+shares an answer's shape but not its content, 4 `statement` cases that
+query in the declarative voice cross-encoders were never trained for,
+4 `nl-category` clusters that share a theme and little vocabulary, 3
+more `negative` queries, and realistic filler so the numbers are not
+trivially perfect. Every pre-existing case and memory keeps its text;
+four expansion corrections are made *in the set*, not quietly in a
+baseline:
+
+* `tag filter: typescript` — a bare "conventions" no longer reaches any
+  typescript memory from 108, so recall measured the corpus, not the
+  filter. The query becomes "typescript conventions"; the case still
+  tests exactly what its kind means.
+* `subcategory filter: testing only` — the new testing-naming memory is
+  as legitimate an answer to the filtered query as the three in the
+  gold; the gold completes to include it rather than score the
+  expansion as a miss.
+* Two filler memories shed vocabulary that leaked into other cases: one
+  matched BM25 as "rest" ("…cost more than REST") and leaked
+  `negative: succulents` over the floor; one read as a database
+  decision ("offset scans … a million rows") and took the
+  decisions-only filter's top-1 as near-DB noise. The corpus moved, not
+  the gate.
+* The two new cases that were recall-bound as first phrased
+  (stale-logo → "stale assets", raw-SQL) got queries that share
+  vocabulary with the expected memory: near-miss measures
+  discrimination *among retrieved candidates*, not whether a lexical
+  path exists to a memory no leg can reach.
+
+Crossing 100 memories also caught a real production bug: Gemini's
+`batchEmbedContents` accepts at most 100 requests per call and the
+embedder client never chunked — any store over 100 memories would die
+with HTTP 400 on its next consolidation. Chunked client-side, in order,
+with a test (`fix(providers): chunk Gemini batchEmbedContents…`).
+
+Reference numbers on the grown corpus, default path (bge-small, rerank
+off — the grid's `off` row): **recall@5 83.0, precision@1 65.4,
+MRR 74.6, abstention 100.0** across all seven negatives. The
+standalone eval process a moment later recorded MRR 74.3 —
+cross-process recency drift, below the gate's granularity, and exactly
+the Phase 6 lesson: nothing below gate granularity is compared across
+processes; the grid's cells are paired inside one run for that reason.
+
+#### The grid (7.2)
+
+`eval --grid` (with `scripts/rerank-grid.sh` as the operator entry
+point): one seeded store, one embedder session, one open keyword index;
+every cell clones the pipeline and differs from the reference row only
+in the second stage under measurement — so no seed variance, no
+warm-up variance, no cross-process clock drift, and forty cells cost
+one seed instead of forty. Cells run **deadlineless**, the audit's
+reason: measuring what the model costs is half the job. Depth-50 rows
+clamped to 40 candidates — the `candidate_depth` pool for limit 5,
+exactly like production. Latency prints twice on purpose: whole-recall
+p50/p95 (the Δ against `off` is the ship gate's added latency) and
+Reranker-boundary percentiles (`≤Nc` = candidates judged) — the number
+`[rerank].timeout_ms` must contain and the one that scales with depth.
+
+```
+grid: embedder bge-small-en-v1.5 · corpus 108 memories · 52 scored + 7 negative cases
+no rerank deadline in force (a live request would enforce 400 ms — read the rerank p95 against it)
+
+off                                       off    —     0 │  65.4  74.6  83.0 100.0 │    7.9    9.1 │                — │   reference
+loading jina-reranker-v1-turbo-en …
+jina-v1-turbo-en                          rrf  0.5    10 │  67.3  74.7  83.3 100.0 │   23.0   29.1 │    16/20 ms ≤10c │   +1.9   +0.2     +20
+jina-v1-turbo-en                          rrf    1    10 │  65.4  73.7  83.3 100.0 │   23.2   30.7 │    16/21 ms ≤10c │   +0.0   -0.9     +22
+jina-v1-turbo-en                          rrf    2    10 │  63.5  72.6  82.7 100.0 │   23.8   29.8 │    16/21 ms ≤10c │   -1.9   -2.0     +21
+jina-v1-turbo-en                          rrf    4    10 │  61.5  71.5  83.3 100.0 │   23.8   32.3 │    16/21 ms ≤10c │   -3.8   -3.0     +23
+jina-v1-turbo-en                          rrf  0.5    20 │  67.3  74.8  83.3 100.0 │   40.9   51.9 │    34/42 ms ≤20c │   +1.9   +0.3     +43
+jina-v1-turbo-en                          rrf    1    20 │  63.5  72.8  83.3 100.0 │   42.5   50.9 │    35/41 ms ≤20c │   -1.9   -1.8     +42
+jina-v1-turbo-en                          rrf    2    20 │  61.5  71.7  83.3 100.0 │   42.6   54.9 │    36/45 ms ≤20c │   -3.8   -2.9     +46
+jina-v1-turbo-en                          rrf    4    20 │  61.5  71.4  83.3 100.0 │   42.5   52.8 │    35/43 ms ≤20c │   -3.8   -3.2     +44
+jina-v1-turbo-en                          rrf  0.5    30 │  67.3  75.0  83.3 100.0 │   55.8   70.6 │    48/61 ms ≤30c │   +1.9   +0.4     +62
+jina-v1-turbo-en                          rrf    1    30 │  63.5  72.8  82.7 100.0 │   54.8   68.1 │    49/59 ms ≤30c │   -1.9   -1.8     +59
+jina-v1-turbo-en                          rrf    2    30 │  61.5  71.7  83.3 100.0 │   54.8   69.5 │    48/60 ms ≤30c │   -3.8   -2.9     +60
+jina-v1-turbo-en                          rrf    4    30 │  61.5  71.4  83.3 100.0 │   55.6   69.0 │    49/60 ms ≤30c │   -3.8   -3.2     +60
+jina-v1-turbo-en                          rrf  0.5    50 │  67.3  75.0  83.3 100.0 │   72.3   90.7 │    66/82 ms ≤40c │   +1.9   +0.4     +82
+jina-v1-turbo-en                          rrf    1    50 │  63.5  72.8  82.7 100.0 │   71.9   90.4 │    66/81 ms ≤40c │   -1.9   -1.8     +81
+jina-v1-turbo-en                          rrf    2    50 │  61.5  71.7  83.3 100.0 │   71.8   88.9 │    66/80 ms ≤40c │   -3.8   -2.9     +80
+jina-v1-turbo-en                          rrf    4    50 │  59.6  69.8  83.3 100.0 │   71.4   89.2 │    66/81 ms ≤40c │   -5.8   -4.7     +80
+jina-v1-turbo-en                      replace    —    10 │  55.8  65.4  75.3 100.0 │   24.7   31.5 │    17/22 ms ≤10c │   -9.6   -9.2     +22
+jina-v1-turbo-en                      replace    —    20 │  55.8  64.4  73.4 100.0 │   41.9   52.1 │    35/42 ms ≤20c │   -9.6  -10.2     +43
+jina-v1-turbo-en                      replace    —    30 │  55.8  64.4  73.4 100.0 │   55.4   70.7 │    49/61 ms ≤30c │   -9.6  -10.2     +62
+jina-v1-turbo-en                      replace    —    50 │  55.8  64.4  73.4 100.0 │   73.1   91.2 │    67/82 ms ≤40c │   -9.6  -10.2     +82
+loading bge-reranker-base …
+bge-base                                  rrf  0.5    10 │  71.2  77.1  83.3 100.0 │   64.2   83.2 │    58/74 ms ≤10c │   +5.8   +2.5     +74
+bge-base                                  rrf    1    10 │  71.2  77.2  83.3 100.0 │   65.4   79.7 │    59/71 ms ≤10c │   +5.8   +2.7     +71
+bge-base                                  rrf    2    10 │  69.2  75.8  83.3 100.0 │   65.1   83.2 │    57/74 ms ≤10c │   +3.8   +1.2     +74
+bge-base                                  rrf    4    10 │  65.4  74.4  84.6 100.0 │   65.9   83.4 │    60/74 ms ≤10c │   +0.0   -0.2     +74
+bge-base                                  rrf  0.5    20 │  71.2  77.2  83.3 100.0 │  119.7  146.9 │  117/138 ms ≤20c │   +5.8   +2.7    +138
+bge-base                                  rrf    1    20 │  71.2  76.8  83.3 100.0 │  119.5  155.6 │  115/144 ms ≤20c │   +5.8   +2.2    +147
+bge-base                                  rrf    2    20 │  69.2  76.4  83.0 100.0 │  123.9  151.8 │  118/143 ms ≤20c │   +3.8   +1.8    +143
+bge-base                                  rrf    4    20 │  65.4  74.0  81.7 100.0 │  119.3  155.7 │  114/146 ms ≤20c │   +0.0   -0.5    +147
+bge-base                                  rrf  0.5    30 │  71.2  77.2  83.3 100.0 │  169.8  204.7 │  166/195 ms ≤30c │   +5.8   +2.7    +196
+bge-base                                  rrf    1    30 │  71.2  76.8  83.3 100.0 │  171.6  209.1 │  165/200 ms ≤30c │   +5.8   +2.2    +200
+bge-base                                  rrf    2    30 │  69.2  76.5  83.7 100.0 │  167.6  213.6 │  165/205 ms ≤30c │   +3.8   +1.9    +205
+bge-base                                  rrf    4    30 │  65.4  74.4  83.7 100.0 │  168.0  211.0 │  165/201 ms ≤30c │   +0.0   -0.2    +202
+bge-base                                  rrf  0.5    50 │  71.2  77.2  83.3 100.0 │  228.1  276.3 │  226/266 ms ≤40c │   +5.8   +2.7    +267
+bge-base                                  rrf    1    50 │  71.2  77.1  84.0 100.0 │  230.0  279.5 │  227/268 ms ≤40c │   +5.8   +2.6    +270
+bge-base                                  rrf    2    50 │  69.2  76.5  83.7 100.0 │  226.7  279.1 │  225/269 ms ≤40c │   +3.8   +1.9    +270
+bge-base                                  rrf    4    50 │  63.5  73.3  83.7 100.0 │  229.2  280.9 │  229/270 ms ≤40c │   -1.9   -1.3    +272
+bge-base                              replace    —    10 │  61.5  71.7  82.7 100.0 │   68.4   86.2 │    61/76 ms ≤10c │   -3.8   -2.9     +77
+bge-base                              replace    —    20 │  59.6  71.7  84.9 100.0 │  119.2  146.0 │  117/137 ms ≤20c │   -5.8   -2.9    +137
+bge-base                              replace    —    30 │  59.6  70.7  81.1 100.0 │  167.4  206.0 │  167/197 ms ≤30c │   -5.8   -3.8    +197
+bge-base                              replace    —    50 │  59.6  70.4  81.1 100.0 │  223.4  275.5 │  222/264 ms ≤40c │   -5.8   -4.2    +266
+loading jina-reranker-v2-base-multilingual …
+jina-v2-ml                                rrf  0.5    10 │  69.2  76.5  84.0 100.0 │   69.1   81.4 │    62/72 ms ≤10c │   +3.8   +1.9     +72
+jina-v2-ml                                rrf    1    10 │  69.2  76.9  84.0 100.0 │   70.5   85.5 │    64/76 ms ≤10c │   +3.8   +2.3     +76
+jina-v2-ml                                rrf    2    10 │  65.4  75.0  84.0 100.0 │   71.0   84.7 │    64/75 ms ≤10c │   +0.0   +0.4     +76
+jina-v2-ml                                rrf    4    10 │  65.4  75.0  84.6 100.0 │   70.8   83.8 │    64/74 ms ≤10c │   +0.0   +0.4     +75
+jina-v2-ml                                rrf  0.5    20 │  69.2  76.6  84.0 100.0 │  129.0  152.1 │  126/143 ms ≤20c │   +3.8   +2.0    +143
+jina-v2-ml                                rrf    1    20 │  69.2  76.9  84.0 100.0 │  126.7  154.6 │  124/145 ms ≤20c │   +3.8   +2.3    +146
+jina-v2-ml                                rrf    2    20 │  65.4  75.3  84.6 100.0 │  125.8  154.0 │  122/145 ms ≤20c │   +0.0   +0.7    +145
+jina-v2-ml                                rrf    4    20 │  65.4  74.8  85.3 100.0 │  128.0  148.5 │  123/140 ms ≤20c │   +0.0   +0.3    +139
+jina-v2-ml                                rrf  0.5    30 │  69.2  76.6  84.0 100.0 │  187.4  224.4 │  182/214 ms ≤30c │   +3.8   +2.0    +215
+jina-v2-ml                                rrf    1    30 │  69.2  76.6  84.0 100.0 │  187.2  219.1 │  183/208 ms ≤30c │   +3.8   +2.0    +210
+jina-v2-ml                                rrf    2    30 │  65.4  75.3  84.6 100.0 │  190.3  222.0 │  184/213 ms ≤30c │   +0.0   +0.7    +213
+jina-v2-ml                                rrf    4    30 │  65.4  74.8  85.9 100.0 │  188.3  223.2 │  184/214 ms ≤30c │   +0.0   +0.3    +214
+jina-v2-ml                                rrf  0.5    50 │  69.2  76.8  84.0 100.0 │  250.0  297.5 │  252/288 ms ≤40c │   +3.8   +2.2    +288
+jina-v2-ml                                rrf    1    50 │  69.2  76.6  84.0 100.0 │  247.6  294.0 │  244/284 ms ≤40c │   +3.8   +2.0    +285
+jina-v2-ml                                rrf    2    50 │  65.4  75.3  84.6 100.0 │  244.0  300.9 │  246/291 ms ≤40c │   +0.0   +0.7    +292
+jina-v2-ml                                rrf    4    50 │  65.4  75.2  87.8 100.0 │  243.4  291.4 │  245/282 ms ≤40c │   +0.0   +0.6    +282
+jina-v2-ml                            replace    —    10 │  69.2  75.9  85.9 100.0 │   70.8   86.2 │    64/77 ms ≤10c │   +3.8   +1.3     +77
+jina-v2-ml                            replace    —    20 │  71.2  77.8  87.2 100.0 │  127.8  153.2 │  124/144 ms ≤20c │   +5.8   +3.2    +144
+jina-v2-ml                            replace    —    30 │  71.2  77.8  87.2 100.0 │  187.0  216.7 │  184/208 ms ≤30c │   +5.8   +3.2    +208
+jina-v2-ml                            replace    —    50 │  69.2  76.0  83.3 100.0 │  248.1  297.8 │  249/288 ms ≤40c │   +3.8   +1.4    +289
+loading bge-reranker-v2-m3 …
+bge-v2-m3                                 rrf  0.5    10 │  67.3  75.2  84.0 100.0 │  149.7  204.5 │  143/196 ms ≤10c │   +1.9   +0.6    +195
+bge-v2-m3                                 rrf    1    10 │  67.3  75.3  83.3 100.0 │  142.0  165.6 │  136/156 ms ≤10c │   +1.9   +0.7    +157
+bge-v2-m3                                 rrf    2    10 │  67.3  75.6  83.3 100.0 │  142.1  164.9 │  135/155 ms ≤10c │   +1.9   +1.1    +156
+bge-v2-m3                                 rrf    4    10 │  65.4  74.4  84.6 100.0 │  142.8  164.7 │  135/155 ms ≤10c │   +0.0   -0.2    +156
+bge-v2-m3                                 rrf  0.5    20 │  67.3  75.2  84.0 100.0 │  269.3  322.3 │  268/314 ms ≤20c │   +1.9   +0.6    +313
+bge-v2-m3                                 rrf    1    20 │  67.3  75.5  83.3 100.0 │  273.0  324.9 │  270/317 ms ≤20c │   +1.9   +0.9    +316
+bge-v2-m3                                 rrf    2    20 │  67.3  75.6  84.0 100.0 │  269.3  319.4 │  271/310 ms ≤20c │   +1.9   +1.1    +310
+bge-v2-m3                                 rrf    4    20 │  65.4  74.4  85.9 100.0 │  281.7  335.6 │  277/326 ms ≤20c │   +0.0   -0.2    +326
+bge-v2-m3                                 rrf  0.5    30 │  67.3  75.2  84.0 100.0 │  388.4  448.2 │  392/439 ms ≤30c │   +1.9   +0.6    +439
+bge-v2-m3                                 rrf    1    30 │  67.3  75.6  83.3 100.0 │  388.3  456.9 │  392/447 ms ≤30c │   +1.9   +1.1    +448
+bge-v2-m3                                 rrf    2    30 │  67.3  75.3  84.6 100.0 │  390.3  450.4 │  391/442 ms ≤30c │   +1.9   +0.7    +441
+bge-v2-m3                                 rrf    4    30 │  65.4  74.4  85.9 100.0 │  390.1  459.6 │  388/452 ms ≤30c │   +0.0   -0.2    +451
+bge-v2-m3                                 rrf  0.5    50 │  67.3  75.3  84.0 100.0 │  525.4  608.6 │  523/598 ms ≤40c │   +1.9   +0.7    +599
+bge-v2-m3                                 rrf    1    50 │  67.3  75.6  84.0 100.0 │  520.5  605.7 │  525/596 ms ≤40c │   +1.9   +1.1    +597
+bge-v2-m3                                 rrf    2    50 │  67.3  75.3  85.3 100.0 │  530.4  607.6 │  533/598 ms ≤40c │   +1.9   +0.7    +598
+bge-v2-m3                                 rrf    4    50 │  65.4  74.4  85.9 100.0 │  517.0  608.2 │  524/598 ms ≤40c │   +0.0   -0.2    +599
+bge-v2-m3                             replace    —    10 │  61.5  71.5  85.3 100.0 │  140.9  165.8 │  135/157 ms ≤10c │   -3.8   -3.1    +157
+bge-v2-m3                             replace    —    20 │  59.6  70.2  81.7 100.0 │  273.8  322.0 │  273/313 ms ≤20c │   -5.8   -4.4    +313
+bge-v2-m3                             replace    —    30 │  59.6  69.8  79.8 100.0 │  392.8  453.9 │  395/445 ms ≤30c │   -5.8   -4.7    +445
+bge-v2-m3                             replace    —    50 │  59.6  69.8  79.8 100.0 │  521.8  605.3 │  526/597 ms ≤40c │   -5.8   -4.7    +596
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+```
+
+The header's live-timeout figure is the config as it stood before this
+phase's retune; the committed default is 250 ms now. The full dump —
+every cell's `by_kind` p@1 row included — is committed as
+`eval/grid-phase7.txt`; `--grid-models/--grid-strategies/--grid-depths/
+--grid-weights` re-run any subset, `--json` re-emits the artifact.
+
+The `by_kind` rule ("no kind regresses > 5 points") is what disciplines
+this table: **62 of 80 cells violate it**.
+
+* `jina-v1-turbo-en` regresses `relational` (28.6 → 14.3) in **all 20
+  of its cells**, and `needle` at every weight ≥ 1: the small model
+  cannot hold "who owns X" against fused evidence. It fails the gate at
+  every setting, so its best aggregate (+1.9, at w 0.5) never mattered.
+* `bge-reranker-v2-m3` regresses `relational` in every cell too (plus
+  `exact-token` under `replace`), and it is the slowest candidate by
+  distance: its *cheapest* cell (depth 10) already adds +156 ms p95,
+  over the budget before quality enters the discussion.
+* `bge-reranker-base` and `jina-v2-multilingual` are clean under `rrf`
+  at weights 0.5–1.0 at every depth. The cliff is at 2 for both:
+  `needle` 66.7 → 33.3 everywhere. By weight 4 the aggregate gain is
+  gone entirely (p@1 back to the `off` row) with fresh kinds joining
+  the casualties — the category filter at the shallow depths,
+  `nl-category` elsewhere.
+* `replace` is a strategy-level verdict: precision *falls* on three of
+  four models (worst −9.6, turbo, at every depth). Only
+  jina-v2-multilingual's scores are crisp enough for raw-score ordering
+  to gain (+5.8 at depth 20) — and its gain sits on a cliff: the same
+  strategy at depth 10 or 50 breaks `needle` again.
+
+#### Winner (7.3): `bge-reranker-base` · `rrf` · weight 1.0 · depth 10
+
+**Ship-gate checklist** (gate as written above). For the paired items
+the comparison row is the grid's `off` row — same corpus, same
+process — because the corpus grew after the Phase 2 record; comparing
+across corpora would compare the expansion, not the feature.
+
+- [x] **precision@1 ≥ +5 points**: 65.4 → **71.2 (+5.8)**. The "≥ 15
+  with the expanded cases" expectation did *not* materialise, recorded
+  as required: the thesis is directionally right — a cross-encoder
+  reading query and memory together finds real wins — and those wins
+  concentrate exactly where the plan predicted, `nl-question` p@1 +28.5
+  and `paraphrase` +25.0, natural-language queries where the lexical
+  legs guess. Against the old 41-case record (64.9) the number would
+  read +6.3; recorded, not leaned on.
+- [x] **MRR does not decrease**: 74.6 → 77.2 (**+2.7**).
+- [x] **recall@5 drops ≤ 2**: 83.0 → 83.3 (**+0.3**, an increase).
+- [x] **no `by_kind` p@1 regresses > 5**: clean — the winner's cell is
+  among the 18 that touch nothing below the `off` row. (off → winner,
+  per kind: nl-question 42.9 → 71.4, paraphrase 50.0 → 75.0, every
+  other kind unchanged.)
+- [x] **all `negative` cases pass**: abstention 100.0 in every one of
+  the 81 rows, and `just eval-native` is green against the re-recorded
+  baseline.
+- [x] **p95 added latency ≤ budget on deployment hardware**: **the
+  budget, written down as the gate requires: ≤ 150 ms of added p95 at
+  the chosen depth, measured on the M4 Pro dev container — the hardware
+  every phase of this plan has measured on.** Winner: whole-recall p95
+  79.7 vs the reference row's 9.1 → **+70.6 ms added**; rerank boundary
+  p95 71 ms judging 10 candidates. `timeout_ms` = 250: ≈ 3.5× the
+  measured stage p95 (room for longer real-world memories and a busy
+  CPU), far inside the client-visible limit.
+- [x] **Phase 6 shadow/audit shows no systematic regression** — with
+  the honesty Phase 6 itself insisted on: there is still no real
+  traffic; the hand-checked verdicts on record (Q3 a real regression,
+  Q4 no verdict possible) came from the 7-memory rehearsal. The grown
+  corpus is the better instrument the rehearsal demanded, and at 108
+  memories the Q4 failure mode — confidently reshuffling pure noise —
+  does not reproduce: `negative` abstains 100.0 everywhere and
+  `near-miss` holds 100.0 p@1 including under every winner-adjacent
+  cell. **A shadow period on a real store remains the hard prerequisite
+  for `mode ≠ off`**; that is Phase 8's gate, not a box this one can
+  tick.
+
+Why *these* settings, beyond clearing the gate:
+
+* **depth 10, not 30.** With the winner model the entire gain lands by
+  ten: p@1 and MRR are identical at 10/20/30/50, and latency scales
+  linearly (+71 → +270 ms added p95) because fusion already places
+  every recoverable memory inside the head's first ten. Depth stays an
+  operator's dial for stores much larger than the eval's, and this
+  table prices the dial.
+* **weight 1.0.** The plan bet the wins lived at ≥ 2, where the reranker
+  can overrule vector+BM25 agreement. Measured: the agreement is nearly
+  always *right*, the plateau is 0.5–1.0 (identical quality), and past
+  its edge the leg actively loses points — `2` gives back 2 p@1 and a
+  third of `needle`, `4` takes the category filter down too. The
+  inverted expectation, with numbers, is in the ranker module docs and
+  the config comments (I-3); 1.0 is the plateau top and the semantics
+  that keeps index agreement supreme.
+* **`rrf`.** `replace` lost on three of four models, and task 7.4
+  explains why mechanically: raw-score *gaps* mean nothing on this
+  corpus, so ordering by them reorders noise. Reading only the *order*
+  the scores imply is the survivor — same +5.8 at half the latency.
+* **runner-up.** `jina-v2-multilingual / replace / depth 20` is the
+  table's strongest cell — +5.8 p@1, +3.2 MRR, +4.2 recall@5 (87.2, the
+  table's best, and the only *clean* cell to move recall at all) — and
+  it is rejected: +144 ms added p95 spends
+  96% of the budget on the quietest machine this feature will ever run
+  on, its quality sits on a cliff (`needle` breaks at depth 10 and 50),
+  and multilingual capacity buys nothing on this corpus for the same
+  1.1 GB / ~1.5 GiB bge-base costs. If the budget is ever lifted, that
+  row is where to reopen.
+* **the affordability line.** The winner costs 1.1 GB of weights and
+  ~1.5 GiB RAM per session (the placeholder: 147 MB / 180 MiB — the
+  warm-up measurements). A box that cannot pay should choose
+  `mode = "off"`, not the smaller model: turbo's plateau (+1.9) is a
+  coin flip, paid for with a `relational` regression.
+
+`mode` stays **off** — flipping it is Phase 8's decision on shadow
+data, exactly per plan.
+
+#### The relevance decision (7.4): relevance untouched
+
+`rerank distribution` scores every case query against every corpus
+memory *directly* — no fusion, no floor — because measuring through
+recall would bias the separability verdict toward the model (fusion
+hides the hard-to-retrieve expected pairs; the floor hides suppressed
+negatives). The verdict rule is strict on purpose: separable only if
+the *minimum* expected-pair score clears the *maximum* negative-noise
+score.
+
+| model | expected pairs (52): min / p25 / median / p75 / max | rank-1 of 52 | negative ceiling | separable? |
+|---|---|---|---|---|
+| bge-reranker-base | 0.000 / 0.003 / 0.056 / 0.535 / 0.998 | 28 | 0.085 | **no — 27 pairs at or below the ceiling** |
+| jina-v1-turbo-en | 0.010 / 0.020 / 0.079 / 0.214 / 0.645 | 27 | 0.057 | **no — 22 pairs at or below** |
+
+The shape is exactly §2-row-4's warning quantified: question-shaped
+pairs score near 1 (0.998, 0.993, 0.974), while declarative-statement
+pairs pile up *under the noise ceiling* — `statement: raw SQL in Go`
+0.008, `hand-run migration` 0.006, `nervous about shipping` 0.012 —
+below what an irrelevant query scores against this store's best memory
+(0.085). Any mapping from cross-encoder score to `relevance` would put
+correct answers under the 0.25 floor and *delete* them. **`relevance`
+stays on the index-signal scale (I-4)**; the cross-encoder stays a
+rank-only input — which is precisely the shape the grid proved works:
+order, not magnitude.
+
+#### Production-like re-verification: quota-blocked, open for Phase 8
+
+The winner cell should also be paired on the Gemini config — Phase 5
+deferred that pairing to this grid, and the expanded corpus never got
+its Gemini `calibrate` (the batch-cap fix, then 429s from Google's
+free-tier quota, held through this session). While unrun: the
+rerank-boundary latency is embedder-independent (the same candidate
+pairs get scored regardless of what put them in the head), and the
+quality mechanism — cross-encoder promotion of candidates fusion
+misranked — does not depend on the embedding model either; Phase 6's
+one Gemini audit showed the same head-movement behaviour. **Open item
+for Phase 8**: `scripts/rerank-grid.sh --config recuerdos-ai.toml
+--grid-depths 10 --grid-weights 0.5,1` when the quota recovers, plus
+the Gemini `calibrate`/`eval` of the grown corpus — its negative-noise
+margin was already thin (adjusted ceiling 0.222 against the 0.25
+floor), so if the expansion moved it, that is a corpus fix per the
+7.1 rule, and it gates `mode = on` either way.
+
+#### Definition of Done
+
+- [x] `just check-native` passes; `just eval-native` passes against the
+  re-recorded baseline (83.0 / 65.4 / 74.3, the record of the default
+  path — rerank off — since flipping `mode` is not this phase's act).
+- [x] Grid table pasted, winner and rationale recorded above;
+  per-cell `by_kind` p@1 in the committed `eval/grid-phase7.txt`.
+- [x] Ship gate: met on the offline evidence, with the two honest
+  caveats recorded in place — the +15-point hope measured +5.8, and
+  the Phase 6 item rests on the grown corpus until real shadow data
+  exists. The reranker is ship-ready *as a configuration*; the
+  default stays `mode = off` pending Phase 8's shadow period.
+
 
 ### Phase 8 — release
 - Smoke test: _TBD_ · final default (`off`/`on`): _TBD_
