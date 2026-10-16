@@ -13,7 +13,8 @@
 //!
 //! # The API
 //!
-//! - Batch: `POST {base}/models/{model}:batchEmbedContents`
+//! - Batch: `POST {base}/models/{model}:batchEmbedContents` — at most
+//!   100 requests per call, which this client chunks at for you.
 //! - Body: `{"requests": [{"model": "models/…", "content": {"parts":
 //!   [{"text": …}]}, "taskType": "RETRIEVAL_DOCUMENT"}, …]}`
 //! - Auth: `x-goog-api-key: <key>` — a header, never a `?key=` query
@@ -34,6 +35,14 @@ use std::time::Duration;
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 const TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `BatchEmbedContentsRequest.requests` holds *at most 100 entries* — the
+/// API answers a larger one with HTTP 400, not with a truncation. A store
+/// crosses a hundred memories long before its first consolidation, so the
+/// client chunks at this cap rather than failing the write; same shape as
+/// `remote_embedder`'s configured `max_batch_size`, hard-coded because
+/// this number is a property of the provider, not of the deployment.
+const MAX_BATCH: usize = 100;
 
 pub struct GeminiEmbedder {
     http: BlockingHttpWorker,
@@ -91,23 +100,11 @@ impl GeminiEmbedder {
     fn qualified_model(&self) -> String {
         format!("models/{}", self.model)
     }
-}
 
-/// The taskType Gemini should embed for. Storage, updates and
-/// consolidation are all documents; only a recall query is a query.
-fn task_type(task: EmbeddingTask) -> &'static str {
-    match task {
-        EmbeddingTask::Document => "RETRIEVAL_DOCUMENT",
-        EmbeddingTask::Query => "RETRIEVAL_QUERY",
-    }
-}
-
-impl Embedder for GeminiEmbedder {
-    fn embed(&self, texts: &[String], task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
+    /// Sends exactly one `batchEmbedContents` request; callers must hand
+    /// it at most [`MAX_BATCH`] texts. Splitting a longer batch lives in
+    /// [`Embedder::embed`].
+    fn embed_chunk(&self, texts: &[String], task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
         let qualified = self.qualified_model();
         let type_of_task = task_type(task);
         let requests: Vec<Value> = texts
@@ -159,6 +156,32 @@ impl Embedder for GeminiEmbedder {
             }
             Ok(vectors)
         })?
+    }
+}
+
+/// The taskType Gemini should embed for. Storage, updates and
+/// consolidation are all documents; only a recall query is a query.
+fn task_type(task: EmbeddingTask) -> &'static str {
+    match task {
+        EmbeddingTask::Document => "RETRIEVAL_DOCUMENT",
+        EmbeddingTask::Query => "RETRIEVAL_QUERY",
+    }
+}
+
+impl Embedder for GeminiEmbedder {
+    fn embed(&self, texts: &[String], task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The provider rejects a batch over [`MAX_BATCH`] with HTTP 400
+        // rather than truncating it, so split and concatenate. Sequential
+        // rather than parallel: bursting the chunks at the quota is how a
+        // 429 is earned, and callers pair vectors with texts by position.
+        let mut out = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(MAX_BATCH) {
+            out.extend(self.embed_chunk(chunk, task)?);
+        }
+        Ok(out)
     }
 
     fn model_id(&self) -> &str {
@@ -390,5 +413,66 @@ mod tests {
         .unwrap()
         .expect("a query must embed via RETRIEVAL_QUERY");
         assert_eq!(query.len(), 3);
+    }
+
+    /// Echoes the number of requests it received as every returned vector,
+    /// so a response identifies the batch that produced it.
+    struct EchoBatchSize;
+
+    impl Respond for EchoBatchSize {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: Value = serde_json::from_slice(&request.body).unwrap_or(json!({}));
+            let count = body["requests"].as_array().map(Vec::len).unwrap_or(0);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "embeddings": (0..count)
+                    .map(|_| json!({"values": [count as f32]}))
+                    .collect::<Vec<_>>(),
+            }))
+        }
+    }
+
+    /// The provider's hard limit: `BatchEmbedContentsRequest.requests`
+    /// holds at most 100 entries, and a longer batch answers HTTP 400 —
+    /// which is how a 101-memory eval corpus (or a year-old store
+    /// consolidating) used to die. The echo responder stamps each result
+    /// with the size of the batch that produced it, so the vector stream
+    /// proves both the split and the order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_over_the_provider_cap_is_split_in_order() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(EchoBatchSize)
+            // The `load` probe, then the 100-batch, then the remainder.
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let embedder = tokio::task::spawn_blocking(move || {
+            GeminiEmbedder::load("text-embedding-004", &uri, "gk-test".to_string())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let texts: Vec<String> = (0..=MAX_BATCH).map(|i| format!("memory {i}")).collect();
+        let vectors =
+            tokio::task::spawn_blocking(move || embedder.embed(&texts, EmbeddingTask::Document))
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(vectors.len(), MAX_BATCH + 1, "nothing dropped or reordered");
+        assert!(
+            vectors[..MAX_BATCH]
+                .iter()
+                .all(|v| v == &vec![MAX_BATCH as f32]),
+            "the first {MAX_BATCH} results must come from the full batch"
+        );
+        assert_eq!(
+            vectors[MAX_BATCH],
+            vec![1.0],
+            "the remainder rides its own batch"
+        );
     }
 }
