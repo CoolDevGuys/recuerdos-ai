@@ -3,11 +3,6 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-# Changelog
-
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
-One entry per phase, backfilled as phases land.
-
 ## v0.4.0 — Recall quality, and an optional cross-encoder reranker
 
 Two measured recall defects are fixed, and a second stage that had been
@@ -85,6 +80,35 @@ memories before you spend either.
   rerank model too when the config enables one, and the image can bake it in:
   `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
   carries no rerank model, since the default does not use one.
+
+## v0.4.1 — Two relevance settings that were being dropped
+
+A review of a real deployment's `recuerdos-ai.toml` found that the example file
+v0.4.0 shipped wrote `min_relevance` and `similarity_baseline` *after* the
+`[rerank]` header. TOML cannot reopen a section, so both defined unknown
+`[rerank]` keys instead of retrieval ones, and the loader ignored them without
+complaint. `recuerdos-ai init` hands out that same file, so a copied template had
+a relevance floor and a baseline that did nothing — including for the operator
+whose config was being reviewed when it turned up.
+
+- **The example is repaired.** Both keys are back under `[retrieval]`, with a
+  note that a key written after the next `[table]` line belongs to that section.
+  Pinned by a test that loads the shipped file, so the template cannot drift back
+  into this. **If you copied the v0.4.0 example or ran `init`, move the two keys
+  up yourself** — while they sat below `[rerank]`, changing them had no effect,
+  whatever the file said.
+- **A key nothing reads is now named at startup**, with the section it probably
+  meant: `[rerank].min_relevance is not a known setting and is ignored — did you
+  mean [retrieval].min_relevance?` Unknown keys stay non-fatal — a stray line in
+  a config a working server has loaded should not become downtime — but they are
+  no longer invisible, which is the only reason the example could carry this
+  through review ([configuration.md](configuration.md#keys-nothing-reads)).
+- **A first rerank-enabled boot explains its own pause.** The model load names
+  the model and the cache directory *before* it begins, so a log that stops there
+  is a ~1.1 GB download in progress, not a hang. `docs/deployment.md` also covers
+  the bare-binary case, where `DynamicUser=` or `ProtectHome=` can leave the
+  cache directory unwritable and the download has nowhere to land
+  ([deployment.md](deployment.md#optional-second-stage-reranking)).
 
 ## v0.2.1
 

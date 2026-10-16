@@ -98,6 +98,34 @@ config error: [server].port is 0; [embeddings].model is empty
 
 Each message names the exact TOML path it's complaining about.
 
+### Keys nothing reads
+
+A key the schema does not know is *ignored* rather than fatal — a stray line
+in a config a working server has already loaded should not become downtime —
+but it is not silent. The daemon warns at startup, and when the same key name
+exists in another section it says which one:
+
+```
+WARN recuerdos-ai.toml: [rerank].min_relevance is not a known setting and is ignored — did you mean [retrieval].min_relevance?
+WARN recuerdos-ai.toml: [rerrank] is not a known section and is ignored
+```
+
+The check exists because of a shape that is easy to write by accident. TOML
+cannot reopen a section, so a `[retrieval]` key typed after the next `[table]`
+header below it defines a key of *that* section instead — and an unknown key of
+a real section is the one mistake the loader had no way to mention. During
+rerank development the example file itself fell into exactly that hole (both
+relevance keys trailed the `[rerank]` block, so `recuerdos-ai init` handed out a
+template whose `min_relevance` did nothing), and **v0.4.0 shipped with it**. The
+example is repaired and pinned by a test in `v0.4.1`; if you are on `v0.4.0` and
+copied the file, move `min_relevance` and `similarity_baseline` up above
+`[rerank]` yourself — before this warning existed, editing them there had no
+effect at all.
+
+So: every key for a section belongs above the next `[table]` line. If a
+setting you changed appears to have no effect, check the startup log for this
+warning before anything else.
+
 ## Authentication
 
 ```toml

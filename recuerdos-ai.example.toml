@@ -58,7 +58,11 @@ provider = "local"
 # breaking change that requires the (future) `reindex` command. The
 # daemon refuses to open a store whose pinned model no longer matches.
 model = "bge-small-en-v1.5"
-# Where the local ONNX model files live. Ignored by the remote providers.
+# Where the local ONNX model files live. The embedding providers other than
+# "local" ignore it for *their* model, but it is still where an enabled
+# reranker downloads its weights — so a remote-embeddings deployment that sets
+# `mode = "shadow"` or `"on"` needs this directory to exist and be writable by
+# the service user.
 cache_dir = "~/.recuerdos-ai/models"
 # --- remote providers only (gemini, openai-compat, ollama) ---
 # Override the provider's address. Empty means its usual one. Set this
@@ -178,9 +182,52 @@ max_duration_secs = 300
 max_memories = 5000
 
 [retrieval]
+# Everything for this section belongs here, before the next `[table]` header:
+# TOML has no way to reopen a section, so a key written after `[rerank]` opens
+# below would define a *rerank* setting (and be ignored as an unknown one).
 hybrid = true
 default_limit = 8
 recency_half_life_days = 90
+
+# Results scoring below this relevance are dropped rather than returned.
+# Relevance is measured from what the indexes matched — not from where a
+# result ranked — so unlike the rank score it means something read on its
+# own: 0.8 is "this is about your question", 0.0 is "nothing here is".
+#
+# The point is that a rank score cannot say "no match": a query with nothing
+# to answer it still has a top result, and a client that cannot hear "no
+# match" summarises the noise into a confident answer. 0.25 sits in the gap
+# measured on the default embedding model, where an unrelated query tops out
+# near 0.13 and a genuine answer starts near 0.36 — if you change
+# [embeddings].model, re-measure that gap with `recuerdos-ai calibrate`
+# before trusting the number.
+#
+# 0.0 turns it off and returns every candidate the indexes produced, which is
+# what an exhaustive admin tool or an eval harness wants. A single search can
+# override it per request with "min_relevance".
+#
+# One exemption: a search that filters by categories, subcategories or tags
+# ignores this default and returns the whole slice. Naming a category is
+# already saying what you want in the store's own vocabulary, so the words in
+# the query are a preference inside that slice rather than the definition of
+# it — and refusing to answer "what decisions have I stored?" because the
+# phrasing was a poor vector match would be a new bug. An explicit
+# "min_relevance" always applies, filtered or not. The response reports the
+# floor that produced the list.
+min_relevance = 0.25
+
+# The cosine similarity at which the vector leg stops being evidence. Two
+# unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,
+# so that much similarity is what *nothing* looks like, and it is subtracted
+# before relevance is reported.
+#
+# 0.5 was measured against bge-small-en-v1.5. Changing [embeddings].model
+# changes it — a model that expects a retrieval instruction on queries has a
+# lower baseline — so if you swap models and recall gets too strict or too
+# loose, retune here before anywhere else. 0.0 reports raw cosine. Leaving it
+# unset uses the measured value for your model when we have one (bge-small,
+# gemini-embedding-2) and warns at startup when we do not.
+similarity_baseline = 0.5
 
 [rerank]
 # The optional second stage (reranking-plan.md): a local cross-encoder
@@ -249,42 +296,6 @@ batch_size = 16
 # logs one `rerank_shadow` line (ids and ranks, never content): the
 # disagreement rate is how many of those say changed=true. Both are written up
 # in docs/evaluation.md.
-
-# Results scoring below this relevance are dropped rather than returned.
-# Relevance is measured from what the indexes matched — not from where a
-# result ranked — so unlike the rank score it means something read on its
-# own: 0.8 is "this is about your question", 0.0 is "nothing here is".
-#
-# The point is that a rank score cannot say "no match": a query with nothing
-# to answer it still has a top result, and a client that cannot hear "no
-# match" summarises the noise into a confident answer. 0.25 sits in the gap
-# measured on the default embedding model, where an unrelated query tops out
-# near 0.13 and a genuine answer starts near 0.36.
-#
-# 0.0 turns it off and returns every candidate the indexes produced, which is
-# what an exhaustive admin tool or an eval harness wants. A single search can
-# override it per request with "min_relevance".
-#
-# One exemption: a search that filters by categories, subcategories or tags
-# ignores this default and returns the whole slice. Naming a category is
-# already saying what you want in the store's own vocabulary, so the words in
-# the query are a preference inside that slice rather than the definition of
-# it — and refusing to answer "what decisions have I stored?" because the
-# phrasing was a poor vector match would be a new bug. An explicit
-# "min_relevance" always applies, filtered or not. The response reports the
-# floor that produced the list.
-min_relevance = 0.25
-
-# The cosine similarity at which the vector leg stops being evidence. Two
-# unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,
-# so that much similarity is what *nothing* looks like, and it is subtracted
-# before relevance is reported.
-#
-# 0.5 was measured against bge-small-en-v1.5 below. Changing [embeddings].model
-# changes it — a model that expects a retrieval instruction on queries has a
-# lower baseline — so if you swap models and recall gets too strict or too
-# loose, retune here before anywhere else. 0.0 reports raw cosine.
-similarity_baseline = 0.5
 
 [graph]
 # The entity/relation graph (Strategy B). On by default as of Task 7.3.6:

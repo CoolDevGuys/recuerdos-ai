@@ -414,6 +414,21 @@ with `recuerdos-ai warm-models` or bake the model into the image.
 It never quietly falls back: a deployment that asked for a second stage and
 cannot load one finds out at boot, not in the middle of a recall.
 
+What it does *first* is say the wait is coming:
+
+```
+INFO loading the rerank model; if its weights are not in this cache yet, the first
+     load downloads them (~1.1 GB for the default model) and can take minutes
+```
+
+A log that pauses there is a healthy pull, not a hang — `du -sh` on the cache
+directory grows while it runs. The same applies to a bare binary rather than a
+container, where the cache is whatever `[embeddings].cache_dir` says and must be
+writable by the user the service runs as: under `DynamicUser=` or `ProtectHome=`
+it often is not, and then the download has nowhere to land. Running
+`recuerdos-ai warm-models` once as that user, with the same `--config`, takes
+the wait off the boot path entirely.
+
 ### 3. Turn it on
 
 ```toml
