@@ -137,6 +137,18 @@ each is a `domain` trait with an `infrastructure` adapter, wired in
 | Keyword | `TextIndex` | "contains these tokens" (BM25 — the only leg that can match an identifier like `useQuery`) |
 | Graph | `EntityGraph` | "is connected to what this query names" |
 
+After fusion there may be a **second stage**: a `Reranker` (another
+`domain` trait) re-scores the head of the fused list by reading each
+candidate against the query *jointly*, which no leg does — the legs
+embed the query and the memory separately and compare vectors. It is
+optional in the strongest sense: `[rerank].mode = "off"` (the default)
+never builds the adapter, so the recall path is the one above and a
+build without the feature would behave identically. When it is on it is
+still additive — the reranker reorders the fused list, it never filters
+it, and a deadline overrun drops the stage rather than failing the
+request. See `reranking-plan.md` for the measurements that set its
+defaults.
+
 The graph leg (Task 7.3, "Strategy B") is what reaches a memory that
 answers a question it shares no words with: it scans the query for entity
 mentions, keeps the ones some memory of this user actually declared as
