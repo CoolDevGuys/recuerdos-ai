@@ -2539,19 +2539,33 @@ Notes were hand-written again, for the `v0.4.1` reason: the first thing an
 affected operator needs is the one `curl` that reads `.rerank`, and a generated
 commit list cannot say that.
 
-Follow-ups with owners, so neither becomes folklore:
+Follow-ups, with what happened to each:
 
-1. **SDK.** `Client.search()` returns `list[SearchHit]` and drops the top level —
-   including `min_relevance`, which `docs/api.md` tells clients to read when
-   deciding between giving up and retrying at `0.0`. Agreed to follow as an
-   additive `search_report()` with its own SDK version bump, on its own branch,
-   so it does not ride a release commit.
-2. **GHCR visibility.** The package is still private (anonymous manifest fetch
-   returns 401), while `README.md:209` and `docs/deployment.md:177` read as
-   though an anonymous `docker pull` works. The operator is flipping it to
-   public; the docs stay as they are until that is done, and the check is a
-   single unauthenticated manifest request against
-   `ghcr.io/cooldevguys/recuerdos-ai:0.4.2`.
+1. **SDK — shipped, awaiting a tag.** PR #31 merged as `c1c3e25`: `search_report()`
+   returns `hits`, `took_ms`, `min_relevance` and a union of the four `rerank`
+   states discriminated on `state`, and `search()` is now
+   `search_report().hits`. It also found that `Client.search()` had never had a
+   `min_relevance` parameter at all — while `docs/api.md` tells a caller to read
+   the floor and retry at `0.0` — and that `recuerdos_ai.__version__` had said
+   0.2.0 through two releases whose packaging said 0.3.0; it is now pinned
+   against the installed distribution, which is the copy nobody forgets. SDK
+   `0.4.0` reaches PyPI with the next tag (`release.yml` publishes on tag,
+   `skip-existing`), not at merge time.
+   Its integration test is worth remembering as a lesson: it asserted the
+   configured `0.25` floor on a tag-filtered search and the daemon answered
+   `0.0`, *correctly* — a structural filter lifts the floor. A mock transport
+   built from the same reading of the docs would have agreed with itself
+   forever.
+2. **GHCR — resolved, and the docs needed no change.** The package is public.
+   Verified the way the claim reads: `docker pull` with `DOCKER_CONFIG` pointed
+   at an empty directory, so no credential of any kind was offered, resolves
+   `ghcr.io/cooldevguys/recuerdos-ai:0.4.2` to
+   `sha256:e45fec61af6e40ceea394bf11d2a4402dbeeca8c3a4a44d9ff55931dc0ee47a6` —
+   the same multi-arch manifest `release.yml` pushed — and
+   `docker run --rm --entrypoint recuerdos-ai … --version` inside that image
+   prints `recuerdos-ai 0.4.2`. So `README.md:209` and `docs/deployment.md:177`
+   are accurate as written; the defect was the visibility, not the prose, and
+   nothing in either file was touched.
 3. Unchanged from Phase 8: the real-traffic shadow period that gates flipping the
    default, and the `gemini-embedding-2` production-parity re-check.
 
