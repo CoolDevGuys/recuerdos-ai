@@ -2505,6 +2505,56 @@ confirm `rerank_rank` appears at the default floor, run `calibrate` for
 the deadline is met, an audit-vs-live disagreement there is expected, not a
 mystery.
 
+**Release consequence — taken.** `v0.4.2` is out: PR #30 merged as `fbe021e`, five
+checks green twice over (on the code at `7d28ac0` and again on the bump at
+`a769354`, so the tree CI verified is the tree that got tagged), lightweight tag
+on the merge commit as with `v0.4.1` and `v0.3.1`, `release.yml` 8/8 jobs.
+948 tests, 0 failures, `fmt`/`clippy -D warnings`/boundaries clean.
+
+Verified from the published artifacts, and this time the *behaviour* too rather
+than only the bytes:
+
+* three tarballs download and `shasum -a 256 -c` clean; the darwin/arm64 binary
+  reports `recuerdos-ai 0.4.2`;
+* `mode = "off"` against a fresh `init` config: the search response's top level
+  is exactly `min_relevance`, `results`, `took_ms`. The "off is invisible" claim
+  checked on the shipped artifact, not only in `dto` and the transport test;
+* the incident, reproduced deliberately — `mode = "on"` with `timeout_ms = 1`
+  served the pre-rerank order (no `rerank_*` in `matched`, as it must) and
+  reported `{"state":"skipped","reason":"deadline","candidates":3,"took_ms":1}`.
+  That is the fact the operator could not get out of `v0.4.1`;
+* the same store at `timeout_ms = 5000`: `{"state":"applied","judged":3,"took_ms":13}`,
+  with `rerank_rank`/`rerank_score` on every row inside the head; a floor of 0.6
+  and a stopword query both report `not_needed`;
+* multi-arch image pushed as `0.4.2`, `0.4` and `latest`
+  (`sha256:e45fec61af6e40ceea394bf11d2a4402dbeeca8c3a4a44d9ff55931dc0ee47a6`);
+  PyPI skipped `recuerdos_ai-0.3.0` as an existing duplicate, the intended no-op.
+
+Incidental measurement worth keeping: this M-series host judged 3 candidates in
+13 ms (~4 ms a pair, and `warm-models` reported 2 in 6.5 ms), which is in the
+tuning box's range, not the operator's ~34 ms. That is the whole argument for
+`sizing timeout_ms yourself` in one number pair.
+
+Notes were hand-written again, for the `v0.4.1` reason: the first thing an
+affected operator needs is the one `curl` that reads `.rerank`, and a generated
+commit list cannot say that.
+
+Follow-ups with owners, so neither becomes folklore:
+
+1. **SDK.** `Client.search()` returns `list[SearchHit]` and drops the top level —
+   including `min_relevance`, which `docs/api.md` tells clients to read when
+   deciding between giving up and retrying at `0.0`. Agreed to follow as an
+   additive `search_report()` with its own SDK version bump, on its own branch,
+   so it does not ride a release commit.
+2. **GHCR visibility.** The package is still private (anonymous manifest fetch
+   returns 401), while `README.md:209` and `docs/deployment.md:177` read as
+   though an anonymous `docker pull` works. The operator is flipping it to
+   public; the docs stay as they are until that is done, and the check is a
+   single unauthenticated manifest request against
+   `ghcr.io/cooldevguys/recuerdos-ai:0.4.2`.
+3. Unchanged from Phase 8: the real-traffic shadow period that gates flipping the
+   default, and the `gemini-embedding-2` production-parity re-check.
+
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
       used); fixed in Phase 0 so it does. Details in the Phase 0 log above.
