@@ -315,14 +315,20 @@ configurations over a real store.
 
 ### Definition of Done
 
-- [ ] `just check-native` passes.
-- [ ] Two consecutive `eval` runs produce identical recall/p@1/MRR/complete@k.
-- [ ] New baseline committed; §17 shows the per-kind movement and explains it.
+- [x] `just check-native` passes.
+- [x] Two consecutive `eval` runs produce identical recall/p@1/MRR/complete@k —
+      at the shipped default, yes (seven runs in seven processes, identical to the
+      decimal). At other recency settings it does not always hold, and §17 records
+      the cause and the noise floor rather than hiding it.
+- [x] New baseline committed; §17 shows the per-kind movement and explains it.
 - [ ] `recall audit` self-comparison on a copy of the field host's store recorded
-      in §17 (0 changes).
-- [ ] The four experiment variants of §1.3 re-run on the age-aware eval through
+      in §17 (0 changes). **Not met.** The tool and its purity/refusal/JSON tests
+      are in place; the field half needs a copy of the operator's store and a query
+      file only they can write. Blocked on an agreed window, not on code.
+- [x] The four experiment variants of §1.3 re-run on the age-aware eval through
       `scripts/recall-grid.sh` with the experiment patch. Their numbers go in §17 as
-      the inputs to Phases 2–3.
+      the inputs to Phases 2–3. (§1.3's four, plus query-to-triple seeding without
+      a threshold, so G2's abstention collapse was confirmed on the aged corpus too.)
 
 ---
 
@@ -949,7 +955,8 @@ one top-1 the Phase 2 change can lose).
 | Probe generation cost / no LLM configured | Off by default; budgeted backfill; client-supplied questions for `:direct`. |
 | Wrong aliases merge distinct concepts | Kind compatibility, calibrated τ, optional LLM confirm, `--list/--remove`, rejected pairs remembered. |
 | Prompt-table rows go stale as model families evolve | Each row cites its model card. Explicit config override. Unknown models get no prompt and an info log. |
-| Eval corpus still small (104 memories) | Real-store `recall audit` is part of every gate (§4). |
+| Eval corpus still small (110 memories) | Real-store `recall audit` is part of every gate (§4) — and that half is still unmet: see Phase 0's Task 0.9. |
+| Two `eval` runs need not agree | Measured floor: 0.7 recall points, 1.7 if a whole single-expectation case flips. Equal-BM25 documents (~38 of them match "project" through the category field) reorder with Tantivy segment layout. Below ~2 recall / ~1 p@1 a Δ is one case moving, not a result; re-run twice before gating on it. Root cause and candidate fixes in §17 Phase 0 and the follow-up below. |
 
 **Follow-ups (not in this plan):**
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
@@ -960,6 +967,16 @@ one top-1 the Phase 2 change can lose).
 - Personalized PageRank over the graph, only if Phases 3 + 6 leave `chain`
   incomplete. Its seeding gain did not materialise here (§1.3) because RRF outvotes
   one-leg answers.
+- Make the eval bit-reproducible, so "two runs identical" can be a promise instead
+  of a measurement. The vector leg (`ORDER BY distance`) and the score sequence are
+  already identical across processes; the leak is that tied documents are handed to
+  the keyword collector in segment-layout order, and the eval's store is one commit
+  per memory with a merge thread racing. Three fixes, each a decision rather than a
+  patch: order the keyword leg by `(score, id)` (canonical, right for production —
+  but a rebuilt store gets fresh UUIDv7 ids, so eval runs still differ); tie-break
+  on content (stable across rebuilds, changes production's arbitrary order); or let
+  the eval supply `MemoryId`s to the saver (deterministic, and a security-shaped API
+  change). Until one is taken, treat the noise floor as part of every gate.
 
 ---
 
@@ -969,18 +986,317 @@ Fill in as phases complete. Paste raw command output, not summaries.
 
 ### Environment
 - Eval embedder: `bge-small-en-v1.5` (default config = field host's embedder as of 2026-10-17).
-- Field host config summary: _TBD_
-- Hardware for latency: _TBD_
+- Field host config summary: _TBD_ — blocked with the rest of Task 0.9; see Phase 0.
+- Hardware for latency: every number in this log is from the dev container
+  (`docker/Dockerfile.dev`) on an arm64 Docker VM, not the field host. The p50/p95
+  columns are comparable to each other, not to production.
 
 ### Pre-plan measurements (2026-10-17)
 See §1.3 and [recall-accuracy-proposal.md](recall-accuracy-proposal.md) §2. They were
 measured on the same-age eval and are superseded by Phase 0's re-run.
 
 ### Phase 0 — eval fidelity
-- Per-kind movement from ages + dedupe: _TBD_
-- Determinism check (two runs identical): _TBD_
-- `recall audit` self-comparison on the field host's copy: _TBD_
-- §1.3 variants re-run on the age-aware eval: _TBD_
+
+Everything below was measured in the dev container (`docker/Dockerfile.dev`,
+arm64 Docker VM) on `bge-small-en-v1.5` with no reranker. There is no
+`eval/config.toml` in this repo: the eval runs on library defaults plus whatever
+env a cell sets, so a cell neutralises recency with
+`RECUERDOS_AI_RETRIEVAL__RECENCY_HALF_LIFE_DAYS` rather than with a file — and
+`validate()` refuses `recency_half_life_days = 0` as a typo guard, so "no decay"
+is expressed as a century (36500), not zero.
+
+#### The re-recorded baseline (Task 0.8)
+
+`eval --write-baseline eval/baseline.json`, 59 gated cases (80 with the
+informational kinds Phase 0.7 added):
+
+| metric | before | after |
+|---|---|---|
+| recall@5 | 83.0 | **83.3** |
+| precision@1 | 65.4 | **50.0** |
+| MRR | 74.3 | **63.9** |
+| complete@5 | _not recorded_ | **80.8** |
+| abstention | 100.0 | 100.0 |
+| latency p50 / p95 | 7.6 / 9.6 ms | 7.9 / 9.0 ms |
+
+Per kind (`n` = cases of that kind in the gated set; recall is *what* came
+back, p@1 is *which one came first*):
+
+| kind | n | recall → | p@1 → | complete@5 |
+|---|---|---|---|---|
+| category-filter | 2 | 100.0 → 100.0 | 100.0 → 100.0 | 100.0 |
+| current-fact | 1 | 100.0 → 100.0 | 100.0 → **0.0** | 100.0 |
+| exact-token | 4 | 100.0 → 100.0 | 100.0 → 100.0 | 100.0 |
+| near-miss | 7 | 100.0 → 100.0 | 100.0 → **42.9** | 100.0 |
+| needle | 3 | 66.7 → 66.7 | 66.7 → **33.3** | 66.7 |
+| negative | 7 | 100.0 → 100.0 | 100.0 → 100.0 | 100.0 |
+| nl-category | 8 | 64.6 → 66.7 | 62.5 → **37.5** | **50.0** |
+| nl-question | 7 | 85.7 → 85.7 | 42.9 → **57.1** | 85.7 |
+| paraphrase | 4 | 100.0 → 100.0 | 50.0 → **100.0** | 100.0 |
+| relational | 7 | 57.1 → 57.1 | 28.6 → **0.0** | 57.1 |
+| statement | 4 | 75.0 → 75.0 | 50.0 → **25.0** | 75.0 |
+| subcategory-filter | 4 | 100.0 → 100.0 | 100.0 → 100.0 | 100.0 |
+| tag-filter | 1 | 100.0 → 100.0 | 0.0 → 0.0 | 100.0 |
+
+**What moved, and why only one column moved.** Recall@5 is within a third of a
+point of where it was, and 12 of 13 kinds are identical: ageing the corpus does
+not change *which* memories are relevant enough to come back. What it changes
+is the head of the list. With one shared age every memory in a query's
+neighbourhood was multiplied by the same recency factor, so the head was
+decided by "which sentence looks most like the question" — and it was decided
+*consistently*, which is what made p@1 look healthy at 65.4. Give the corpus
+real ages in `[0, 365)` and the multiplier separates those same candidates:
+p@1 50.0, MRR 63.9. This is the correction §1.3 predicted ("the +3.8 p@1 above
+is an upper bound measured under a simplification"), measured from the other
+side: the old number was the artefact.
+
+The two kinds that got *better* say the same thing in reverse — `paraphrase`
+50.0 → 100.0 and `nl-question` 42.9 → 57.1 are cases whose right answer happens
+to be young and whose distractor is old. A p@1 that can be won or lost by an
+age roll is not a measurement of ranking, and it is now honest about that.
+`current-fact` (n = 1) flipping 100.0 → 0.0 is one case, not a trend, and the
+corpus does not actually pin its premise: that memory declares no entities, so
+`validate()`'s "expected fact must be the newest about its subject" rule skips
+it, and hash-aged neighbours can lawfully be younger than its 12 days. Phase 7
+owns that case (G4).
+
+**The two changes are separable, and they pull opposite ways.** Measured
+between the Phase 0 commits, in this container:
+
+| corpus state | recall@5 | p@1 | MRR |
+|---|---|---|---|
+| control (pre-Phase-0, same-age, 4 duplicates) | 83.0 | 65.4 | 74.6 |
+| dedupe only, still same-age | 83.0 | 69.2 | 76.2 |
+| ages only, duplicates still in | 81.4 | 50.0 | 64.1 |
+| ages + dedupe (what is committed) | 83.3 | 50.0 | 63.9 |
+
+Deleting the four duplicated memories is worth +3.8 p@1 on its own — V1 was
+taking real top-5 slots. The ages are then worth −19.2, and they are the
+finding, not the regression.
+
+#### Determinism, and its measured limit (Task 0.1, and the DoD check)
+
+Seven `eval` runs in seven separate processes at the shipped default:
+recall 83.3, p@1 50.0, MRR 63.9, complete@5 80.8 — **identical in all seven**,
+which is what the DoD asks for.
+
+The DoD's premise needed a stress test, so the same experiment was run at other
+recency settings, and it does not always hold:
+
+| cell (three runs each, one process per run) | recall@5 | p@1 | MRR |
+|---|---|---|---|
+| `recency_half_life_days = 30` | 84.0 / 83.3 / 83.3 | 46.2 / 46.2 / 46.2 | 63.2 flat |
+| `recency_half_life_days = 36500` | 83.0 / 83.0 / 83.0 | 69.2 flat | 76.5 / 76.5 / 76.2 |
+
+One case moves: `nl-category: setting up my machine` (3 expectations), whose
+third answer — "The devcontainer runs the daemon on port 7070…" — is either in
+the top 5 or not. **Noise floor: 0.7 recall points, or 1.7 if a whole
+single-expectation case flips** (1/59 of the mean).
+
+Root cause, measured rather than assumed. Instrumenting each leg for the flaky
+query across processes found the vector leg's `ORDER BY distance` list
+**bit-identical**, the keyword leg's segment count and full score sequence
+**identical**, and the graph leg **silent** (`seeds=0`). What differed was which
+*memory* carried which keyword score, and therefore its `bm25_rank`: the query
+("getting my laptop set up for this project") matches ~38 documents through the
+`category` field alone — every `fact.project` memory contains "project" — and
+those documents tie on BM25. Tantivy hands tied documents to the collector in
+segment-layout order, and the eval's store is built by one commit per memory
+(110 of them) with a merge thread racing, so which document sits in which
+segment varies per process. `sort_ranked`'s documented promise ("ties must not
+depend on the order rows came back from SQLite") holds one layer above the leak.
+
+Why this is recorded instead of fixed here: every fix is a design decision the
+plan has not made. Ordering the keyword leg by `(score, id)` makes the leg
+canonical and is right for production — but a *rebuilt* store gets fresh UUIDv7
+ids, so it would still vary between eval runs; content-derived tie-breaks reach
+the same result and change production's arbitrary order; and giving the eval
+deterministic ids means letting a caller supply a `MemoryId` to the saver, which
+is a security-shaped API decision. Follow-up in §16. What Phase 0 needs, and now
+has, is a number: read any Δ below ~2 recall points, or below ~1 point of p@1
+and MRR, as one case moving, not as a result — and re-run twice if a gate
+decision lands there.
+
+#### `[graph].enabled` was not measurable, and now is (found by the grid)
+
+The first `recall-grid.sh` run printed a `graph-off` row identical to the
+reference on every metric. `seed()` contained
+`config.graph.enabled = true`, from when the eval existed to *decide* whether
+the graph shipped (Task 7.3.6). The override beat the env var, so the harness
+was reporting its own choice as a result. Removed (`cce9b5d`); with the shipped
+default on, nothing else changed. The honest row:
+
+`graph-off`: recall −3.8, complete@5 −3.9, MRR −1.3 — and **relational recall
+57.1 → 28.6 (−28.5)**, which is the number the override was hiding, next to
+`chain`'s hole (complete@5 50.0) as Phase 3's starting position.
+
+#### The knob grid (Task 0.6)
+
+`scripts/recall-grid.sh` — one `eval` process per cell, so each row is a config
+a deployment could boot (see the script header for why this is not an in-process
+grid like `eval --grid`). Default cells, one run each:
+
+```
+cell           recall    p@1 complete    MRR │   p50/p95  abst │ Δrecall  Δp@1 Δcomp ΔMRR
+reference        83.3   50.0     80.8   63.9 │  8.1/ 9.4 100.0 │   reference
+graph-off        79.5   50.0     76.9   62.6 │  8.0/ 9.1 100.0 │     -3.8   +0.0   -3.9  -1.3
+graph-rrf        85.3   50.0     82.7   64.6 │  8.2/ 9.7 100.0 │     +2.0   +0.0   +1.9  +0.7
+graph-quiet      81.4   50.0     78.8   63.0 │  8.4/ 9.7 100.0 │     -1.9   +0.0   -2.0  -0.9
+recency-100y     83.0   69.2     78.8   76.5 │  8.3/ 9.8 100.0 │     -0.3  +19.2   -2.0 +12.6
+recency-30d      83.3   46.2     80.8   63.2 │  8.1/ 9.7 100.0 │     +0.0   -3.8   +0.0  -0.7
+```
+
+Read three things off it, all of them inputs to Phase 1–3:
+
+1. **Recency is the most expensive knob in the pipeline.** Turn it off (a century
+   half-life) and p@1 goes 50.0 → 69.2 and MRR 63.9 → 76.5 while recall gives
+   back 0.3. Every point of that 19 is age deciding the head instead of
+   relevance — the same 19 the re-recorded baseline lost, seen from the other
+   switch. G1/F2's "does recency belong in the rank score at all" question now
+   has a size on the age-aware corpus.
+2. **The graph weight tuned in Task 7.3.7 is not the best value on an aged
+   corpus.** The hop wants *more* weight now, not less: 1.0 (raw three-leg RRF)
+   is +2.0 recall / +1.9 complete@5 over the shipped 0.3, and 0.05 is −1.9. The
+   per-kind detail is entirely `relational` (+14.3 up, −14.2 down) with no other
+   kind moving. Phase 3's grid should search above 0.3, not below it.
+3. **Graph-off costs completeness, not just recall**: complete@5 −3.9, on
+   `relational` alone.
+
+#### The four new kinds (Task 0.7), frozen
+
+```
+alias       recall 80.0   p@1 20.0    complete@5 80.0
+chain       recall 75.0   p@1 100.0   complete@5 50.0
+temporal    recall 80.0   p@1 0.0     complete@5 80.0
+vocab-gap   recall 14.3   p@1 0.0     complete@5 14.3
+```
+
+* `chain` (Phase 3) — the pure `complete@5` case: p@1 is 100.0, so the right
+  thing is always first, and half the two-hop answers still arrive without their
+  bridge. V3 in one table row.
+* `temporal` (Phase 7) — finds the superseded fact four times in five and puts
+  it first **never**. The recency multiplier is the only component in the
+  pipeline with an opinion about time, and it always votes for the newer
+  memory. G4 measured.
+* `alias` (Phase 6) — recall 80.0 says the vector leg mostly papers over the
+  name mismatch; p@1 20.0 says it does not win with it. `alias: k8s` misses
+  outright: "k8s" is not in the Kubernetes decision's embedding neighbourhood.
+* `vocab-gap` (Phase 5) — six of seven answers never reach the top five. This is
+  the worst number in the file and it is the phase-5 target; §0.9's freeze is
+  what stops it being improved by generating probes from these queries.
+
+`validate()` now refuses a `vocab-gap` case whose expectation shares a content
+word with its query (content, tags and category — everywhere the keyword leg
+looks), which is what makes the 14.3 mean what it says.
+
+#### `recall audit` on a real store (Task 0.9)
+
+**Not run — blocked, and it needs the operator, not the code.** The tool is in
+place (`recall audit --config A --compare-config B --queries F [--json]`, with
+`A = B` recording a self-comparison) and its purity, refusal and JSON-leak
+tests pass in the harness, but the field half of the task needs two things only
+the operator can supply: a copy of the deployed store, and a query file with
+`expect` substrings written by the person whose life it describes (§0.9 keeps
+that file out of the repo). Both the self-comparison (must show 0 rank changes)
+and the per-query ranks stay _TBD_ until a window is agreed. Until then §4's
+"real-store `recall audit` is part of every gate" is unsatisfied by
+measurement, not by tooling.
+
+#### Deviations from the task text (all deliberate, none silent)
+
+- **0.2 — "a `SettableClock`".** Reused the existing `FixedClock`, giving it
+  `set()`. Two clocks that both pretend to be Tuesday is one too many ways to be
+  wrong.
+- **0.2 — hash-derived ages.** FNV-1a over the content bytes folded into
+  **seconds** in `[0, 365)`, not a seeded RNG: a `StdRng` is stable only while the
+  number and order of draws are, so adding one memory anywhere in the file re-ages
+  every memory after it. A collision in seconds would be an exact score tie, which
+  is the thing this task exists to remove.
+- **0.3 — "delete the duplicates".** Deleted the four *plain* copies and kept the
+  ones inside the subcategory sections: the `subcategory-filter` cases need a
+  memory that carries a subcategory, and the plain twin carried nothing the
+  survivor does not. `validate()` now refuses a content defined twice, so V1
+  cannot come back either way.
+- **0.6 — "`recency_half_life_days = 0` in `eval/config.toml`".** There is no
+  `eval/config.toml` in this repo — the eval runs on library defaults plus env —
+  and `validate()` refuses `0` as a typo guard, so the no-decay cell is `36500`.
+  `rerank.mode` is a legal but **opt-in** cell: `mode = on` loads 1.1 GB of
+  cross-encoder, the same reason `rerank-grid.sh` keeps the big models opt-in.
+- **0.5 — "`recall audit` compares two configs".** Implemented, plus two things
+  the design needed: the refusal is keyed on `embeddings.model` and
+  `data_dir`/`data_path` (read from the daemon's own `status` when one is
+  reachable), because a "different store" that differs only in its rerank knob is
+  the comparison the tool exists to make; and there is no per-side `--depth` —
+  `--depth` overrides both sides, since a depth difference is a different question
+  than the one being audited.
+- **0.5 — not in the plan.** `seed()`'s `config.graph.enabled = true` override
+  removed. See the grid section above: it made a knob the grid was built to
+  measure unmeasurable.
+- **0.7 — `informational` cases.** `validate()` refuses a `vocab-gap` case whose
+  expectation shares a content word with its query, and the parse test now refuses
+  an `informational` flag on any kind outside the four Task 0.7 owns. Phase 2.5's
+  "nothing is muted" promise survives as "nothing is muted without a named owner".
+- **0.9 — real-store run.** Blocked on the operator's store copy and query file;
+  recorded above rather than approximated with a synthetic store, which would
+  measure the harness.
+
+#### §1.3's experiment variants, re-run on the age-aware eval (DoD)
+
+`ai-specs/experiments/recall-accuracy-2026-10-17.patch` applied (uncommitted,
+reverted after the run — it is scaffolding, not code), then
+`scripts/recall-grid.sh --no-defaults` with one cell per variant. **Overall
+columns read over all 80 cases** (the grid parses the eval's own report, which
+includes the informational kinds); the per-kind Δ's are unaffected by that, and
+the control row's gated equivalent is the committed baseline.
+
+```
+cell           recall    p@1 complete    MRR │   p50/p95  abst │ Δrecall  Δp@1 Δcomp ΔMRR
+control          75.8   42.5     72.6   56.5 │  8.6/10.6 100.0 │   reference
+tiebreak         75.8   42.5     72.6   56.5 │  8.3/ 9.9 100.0 │     +0.0   +0.0   +0.0  +0.0
+slot             78.5   42.5     75.3   57.4 │  8.1/ 9.7 100.0 │     +2.7   +0.0   +2.7  +0.9
+tiebreak-slot    78.5   42.5     75.3   57.4 │  8.5/10.0 100.0 │     +2.7   +0.0   +2.7  +0.9
+bge-instruct     69.2   42.5     65.8   55.3 │ 11.3/13.7  28.6 │     -6.6   +0.0   -6.8  -1.2
+context-full     78.1   41.1     75.3   55.9 │  8.3/ 9.7  85.7 │     +2.3   -1.4   +2.7  -0.6
+triples          75.8   39.7     72.6   54.9 │ 31.4/34.8   0.0 │     +0.0   -2.8   +0.0  -1.6
+```
+
+**The relevance tie-break now does nothing at all.** `RA_EXP_FUSE=tiebreak` moved
+*no metric and no case*: run against this same control in one grid, its full
+report was identical cell for cell — same 80 cases, same hits, same top-hit
+marks — with only p95 differing, by 0.2 ms. 100.0 abstention, every Δ +0.0. §1.3's +3.8 p@1 for this variant was earned entirely on exact score ties,
+and exact ties were a product of the corpus being seeded in one millisecond.
+Give the memories real ages and the ties separate, so a rule that only fires on a
+tie has nothing to fire on. That is the plan's correction confirmed from the
+other side, and it is the strongest argument for Phase 2 being a **bounded
+relevance multiplier that acts while ages differ** rather than a tie-break:
+implementing §1.3's variant as measured would ship a knob that changes nothing in
+production.
+
+**The graph expansion slot's gain is real and structural**, as the same note
+predicted: +2.7 recall, +2.7 complete@5, +0.9 MRR, p@1 untouched (which is the
+point — the promoted neighbour takes slot #2, not #1), all of it landing on
+`relational` (+28.6, two of its seven cases) and nowhere else. Layering the
+tie-break on top adds precisely nothing. Phase 3 starts from here, and §4's
+"relational + chain complete@5 up ≥ 15 points" gate has a mechanism attached to it
+now.
+
+**The two embedding-prompt variants keep their shape and swap their verdicts.**
+The bge instruction is worse than ever — −6.6 recall, and abstention collapses
+100.0 → 28.6, because the instruction text drags unrelated memories over the
+floor — and it is the only cell that costs latency on the query itself
+(8.6 → 11.3 ms p50). §1.3's ✗ becomes a measured ✗ with a reason. Prepending
+labels and entities (`context-full`), which §1.3 recorded as a recall *loss*
+(83.0 → 81.7), now gains +2.3 recall and +2.7 complete@5 while still costing a
+negative (abstention 85.7) and 1.4 points of p@1. Where it helps is the
+informative part: **`alias` +20.0 and `vocab-gap` +14.3** — it improves exactly
+the two kinds that exist to measure vocabulary mismatch, which is what Phase 4
+and Phase 5 are being asked to do without wrecking the negatives.
+
+**Query-to-triple seeding without a threshold is still the hazard it was.**
+Abstention 100.0 → **0.0**: every negative now returns something, p@1 −2.8, and
+p95 34.8 ms because the experiment embeds every live relation per query. G2
+reproduced on the aged corpus, so Phase 3's guard (and Phase 6's constraint) stay
+mandatory, not precautionary.
 
 ### Phase 1 — reranker off, bounded deadline work
 - Field host p50/p95 before → after `mode = off`: _TBD_
