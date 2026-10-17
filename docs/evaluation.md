@@ -152,6 +152,41 @@ result moved, and the run ends with the share of queries whose top result
 changed, mean rank displacement, p50/p95 rerank latency, and p@1 / MRR before
 vs after for the queries that carried an `expect`.
 
+Two of those columns get read backwards often enough to be worth saying here.
+
+**`contributed` counts the queries whose *after* column really is reranked.**
+Not the queries the stage helped, and not even the queries it moved. A stage
+that ran on every query and agreed with fusion every single time reports
+`contributed` equal to `queries` and `top-1 changed` of zero. It exists because
+`before` and `after` being identical has two entirely different causes —
+agreement, and a stage that produced nothing at all — and a report that cannot
+tell them apart is worse than no report.
+
+**`mean_rank_displacement` does not travel between `depth`s.** A head of ten has
+twice the rows eligible to shuffle as a head of five, so 0.53 at depth 10
+against 0.13 at depth 5 is mostly arithmetic rather than impact. Within one
+depth it is a fair description of churn; across depths it is a changed
+definition.
+
+What answers the question is `top-1 changed`, with the p@1 / MRR pair beside it
+and the sample size in view: with eleven expectations, one query crossing one
+rank is a point and a half of MRR, so a difference of that shape *is* one query,
+not a trend. A real store's audit came out like this — thirteen queries,
+thirteen contributed, `top-1 changed` zero, p@1 identical before and after, MRR
++1.06 — which decomposes into one query improving from rank 3 to rank 2 and one
+regressing from 4 to 5. Read that as "the stage runs, reorders the tail, and
+does not change what the agent reads first". That is a result rather than a
+malfunction, and `mode = "off"` is what it argues for.
+
+Why the top so rarely moves is the fusion weight, not the model. At
+`[rerank].weight = 1` the leg breaks ties against a single retrieval leg and
+cannot overrule vector-and-BM25 agreement; only `2` or more lets it do that, and
+the tuning grid measured those values and lost precision with both — the
+strength that promotes a good memory also promotes a `0.006`-confident dissent.
+`eval --grid` is that sweep (`--grid-depths`, `--grid-weights`), and it runs on
+the eval corpus rather than yours: your own store is what `rerank audit`
+measures, at one configuration per run.
+
 What it will not do:
 
 * **It changes nothing.** Recall runs untracked, so access counters,

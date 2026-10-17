@@ -2360,17 +2360,23 @@ for the full record; the Phase 7 status line and its sequencing table now reflec
 
 #### Still open after this release (deliberate, not silent)
 
-1. **`mode = on` needs a shadow period on a real store** — the reason the default
-   stayed off, restated in `docs/deployment.md` and §12 Phase 7 above.
-2. **Production-parity on `gemini-embedding-2` is still unrun.** Every 429 canary
-   this session (Phase 7 and Phase 8) was free-tier quota, e.g.
-   `Gemini returned HTTP 429 … You exceeded your current quota`. It does not gate
-   this release, because the default path does not reach the reranker; it gates the
-   flip in (1), since a reranker tuned on bge-small embeddings has not been shown to
-   behave the same under 3072-dim Gemini embeddings.
-3. **`docs/CHANGELOG.md` has no `v0.2.2`/`v0.3.0`/`v0.3.1` entries** — they were
-   skipped when those shipped. Backfilling them is a separate, honest chore; this
-   release's entry is accurate, which is the most that can be claimed here.
+1. **`mode = on` needs a shadow period on a real store** — the reason the
+   default stayed off, restated in `docs/deployment.md` and §12 Phase 7 above.
+   The first audit against a real store is recorded below ("The first audit
+   against a real store"): 13 hand-written queries, `top-1 changed` zero at
+   both depth 5 and depth 10, p@1 unchanged. Evidence pointing the same way as
+   this clause — and still not the live traffic the gate asks for, so it stays
+   unchecked.
+2. **Production-parity on `gemini-embedding-2` is still unrun.** Every 429
+   canary this session (Phase 7 and Phase 8) was free-tier quota, e.g.
+   `Gemini returned HTTP 429 … You exceeded your current quota`. It does not
+   gate this release, because the default path does not reach the reranker; it
+   gates the flip in (1), since a reranker tuned on bge-small embeddings has
+   not been shown to behave the same under 3072-dim Gemini embeddings.
+3. **`docs/CHANGELOG.md` has no `v0.2.2`/`v0.3.0`/`v0.3.1` entries** — they
+   were skipped when those shipped. Backfilling them is a separate, honest
+   chore; this release's entry is accurate, which is the most that can be
+   claimed here.
 
 #### Found in the field, after `v0.4.0` (fixed on `fix/config-ignored-keys`)
 
@@ -2684,6 +2690,63 @@ at `0.0023` while putting the served #3 second at `0.9905` — a damped fourth l
 absorbing disagreement rather than following it, which is what fusion is for.
 Whether the blend helps in aggregate is still the open shadow-period question,
 and `rerank audit` against the real store is the instrument for it.
+
+#### The first audit against a real store: the stage runs, and does not earn its place
+
+Run on the deployment — 13 queries, 11 carrying an `expect`, `bge-small-en-v1.5`
+with `bge-reranker-base`, `rrf(weight 1)`, replayed at `depth = 5` and again at
+`depth = 10`:
+
+| | depth 5 | depth 10 |
+|---|---|---|
+| queries contributed | 13 / 13 | 13 / 13 |
+| `top-1 changed` | **0 (0.0 %)** | **0 (0.0 %)** |
+| p@1 before → after | 72.73 → 72.73 | 72.73 → 72.73 |
+| MRR before → after | 82.58 → 83.64 (+1.06) | 82.58 → 84.09 (+1.52) |
+| mean rank displacement | 0.13 | 0.53 |
+| rerank latency | p50 398 ms · p95 568 ms | p50 1161 ms · p95 1297 ms |
+
+p@1 identical in both configurations, and no query's top result moved at all:
+applied to a real store, the ship gate's own criterion says this stage never
+changed what a client reads first. The MRR gain is genuine, small, and fully
+attributable — rebuilding it from the eleven expected ranks reproduces the
+reported figures exactly (8 + ⅓ + ½ + ¼ = 9.083 before; 9.200 after at depth 5,
+9.250 at depth 10): **one** query improved from rank 3 to rank 2, and at depth 5
+one regressed from 4 to 5. One query is worth 1.5 points of MRR here, so a delta
+of that shape *is* a query rather than a trend, and n = 11 could not have
+resolved the eval's +5.8 precision@1 either way.
+
+Latency settled the depth question on its own. At depth 10 the median leg is
+1161 ms against the deployment's 1200 ms bound — and the audit measures with no
+deadline, so a live daemon at that depth would have thrown out roughly half its
+stages — while depth 5's p95 of 568 ms fits with room to spare. Depth 10 costs
+about a second per recall to buy the disappearance of one regression. Note too
+that the audit lifts the relevance floor, so its heads are wider than the 4–5
+candidates live calls judged: the stage has *less* reach in production than this
+table shows, not more.
+
+The most instructive single row is the first query. The reranker ranked the
+expected memory first on score — 0.9934 against 0.9575 for the one that stayed
+on top — and the blended list still served the other at rank 1, moving the
+expected memory only to 2. That is `weight = 1` doing what it documents:
+breaking ties against a single retrieval leg, never overruling vector-and-BM25
+agreement. Overruling is what `2` and `4` were measured for in Phase 7, and both
+lost precision, so the one query this stage could have won is not available
+without a measured loss somewhere else. Which means `top-1 changed = 0` is as
+much a statement about fusion as about the cross-encoder.
+
+What that does and does not settle. It is the strongest evidence so far that the
+default belongs at `off`, and this host goes there on the strength of it: ~400
+ms a recall back, in exchange for a stage that never once reached position one.
+It is **not** the Phase 8 real-traffic shadow period, and that gate stays open —
+questions one user wrote about their own projects are not traffic, and eleven
+expectations are not a sample. If the decision is ever reopened the instrument
+is `mode = "shadow"` counted from live `rerank_shadow` lines, not another round
+of invented questions. The counter worth misunderstanding in this report is
+`contributed: 13`, which counts queries whose *after* column really was reranked
+— not queries helped, not even queries moved; `docs/evaluation.md` now says so,
+because 13 of 13 next to a zero in `top-1 changed` reads like a success until
+you check.
 
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
