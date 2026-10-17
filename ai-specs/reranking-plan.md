@@ -2601,6 +2601,60 @@ Worth stating in the notes, because a release with no server change invites the
 wrong reaction: anyone running `v0.4.2` gains nothing from updating the
 container, and the notes say so in the first line rather than three sections down.
 
+#### Found in the field, part three: the rate moved, and the sizing advice could not be followed
+
+Deployed to the same host, and verified over the wire rather than by trusting the
+deploy. `initialize` reports `serverInfo.version` **`0.4.2`** — the operator
+believes `0.4.3` went out, which is worth naming even though nothing server-side
+differs between the two, so the verification stands. The embedder is now
+`bge-small-en-v1.5`, and memories saved in August come back under it, so the
+store was re-embedded rather than recreated: the pin check passed because the
+reindex ran. `memory_recall` over MCP lists five tools and returns the
+programming-preferences memories at relevance `0.33`–`0.53` against the `0.25`
+floor, and the REST response carries the `rerank` object as designed. The recall
+path is healthy.
+
+The second stage is not, and that is the interesting half. `[rerank].timeout_ms`
+is now `800` — the number this plan told that host to use — and a depth-10 query
+still comes back
+
+```json
+{"state": "skipped", "reason": "deadline", "candidates": 10, "took_ms": 800}
+```
+
+while a query whose fused list happened to be short came back
+
+```json
+{"state": "applied", "judged": 4, "took_ms": 477}
+```
+
+which is the only honest rate available from outside: **~120 ms per candidate
+pair**, against the ~34 ms measured on that same host in part two. So `800` was
+right for the machine as measured then and is under half of what the machine now
+costs: the stage contributes on short lists and never on the ones that matter,
+while every recall pays the full 800 ms for the privilege. *Why* the rate moved
+is not established from here — the reranker is unchanged, the embedder is not,
+and whether the new embedder competes with the reranker for the same cores is a
+question about that box, for which `rerank audit` (deadline-free, uncontended if
+run while the daemon is idle) is the right instrument.
+
+What was actually wrong was the documentation. Both `configuration.md` and
+`deployment.md` said, in effect, *double the `took_ms` you measure* — and the
+head is scored in **one** call (`rerank_scores` races a single `Reranker::score`
+against `recv_timeout`), so a skipped leg's `took_ms` *is* the bound the reader
+just set. Following that instruction on precisely the machine it was written for
+yields a larger bound that is also exceeded, and an operator who tries it twice
+reasonably concludes the feature is broken. Corrected to a procedure with an
+observable number in it: shrink `depth` or stretch `timeout_ms` until something
+reports `applied`, read `took_ms / judged` from that, multiply by `depth`,
+double. Both pages now also say an always-skipping stage is **slower** than
+`mode = "off"` rather than a neutral misconfiguration — the wait is real and
+buys the pre-rerank order — with this host as the example.
+
+No code change: the trace is accurate, `skipped` cannot carry a partial count
+because a batched call has no partial result to count, and what was missing was
+procedure rather than telemetry.
+
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
       used); fixed in Phase 0 so it does. Details in the Phase 0 log above.

@@ -472,12 +472,21 @@ curl -s $BASE/v1/memories/search \
 ```
 
 If instead it reads `{"state": "skipped", "reason": "deadline", …}`, the stage is
-loaded, judging, and being thrown away: raise `[rerank].timeout_ms` above the
-`took_ms` you measure (2× is a sensible margin) or lower `[rerank].depth`. The
-journal says the same thing as a `WARN` on each affected recall, so
-`journalctl -u recuerdos-ai | grep 'rerank leg failed'` is the other way to see
-it — and note that `rerank audit` will *not* show it, because the audit measures
-with no deadline on purpose. Sizing the deadline against your own machine:
+loaded, judging, and being thrown away — and that is not a neutral
+misconfiguration, because the wait is real: every recall pays the full deadline
+to serve the order the stage never got to change, so a `mode = "on"` that always
+skips is *slower* than `mode = "off"`.
+
+Do not fix it by doubling the `took_ms` in that line. The head is scored in
+one call, so a skipped leg reports the bound you already set, not what the
+work costs; the number worth sizing against only appears once a leg reports
+`applied`. Lower `[rerank].depth` or raise `timeout_ms` until one query comes
+back `applied`, take `took_ms / judged` from *that*, and set the bound at
+twice `depth ×` that rate. The journal says the same thing as a `WARN` on
+each affected recall, so `journalctl -u recuerdos-ai | grep 'rerank leg
+failed'` is the other way to see it — and note that `rerank audit` will *not*
+show it, because the audit measures with no deadline on purpose. Sizing the
+deadline against your own machine:
 [configuration.md](configuration.md#sizing-timeout_ms-for-your-machine).
 
 ---

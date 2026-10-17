@@ -375,6 +375,7 @@ The cost is per candidate pair, so what matters is your machine's number:
 |---|---|---|---|
 | the tuning box (nothing else running) | ~7 ms | ~71 ms | comfortable |
 | a home server also serving a 9B LLM and a local embedding server | ~34 ms | ~350 ms | **dropped every time** |
+| that same server, after its embedding model was changed | ~120 ms | ~1.2 s | **dropped — and at 800 ms too** |
 
 The second row is a real deployment, not a worst case invented for a warning:
 its `mode = "on"` never contributed once, because every query worth asking had
@@ -392,14 +393,35 @@ curl -s $BASE/v1/memories/search \
 {"state": "skipped", "reason": "deadline", "candidates": 10, "took_ms": 251}
 ```
 
-Then size by measuring and doubling: read `rerank.took_ms` across a handful of
-your own queries at your real `depth`, and set `timeout_ms` near **2×** that so
-a busy moment does not quietly delete the stage. For the machine above that is
-`800`, which turns a ~260 ms recall into ~360 ms — the honest price of
-reranking on a box that is also doing something else. If that price is too
-high, `depth = 5` (~180 ms there) is the alternative rather than a free lunch:
-the +5.8 precision@1 was measured at depth 10, so shortening the head trades
-away part of the gain.
+Then size by measuring — which comes with a catch that bites on exactly the
+slow machines this section exists for. The stage scores the whole head in
+**one** call, so the deadline is all-or-nothing and there is no partial result
+to take a rate from: a leg reported `skipped`/`deadline` carries a `took_ms`
+**equal to the bound you set**, not the cost of the work it did not finish.
+Doubling the number in that line therefore produces a larger bound that is
+also exceeded, at twice the cost. Read the rate where the stage completes:
+
+1. Give it a head it can finish — set `depth = 3`, or raise `timeout_ms` well
+   past what you suspect. One of the two has to move.
+2. Run one query and read the leg: `{"state": "applied", "judged": 3,
+   "took_ms": 358}` is ~120 ms a pair.
+3. Multiply that by the `depth` you actually want and double it. A busy moment
+   should not be able to quietly delete the stage.
+
+For the ~34 ms machine above that lands on `800`, which turns a ~260 ms recall
+into ~360 ms — the honest price of reranking on a box that is also doing
+something else. If that price is too high, `depth = 5` (~180 ms there) is the
+alternative rather than a free lunch: the +5.8 precision@1 was measured at depth
+10, so shortening the head trades away part of the gain.
+
+Two things about that number worth saying out loud. It is a property of the
+machine, so re-measure whenever the machine changes: the third row above is the
+second row's host measured again after an unrelated model change, and the `800`
+this page had recommended for it was dropping every query once more, with a
+`took_ms` that could only ever report `800`. And while the stage misses its
+deadline on every recall, you are paying the deadline for nothing — ~800 ms of
+waiting to serve the fused order anyway. In that state `mode = "off"` is not
+merely the neutral setting, it is the faster one.
 
 `timeout_ms = 0` is rejected at startup, not treated as "no deadline": a
 deadline-free stage on a contended machine is a recall with no bound, and the
