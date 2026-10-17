@@ -350,6 +350,14 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
         embedder,
         memories.embedder.dimensions()
     );
+    // And which legs are in the pipeline being measured: with the graph off
+    // there is no hop and no seeded edge, so the `relational` numbers describe
+    // a two-leg recall. A row that moved them had better say so out loud.
+    if memories.graph.is_none() {
+        println!(
+            "graph: off (`[graph].enabled = false` — relational cases read the two-leg pipeline)\n"
+        );
+    }
 
     // One untimed recall before timing any: the first call pays
     // connection setup (remote providers), index open and cache misses,
@@ -590,10 +598,10 @@ fn seeded_at(age_days: f32) -> DateTime<Utc> {
 /// the database and the tantivy indexes out from under the run.
 ///
 /// The instance is assembled from the caller's `config` — embedder,
-/// relevance floor, ranker tuning and all — with exactly two overrides:
-/// the storage path, so the run can never touch a real store, and the
-/// graph (see below). Shared with the Phase 7 grid, which measures every
-/// cell against one seeded corpus rather than reseeding per cell.
+/// relevance floor, ranker tuning, graph on or off, and all — with exactly
+/// one override: the storage path, so the run can never touch a real store.
+/// Shared with the Phase 7 grid, which measures every cell against one
+/// seeded corpus rather than reseeding per cell.
 ///
 /// **Time.** The instance is wired to a [`FixedClock`] rather than the wall
 /// clock, and that clock is left at [`eval_now`] when this returns: every
@@ -610,12 +618,13 @@ pub(crate) fn seed(
 
     let mut config = config.clone();
     config.storage.path = scratch.path().to_string_lossy().to_string();
-    // The eval measures the graph leg's contribution, so it runs with the
-    // graph on regardless of the shipped default — that is the whole point
-    // of the `relational` cases and the entities/relations the corpus
-    // carries. Whether `[graph].enabled` *ships* on is a separate decision,
-    // made from these numbers (Task 7.3.6), not read back from here.
-    config.graph.enabled = true;
+    // The graph is whatever the caller's config says — the harness does not
+    // override it. Since Task 7.3.6 the shipped default is on, so the
+    // `relational` cases and the edges the corpus carries measure the graph
+    // leg by default; and because the switch is not pinned here,
+    // `scripts/recall-grid.sh` can measure `[graph].enabled` as the knob it
+    // is (recall-quality-plan.md Task 0.6). A harness that decided a knob it
+    // is being asked to measure would report its own override as a result.
 
     let database = Arc::new(SqliteDatabase::open(
         &scratch.path().join(crate::bootstrap::wiring::DATABASE_FILE),
@@ -638,12 +647,19 @@ pub(crate) fn seed(
             .execute("eval", vec![Scope::Read, Scope::Write], "eval")?;
     let context = identity.key_authenticator.execute(&issued.token.render())?;
 
-    // The graph is present because we turned it on above; a missing one
-    // here would be a wiring bug, not a config choice, so unwrap loudly.
-    let graph = memories
-        .graph
-        .as_ref()
-        .expect("the eval enables the graph, so Memories must have built one");
+    // With the graph on, a missing handle would be a wiring bug rather than a
+    // config choice, and stopping loudly is the cheap fix: a corpus seeded
+    // without edges scores every `relational` case as a silent zero, which is
+    // the worst kind of green. With it off, ingest records no edges — exactly
+    // what a deployment with `[graph].enabled = false` does — and the
+    // relational cases measure the two-leg pipeline, which is the point of
+    // measuring that knob at all.
+    let graph = match (config.graph.enabled, memories.graph.as_ref()) {
+        (true, graph) => {
+            Some(graph.expect("the config has the graph on, so Memories must have built one"))
+        }
+        (false, _) => None,
+    };
 
     for seed in &set.memories {
         // Time-travel, then save: `created_at` comes off this clock, and the
@@ -693,13 +709,18 @@ pub(crate) fn seed(
             })
             .collect();
 
-        graph.record(
-            &context,
-            stored.id(),
-            &entities,
-            &relations,
-            stored.created_at(),
-        )?;
+        // No graph configured, no edges recorded: exactly what a deployment
+        // with `[graph].enabled = false` stores, and the hole the
+        // `relational` cases then measure.
+        if let Some(graph) = graph {
+            graph.record(
+                &context,
+                stored.id(),
+                &entities,
+                &relations,
+                stored.created_at(),
+            )?;
+        }
     }
 
     // Back to the instant every score is measured at. Leaving it on the last
@@ -2061,6 +2082,84 @@ mod tests {
             .execute(&context, test_new_memory("written after seeding"), "test")
             .unwrap();
         assert_eq!(after.created_at(), eval_now());
+    }
+
+    /// Task 0.6, and the reason the harness no longer forces the graph on:
+    /// `[graph].enabled` is a knob `scripts/recall-grid.sh` measures, so
+    /// pinning it here would have the harness report its own override as a
+    /// result. On, the corpus's relations become edges a hop can walk; off,
+    /// seeding records none — exactly what a deployment with the graph off
+    /// stores — and the memories are still there for the two legs that remain.
+    #[test]
+    #[ignore = "requires the ONNX model; run with --ignored"]
+    fn a_graph_the_config_disables_seeds_no_edges() {
+        let cache = std::env::var("RECUERDOS_AI_MODEL_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/models"));
+        let config = |enabled| AppConfig {
+            embeddings: crate::bootstrap::config::EmbeddingsConfig {
+                cache_dir: cache.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            graph: crate::bootstrap::config::GraphConfig {
+                enabled,
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let set = EvalSet {
+            memories: vec![
+                SeedMemory {
+                    entities: ["Kinesis", "Kafka"]
+                        .iter()
+                        .map(|name| SeedEntity {
+                            name: name.to_string(),
+                            kind: String::new(),
+                        })
+                        .collect(),
+                    relations: vec![SeedRelation {
+                        subject: "Kinesis".to_string(),
+                        predicate: "replaced".to_string(),
+                        object: "Kafka".to_string(),
+                    }],
+                    ..test_memory("The analytics pipeline runs on Kinesis", "fact.project")
+                },
+                test_memory("Kafka is the broker we retired", "fact.project"),
+            ],
+            cases: vec![],
+        };
+
+        let (on, on_context, _scratch) = seed(&set, &config(true)).expect("seed with the graph on");
+        let graph = on
+            .graph
+            .as_ref()
+            .expect("the config has the graph on, so seed must have built one");
+        let seeds = graph
+            .seeds(&on_context, &[EntityKey::new("Kinesis")])
+            .expect("seed lookup");
+        assert!(
+            !seeds.is_empty(),
+            "a declared entity must be there to hop from"
+        );
+        assert!(
+            !graph
+                .neighbours(&on_context, &seeds, 1, None, 10)
+                .expect("hop")
+                .is_empty(),
+            "the corpus's relation must have been recorded as an edge"
+        );
+
+        let (off, off_context, _scratch) =
+            seed(&set, &config(false)).expect("seed with the graph off");
+        assert!(
+            off.graph.is_none(),
+            "the harness must not wire a graph the config turned off"
+        );
+        assert_eq!(
+            off.repository.list(&off_context, true).unwrap().len(),
+            2,
+            "turning the graph off must not cost the corpus its memories"
+        );
     }
 
     /// A [`NewMemory`] for the ignored seeding test, matching
