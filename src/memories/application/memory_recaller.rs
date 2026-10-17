@@ -557,6 +557,11 @@ impl MemoryRecaller {
                     error = %failure.error,
                     candidates = depth,
                     rerank_ms = took_ms,
+                    // `reason` on the wire is one value for both kinds of
+                    // "it did not make it"; here they stay separate, because
+                    // "raise timeout_ms / lower depth" is bad advice for a
+                    // host that never had a session to begin with.
+                    busy = failure.busy,
                     "rerank leg failed; falling back to the pre-rerank order"
                 );
                 return (
@@ -598,8 +603,14 @@ impl MemoryRecaller {
     /// [`rerank_timeout`](Self::rerank_timeout). With a deadline set the
     /// scoring runs on a detached thread, because the contract is
     /// synchronous and a timed-out call must not make the request wait
-    /// for inference it has given up on; the runaway call is bounded
-    /// server-side by Phase 5's concurrency cap, not here.
+    /// for inference it has given up on.
+    ///
+    /// That thread waits for a session under the same deadline
+    /// ([`Reranker::score_before`]), so a saturated host stops spending work
+    /// on requests it has already answered: a thread that cannot get a
+    /// session returns busy rather than queueing behind the head in flight.
+    /// Inference already under way is still not bounded here — ONNX cannot be
+    /// pre-empted — which is what chunking the head buys (Phase 1.3).
     fn rerank_scores(
         &self,
         reranker: &Arc<dyn Reranker>,
@@ -626,6 +637,13 @@ impl MemoryRecaller {
             .iter()
             .map(|scored| (scored.memory.id(), scored.memory.content().to_string()))
             .collect();
+        // One instant for both halves of the wait: the thread stops waiting
+        // for a session at it (`score_before`), and this side stops waiting
+        // for the answer at it (`recv_timeout`). Handing the thread a
+        // duration instead would let the two drift apart by the time it takes
+        // to spawn, which is exactly how a stage ends up scoring a head whose
+        // request was answered a moment ago.
+        let deadline = std::time::Instant::now() + self.rerank_timeout;
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let candidates: Vec<RerankCandidate> = texts
@@ -633,15 +651,16 @@ impl MemoryRecaller {
                 .map(|(id, text)| RerankCandidate { id: *id, text })
                 .collect();
             // The receiver may have walked away (timeout): drop silently.
-            let _ = sender.send(reranker.score(&query, &candidates));
+            let _ = sender.send(reranker.score_before(&query, &candidates, deadline));
         });
 
         match receiver.recv_timeout(self.rerank_timeout) {
             Ok(scores) => scores
                 .and_then(|scores| align_rerank(head, scores))
-                .map_err(RerankFailure::model),
+                .map_err(RerankFailure::from_error),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RerankFailure {
                 skip: RerankSkip::Deadline,
+                busy: false,
                 error: RaError::Internal(format!(
                     "rerank exceeded its {} ms deadline",
                     self.rerank_timeout.as_millis()
@@ -706,6 +725,11 @@ impl MemoryRecaller {
 /// reports, and the error worth putting in the log beside it.
 struct RerankFailure {
     skip: RerankSkip,
+    /// Whether the stage was refused a session rather than running out of
+    /// inference time. Both are `deadline` on the wire — see
+    /// [`RerankFailure::busy`] — but they are not the same fault line, and
+    /// the log and the audit counters say which.
+    busy: bool,
     error: RaError,
 }
 
@@ -715,7 +739,32 @@ impl RerankFailure {
     fn model(error: RaError) -> Self {
         Self {
             skip: RerankSkip::Model,
+            busy: false,
             error,
+        }
+    }
+
+    /// No session was free in time, so nothing was judged.
+    ///
+    /// The client keeps hearing `reason: "deadline"`, which is what that
+    /// value has always meant — "the stage did not make it" — and adding a
+    /// third one would break every SDK already shipped (invariant 3.5). The
+    /// distinction lives where the operator reads it: the warn line and the
+    /// audit counters.
+    fn busy(error: RaError) -> Self {
+        Self {
+            skip: RerankSkip::Deadline,
+            busy: true,
+            error,
+        }
+    }
+
+    /// Sorts a model error into the two kinds of "it did not contribute":
+    /// the adapter saying it never got a session, and everything else.
+    fn from_error(error: RaError) -> Self {
+        match error {
+            RaError::RerankBusy(_) => Self::busy(error),
+            _ => Self::model(error),
         }
     }
 }
@@ -816,7 +865,9 @@ fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::U
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memories::application::test_doubles::{Fixture, fixed_clock, new_memory, now};
+    use crate::memories::application::test_doubles::{
+        BusyReranker, Fixture, fixed_clock, new_memory, now,
+    };
     use crate::memories::domain::category::Category;
     use crate::memories::domain::entity_graph::{EntityGraph, Relation};
     use crate::memories::domain::memory::Entity;
@@ -2146,6 +2197,121 @@ mod tests {
             ),
             "a missed deadline should be reported as such, got {:?}",
             traced.rerank
+        );
+    }
+
+    /// Phase 1.2, without a race: the session is already held, so the only
+    /// thing this recall can do is miss its budget while queueing.
+    #[test]
+    fn a_stage_that_cannot_get_a_session_is_skipped_as_a_deadline() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let busy = Arc::new(BusyReranker::new(Duration::from_millis(5)));
+        let held = busy.hold_session();
+
+        let report = replace_recaller(
+            &fixture,
+            Arc::clone(&busy) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_millis(20),
+        )
+        .execute_traced(&fixture.alex, &query("pnpm"))
+        .unwrap();
+        drop(held);
+
+        // The wire says what it has always said for "the stage did not make
+        // it": no third reason value, because the shipped SDKs reject one.
+        assert!(
+            matches!(
+                report.rerank,
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
+                    ..
+                })
+            ),
+            "a busy stage should be `skipped`/`deadline`, got {:?}",
+            report.rerank
+        );
+        assert_eq!(busy.refusals(), 1, "the stage should have said busy");
+        assert_eq!(busy.judged(), 0, "a refused stage must not score anything");
+    }
+
+    /// Phase 1.2's concurrency case: with one session and everything slower
+    /// than the budget, the second recall is refused rather than turned into
+    /// a queue that then does work nobody is waiting for.
+    #[test]
+    fn a_second_recall_does_not_queue_behind_a_busy_session() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let busy = Arc::new(BusyReranker::new(Duration::from_millis(150)));
+        let recaller = || {
+            replace_recaller(
+                &fixture,
+                Arc::clone(&busy) as Arc<dyn Reranker>,
+                RerankMode::On,
+                30,
+                Duration::from_millis(20),
+            )
+        };
+        let first_recaller = recaller();
+        let second_recaller = recaller();
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| first_recaller.execute_traced(&fixture.alex, &question));
+            // Long enough for the first caller to be *inside* the session.
+            std::thread::sleep(Duration::from_millis(20));
+
+            let started = std::time::Instant::now();
+            let second = second_recaller
+                .execute_traced(&fixture.alex, &question)
+                .unwrap();
+            let waited = started.elapsed();
+
+            assert!(
+                matches!(
+                    second.rerank,
+                    Some(RerankTrace::Skipped {
+                        reason: RerankSkip::Deadline,
+                        ..
+                    })
+                ),
+                "a busy stage is `deadline` to the client, got {:?}",
+                second.rerank
+            );
+            assert!(
+                waited < Duration::from_millis(120),
+                "the second recall waited {waited:?} for a session instead of \
+                 returning at its 20 ms budget"
+            );
+            assert_eq!(
+                busy.refusals(),
+                1,
+                "the second recall should have been refused, having scored nothing"
+            );
+            assert_eq!(
+                busy.judged(),
+                0,
+                "the refused recall scored a head before its deadline"
+            );
+            first.join().unwrap().unwrap();
+        });
+
+        // What the refusal bought, read after the first head finishes: exactly
+        // one head was ever judged. Before the timed acquire, the abandoned
+        // caller queued on the session and judged a request that had already
+        // been answered — the accumulating work reranking-plan §12 (part
+        // three) measured as 34 → 120 ms per pair on a busy host.
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(
+            busy.judged(),
+            1,
+            "a recall that was refused still queued and scored a head"
         );
     }
 

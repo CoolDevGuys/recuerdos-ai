@@ -37,6 +37,25 @@ impl IntoResponse for RaError {
             RaError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             RaError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             RaError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            RaError::RerankBusy(waited) => {
+                // Unreachable on the running daemon by construction: the
+                // recaller catches a busy stage and serves the pre-rerank
+                // order (invariant I-2), so this never rides out of a
+                // handler. It maps like `Internal` — same status, same
+                // opaque body — so "unreachable" is a fact about the recall
+                // path and not about this arm forgetting to answer. The
+                // detail is a wait duration rather than a secret, but a
+                // client that saw it could learn the host's queue depth.
+                tracing::warn!(
+                    waited_ms = waited.as_millis(),
+                    "rerank busy reached the transport"
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal",
+                    "internal error".to_string(),
+                )
+            }
             RaError::Internal(detail) => {
                 // Internal messages carry file paths, SQL and driver text.
                 // They belong in the log, not in a response body.
@@ -124,6 +143,22 @@ mod tests {
             "database error: no such table /home/alex/.recuerdos-ai/data.db".into(),
         ))
         .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal");
+        assert_eq!(body["error"]["message"], "internal error");
+    }
+
+    #[tokio::test]
+    async fn a_busy_rerank_reaching_the_transport_looks_like_any_internal_error() {
+        // The recall path takes a busy stage out of the picture long before a
+        // handler sees it (invariant I-2), so the promise worth pinning here
+        // is that this variant adds nothing a client can observe: the same
+        // status and code as any other internal failure, and no queue depth
+        // in the body. No existing variant's mapping moved either, which is
+        // what `maps_each_error_to_its_status_and_code` covers.
+        let (status, body) =
+            parts(RaError::RerankBusy(std::time::Duration::from_millis(250))).await;
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"]["code"], "internal");

@@ -50,8 +50,10 @@ use fastembed::{
     RerankInitOptions, RerankInitOptionsUserDefined, RerankResult, RerankerModel, TextRerank,
     TokenizerFiles, UserDefinedRerankingModel,
 };
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// The `(query, memory)` sequence cap handed to the tokenizer.
 ///
@@ -126,18 +128,57 @@ impl Reranker for FastembedReranker {
             return Ok(Vec::new());
         }
 
+        let ranked = self
+            .pool
+            .with(|model| self.judge(model, query, candidates))?;
+        align_scores(ranked, candidates.len())
+    }
+
+    fn score_before(
+        &self,
+        query: &str,
+        candidates: &[RerankCandidate<'_>],
+        deadline: Instant,
+    ) -> Result<Vec<f32>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // The wait is bounded; the inference once a session is had is not —
+        // ONNX cannot be pre-empted mid-batch, and cutting a batch loose
+        // would leave the session in an unknown state. What bounds *that* is
+        // the head being scored in chunks (`preferred_chunk`), so the work
+        // abandoned after a deadline is one chunk rather than the whole head.
+        let ranked = self
+            .pool
+            .until(deadline, |model| self.judge(model, query, candidates))
+            .map_err(|waited| match waited {
+                Waited::Busy(budget) => RaError::RerankBusy(budget),
+                Waited::Failed(error) => error,
+            })?;
+        align_scores(ranked, candidates.len())
+    }
+}
+
+impl FastembedReranker {
+    /// One forward pass over the candidates on a session this caller holds.
+    ///
+    /// Split out so `score` and `score_before` cannot drift apart: the two
+    /// differ only in how the session was waited for.
+    fn judge(
+        &self,
+        model: &mut TextRerank,
+        query: &str,
+        candidates: &[RerankCandidate<'_>],
+    ) -> Result<Vec<RerankResult>> {
         let documents: Vec<&str> = candidates.iter().map(|c| c.text).collect();
         let batch_size = self.batch_size;
         // `fastembed` returns the results *sorted* best-first with an
         // `index` back into `documents`; the domain contract is scores
         // aligned with `candidates`, so undo the sort here.
-        let ranked = self.pool.with(|model| {
-            model
-                .rerank(query, documents.as_slice(), false, Some(batch_size))
-                .map_err(|e| RaError::Internal(format!("failed to rerank candidates: {e}")))
-        })?;
-
-        align_scores(ranked, candidates.len())
+        model
+            .rerank(query, documents.as_slice(), false, Some(batch_size))
+            .map_err(|e| RaError::Internal(format!("failed to rerank candidates: {e}")))
     }
 }
 
@@ -179,42 +220,192 @@ fn squash(logit: f32) -> f32 {
     1.0 / (1.0 + (-logit).exp())
 }
 
-/// The loaded sessions, one mutex each.
+/// The loaded sessions, handed out one at a time by a token.
 ///
-/// A small slice over mutexes with the two properties the adapter needs:
-/// never run more than `len` scores at once (that is `len` mutexes by
-/// construction), and never busy-wait for one to free — if every session
-/// is busy, the caller queues on the first, so the waiter costs a
-/// park, not a spin. `max_concurrency = 1` therefore degrades to exactly
-/// the single-model-in-front-of-a-mutex behaviour the embedders use, and
-/// two concurrent scores serialise (pinned by a test with a counting
-/// stand-in, so the guarantee does not depend on an ONNX model).
+/// A pool with the two properties the adapter needs: never run more than
+/// `len` scores at once, and never busy-wait for one to free — a waiter
+/// parks on the condition variable, it does not spin. `max_concurrency = 1`
+/// therefore degrades to exactly the single-model-in-front-of-a-mutex
+/// behaviour the embedders use, and two concurrent scores serialise (pinned
+/// by a test with a counting stand-in, so the guarantee does not depend on
+/// an ONNX model).
+///
+/// # Why a token, and not a mutex per session
+///
+/// A `Mutex<T>` per session can say "wait until this session is free" but
+/// not "wait until *some* session is free, and stop waiting at my deadline":
+/// the old pool tried each session with `try_lock` and then blocked on
+/// `instances[0]`, which is an unbounded wait — so a saturated host piled up
+/// detached scoring threads, each of which went on judging a head whose
+/// request had already been answered, and made the *next* recall queue behind
+/// that abandoned work. Holding a token is what makes the wait finite and the
+/// session identity irrelevant: `acquire_until` hands back whichever session
+/// frees first, and giving it up is a `Drop`.
+///
+/// The plan sketched this as a token *channel* with `recv_timeout`. Same
+/// shape, different primitive: `mpsc::Receiver` is not `Sync`, so the only
+/// way to share one is behind a mutex — and a thread parked in
+/// `recv_timeout` holds that mutex, so the second waiter's deadline would be
+/// gated by the first one's, which is the bug being fixed. A `VecDeque` of
+/// free indices under a mutex with a `Condvar` waits per caller instead, and
+/// still costs no new dependency.
 struct InstancePool<T> {
-    instances: Vec<Mutex<T>>,
+    /// Sessions, each touched only by whoever holds its index.
+    sessions: Vec<Mutex<T>>,
+    /// The indices nobody holds. Empty means every session is judging.
+    free: Mutex<VecDeque<usize>>,
+    /// Notified when an index comes back.
+    ready: Condvar,
+}
+
+/// Holds one session until it is dropped, which returns its token.
+///
+/// The `Drop` is what makes a panic in scoring, or a caller that walks away
+/// at its deadline, unable to leak a session: the token goes back either
+/// way, so the pool cannot drain to zero and stop serving.
+struct Session<'a, T> {
+    pool: &'a InstancePool<T>,
+    index: Option<usize>,
+}
+
+impl<'a, T> Session<'a, T> {
+    /// Claims the next free index. The pool lock goes down with this frame;
+    /// the session stays held until `Drop`, which is the whole point of the
+    /// token.
+    fn taken(
+        pool: &'a InstancePool<T>,
+        mut free: std::sync::MutexGuard<'_, VecDeque<usize>>,
+    ) -> Self {
+        let index = free
+            .pop_front()
+            .expect("taken is only called with a non-empty free list");
+        Self {
+            pool,
+            index: Some(index),
+        }
+    }
+
+    /// Runs `f` on the session this token stands for. A session whose
+    /// inference panicked once stays poisoned and keeps reporting that: the
+    /// leg degrades on every recall, which the `rerank` trace shows the
+    /// operator, rather than the pool quietly shrinking to zero concurrency.
+    fn with<R>(&mut self, f: impl FnOnce(&mut T) -> Result<R>) -> Result<R> {
+        let index = self
+            .index
+            .expect("a live session always holds its index until drop");
+        let mut guard = self.pool.sessions[index]
+            .lock()
+            .map_err(|_| RaError::Internal("rerank model session mutex poisoned".to_string()))?;
+        f(&mut guard)
+    }
+}
+
+impl<T> Drop for Session<'_, T> {
+    fn drop(&mut self) {
+        let Some(index) = self.index.take() else {
+            return;
+        };
+        match self.pool.free.lock() {
+            Ok(mut free) => {
+                free.push_back(index);
+                self.pool.ready.notify_one();
+            }
+            // Poisoned means a thread died holding the free list, which
+            // cannot have left it corrupt (it is a `VecDeque` of integers
+            // pushed under this same lock), so the token goes back and the
+            // queue is read again. Losing the token instead would be a
+            // permanent capacity cut for a dead thread's panic.
+            Err(poisoned) => {
+                poisoned.into_inner().push_back(index);
+                self.pool.ready.notify_one();
+            }
+        }
+    }
 }
 
 impl<T> InstancePool<T> {
     fn new(instances: Vec<T>) -> Self {
+        let sessions: Vec<Mutex<T>> = instances.into_iter().map(Mutex::new).collect();
+        let free = Mutex::new((0..sessions.len()).collect::<VecDeque<usize>>());
         Self {
-            instances: instances.into_iter().map(Mutex::new).collect(),
+            sessions,
+            free,
+            ready: Condvar::new(),
         }
     }
 
-    /// Runs `f` on one instance, the first one free — waiting on the
-    /// first if all are busy.
+    /// Runs `f` on one session, waiting as long as it takes for one to free.
     fn with<R>(&self, f: impl FnOnce(&mut T) -> Result<R>) -> Result<R> {
-        for instance in &self.instances {
-            // `WouldBlock` means busy; a poisoned instance is skipped
-            // here and surfaces on the waiting path below.
-            if let Ok(mut guard) = instance.try_lock() {
-                return f(&mut guard);
+        self.acquire_blocking().with(f)
+    }
+
+    /// Runs `f` on one session, or returns busy when none frees by
+    /// `deadline`. `Waited::Busy` says nothing was judged: the caller's
+    /// budget went entirely on queueing.
+    fn until<R>(
+        &self,
+        deadline: Instant,
+        f: impl FnOnce(&mut T) -> Result<R>,
+    ) -> std::result::Result<R, Waited> {
+        let mut session = match self.acquire_until(deadline) {
+            Ok(session) => session,
+            Err(budget) => return Err(Waited::Busy(budget)),
+        };
+        // Whatever `f` does — score, error, or panic — the token is returned
+        // by `Session::drop` before this frame is left.
+        session.with(f).map_err(Waited::Failed)
+    }
+
+    fn acquire_blocking(&self) -> Session<'_, T> {
+        let mut free = self.locked_free();
+        while free.is_empty() {
+            free = self
+                .ready
+                .wait(free)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Session::taken(self, free)
+    }
+
+    fn acquire_until(&self, deadline: Instant) -> std::result::Result<Session<'_, T>, Duration> {
+        // The budget is read once, before any waiting, so the busy error can
+        // say what the caller asked for rather than what it happened to get.
+        let budget = deadline.saturating_duration_since(Instant::now());
+        let mut free = self.locked_free();
+        loop {
+            if !free.is_empty() {
+                return Ok(Session::taken(self, free));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(budget);
+            }
+            let (guard, timed_out) = self
+                .ready
+                .wait_timeout_while(free, remaining, |free| free.is_empty())
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            free = guard;
+            if timed_out.timed_out() && free.is_empty() {
+                return Err(budget);
             }
         }
-        let mut guard = self.instances[0]
-            .lock()
-            .map_err(|_| RaError::Internal("rerank model mutex poisoned".to_string()))?;
-        f(&mut guard)
     }
+
+    /// The free list, ignoring a poisoning that cannot have corrupted it.
+    fn locked_free(&self) -> std::sync::MutexGuard<'_, VecDeque<usize>> {
+        self.free
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Why `InstancePool::until` did not run `f`.
+#[derive(Debug)]
+enum Waited {
+    /// No session freed in time; the duration is how long the caller waited.
+    Busy(Duration),
+    /// A session was had, and `f` failed on it.
+    Failed(RaError),
 }
 
 /// What `[rerank].model` can name: one of `fastembed`'s built-in
@@ -422,9 +613,14 @@ mod tests {
 
     impl Counting {
         fn enter(&mut self) {
+            self.hold(Duration::from_millis(20));
+        }
+
+        /// Inside a session for `how_long`, recording the concurrency peak.
+        fn hold(&mut self, how_long: Duration) {
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max.fetch_max(now, Ordering::SeqCst);
-            thread::sleep(std::time::Duration::from_millis(20));
+            thread::sleep(how_long);
             self.active.fetch_sub(1, Ordering::SeqCst);
         }
     }
@@ -503,6 +699,133 @@ mod tests {
             .with(|_| Err::<(), _>(RaError::Internal("boom".to_string())))
             .unwrap_err();
         assert!(error.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn a_saturated_pool_refuses_a_caller_at_its_deadline() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        static MAX: AtomicUsize = AtomicUsize::new(0);
+
+        let pool = InstancePool::new(vec![Counting {
+            active: &ACTIVE,
+            max: &MAX,
+        }]);
+
+        thread::scope(|scope| {
+            // One caller holds the only session for 150 ms — longer than the
+            // second caller's whole budget, which is the point: the old pool
+            // would have parked that caller on the session and scored a head
+            // nobody was waiting for.
+            let holder = scope.spawn(|| {
+                pool.with(|instance| {
+                    instance.hold(Duration::from_millis(150));
+                    Ok(())
+                })
+            });
+            thread::sleep(Duration::from_millis(20));
+
+            let budget = Duration::from_millis(30);
+            let started = Instant::now();
+            let outcome = pool.until(started + budget, |instance| {
+                instance.enter();
+                Ok(())
+            });
+            let waited = started.elapsed();
+
+            // The budget it reports is what was left when the caller walked
+            // in, so a hair under the requested 30 ms — the promise is "your
+            // budget", not "the instant you asked for".
+            assert!(
+                matches!(outcome, Err(Waited::Busy(asked))
+                    if asked <= budget && budget - asked < Duration::from_millis(5)),
+                "a caller with no session should be refused with its own budget, got {outcome:?}"
+            );
+            // The deadline is the promise: not the holder's inference, and
+            // not a spin that returns instantly having done nothing.
+            assert!(
+                waited < Duration::from_millis(120),
+                "the refused caller waited {waited:?} — past its {budget:?} budget, \
+                 which is the abandoned-work bug this pool exists to remove"
+            );
+            assert_eq!(
+                MAX.load(Ordering::SeqCst),
+                1,
+                "a refused caller still ran work inside a session"
+            );
+            holder.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_session_that_frees_in_time_is_used_rather_than_refused() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        static MAX: AtomicUsize = AtomicUsize::new(0);
+
+        let pool = InstancePool::new(vec![Counting {
+            active: &ACTIVE,
+            max: &MAX,
+        }]);
+
+        thread::scope(|scope| {
+            let holder = scope.spawn(|| {
+                pool.with(|instance| {
+                    instance.hold(Duration::from_millis(30));
+                    Ok(())
+                })
+            });
+            thread::sleep(Duration::from_millis(10));
+
+            // Generous budget: this caller is meant to wait, and to get the
+            // session the moment it frees. Busy is not the default answer.
+            let outcome = pool.until(Instant::now() + Duration::from_secs(5), |instance| {
+                instance.hold(Duration::from_millis(10));
+                Ok("judged")
+            });
+
+            assert!(
+                matches!(outcome, Ok("judged")),
+                "a waiting caller gave up early: {outcome:?}"
+            );
+            assert_eq!(
+                MAX.load(Ordering::SeqCst),
+                1,
+                "a timed caller ran two scores at once on one session"
+            );
+            holder.join().unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn a_panicking_score_gives_its_session_back() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        static MAX: AtomicUsize = AtomicUsize::new(0);
+
+        let pool = InstancePool::new(vec![Counting {
+            active: &ACTIVE,
+            max: &MAX,
+        }]);
+
+        let panicked: std::result::Result<std::result::Result<(), RaError>, _> =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pool.with(|_| panic!("the model died mid-batch"))
+            }));
+        assert!(panicked.is_err(), "the panic must escape the pool");
+
+        // Capacity is what a leak would cost: the token came back, so the
+        // pool serves again instead of draining to zero. The session itself
+        // is poisoned by the panic and says so — the leg degrades on every
+        // recall, visible in the `rerank` trace, rather than the pool
+        // silently losing concurrency.
+        let mut session = pool
+            .acquire_until(Instant::now() + Duration::from_secs(1))
+            .expect("a panicked score must not swallow its token");
+        let error = session
+            .with::<()>(|_| unreachable!("a poisoned session never runs its work"))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("poisoned"),
+            "the poisoned session should name itself: {error}"
+        );
     }
 
     #[test]

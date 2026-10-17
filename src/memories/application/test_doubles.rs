@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::fake_embedder::FakeEmbedder;
@@ -786,5 +786,91 @@ impl Reranker for SleepingReranker {
     fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
         std::thread::sleep(self.0);
         Ok(vec![0.0; candidates.len()])
+    }
+}
+
+/// One busy session, in the shape the fastembed adapter's pool has: a caller
+/// that gets it holds it for `inference`, and a caller that cannot get it
+/// before its deadline is refused with [`RaError::RerankBusy`] **without
+/// scoring anything**.
+///
+/// `SleepingReranker` cannot express this — with no session to wait for, its
+/// deadline path looks identical from either side — so the two properties
+/// Phase 1.2 actually promises, "busy comes back as `skipped`/`deadline`" and
+/// "a caller that was refused did no work", need a double that owns a session
+/// the way the real pool does.
+pub struct BusyReranker {
+    inference: Duration,
+    session: Arc<Mutex<()>>,
+    refusals: AtomicUsize,
+    judged: AtomicUsize,
+}
+
+impl BusyReranker {
+    /// `inference` is how long a session is held for one head. Make it longer
+    /// than the recaller's `timeout_ms` and every caller that gets a session
+    /// misses its deadline too, which is the saturated-host case.
+    pub fn new(inference: Duration) -> Self {
+        Self {
+            inference,
+            session: Arc::new(Mutex::new(())),
+            refusals: AtomicUsize::new(0),
+            judged: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many callers were told "no session" and scored nothing.
+    pub fn refusals(&self) -> usize {
+        self.refusals.load(Ordering::SeqCst)
+    }
+
+    /// How many heads were actually judged, whenever they finished.
+    pub fn judged(&self) -> usize {
+        self.judged.load(Ordering::SeqCst)
+    }
+
+    /// Takes the session from outside the trait, so a test can arrange "the
+    /// session is busy" without a second caller racing a timer.
+    pub fn hold_session(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Reranker for BusyReranker {
+    fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        let _held = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::thread::sleep(self.inference);
+        self.judged.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0.0; candidates.len()])
+    }
+
+    fn score_before(
+        &self,
+        _query: &str,
+        candidates: &[RerankCandidate<'_>],
+        deadline: Instant,
+    ) -> Result<Vec<f32>> {
+        // Spelled out rather than reused from `score`, because the whole
+        // point is the path that does *not* wait: this must never block on
+        // the mutex indefinitely.
+        let asked_at = Instant::now();
+        loop {
+            if let Ok(_held) = self.session.try_lock() {
+                std::thread::sleep(self.inference);
+                self.judged.fetch_add(1, Ordering::SeqCst);
+                return Ok(vec![0.0; candidates.len()]);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.refusals.fetch_add(1, Ordering::SeqCst);
+                return Err(RaError::RerankBusy(asked_at.elapsed()));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        }
     }
 }

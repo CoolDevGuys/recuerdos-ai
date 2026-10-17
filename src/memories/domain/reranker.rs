@@ -47,6 +47,7 @@
 
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
+use std::time::Instant;
 
 /// One candidate for the reranker to judge: its id, and the text it is
 /// scored on. The id lets [`Reranker::score`] answers be aligned by
@@ -68,7 +69,9 @@ pub struct RerankCandidate<'a> {
 /// Implementations are synchronous — like [`Embedder`](super::embedder),
 /// the real ones are CPU-bound local inference — and the caller bounds
 /// the call with a deadline and falls back on expiry, so implementations
-/// do not police their own time.
+/// do not police their own inference. What a pooled implementation *does*
+/// police is its queueing: see [`score_before`](Self::score_before), which
+/// stops a caller waiting for a session once the request's budget is gone.
 ///
 /// The returned `Vec` must be the same length as `candidates`, aligned
 /// with it by position. A mismatched length is treated as a failure of
@@ -78,6 +81,31 @@ pub trait Reranker: Send + Sync {
     /// with `candidates` (same length, same order). Higher is better;
     /// the scale is model-specific.
     fn score(&self, query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>>;
+
+    /// Scores within `deadline`, and gives up on **waiting** for the model
+    /// when the deadline passes: `Err(RaError::RerankBusy)` when no session
+    /// is free by then, having scored nothing.
+    ///
+    /// The deadline is an absolute instant rather than a duration because
+    /// the caller's budget covers waiting *and* judging: a request that
+    /// queued for 200 ms of its 250 ms must not then hand the model the full
+    /// 250 ms. That distinction is the point — without it a busy host turns
+    /// every recall into a thread that parks on a session, scores a head
+    /// nobody is waiting for any more, and makes the next request wait for
+    /// it. Giving up before inference is what keeps abandoned work off the
+    /// machine instead of merely off the response.
+    ///
+    /// A model that cannot tell queueing from inference — the doubles, and
+    /// any implementation without a session pool — keeps the default, which
+    /// is [`score`](Self::score) and therefore never reports busy.
+    fn score_before(
+        &self,
+        query: &str,
+        candidates: &[RerankCandidate<'_>],
+        _deadline: Instant,
+    ) -> Result<Vec<f32>> {
+        self.score(query, candidates)
+    }
 }
 
 /// What the recaller does with a configured reranker — the plan's

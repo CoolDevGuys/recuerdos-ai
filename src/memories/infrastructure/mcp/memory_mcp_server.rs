@@ -522,6 +522,15 @@ fn to_mcp_error(error: RaError) -> ErrorData {
             None,
         ),
         RaError::Conflict(message) => ErrorData::invalid_request(message, None),
+        // A busy second stage is not a client's mistake and never reaches
+        // here anyway — the recaller serves the pre-rerank order (invariant
+        // I-2) — so it answers with the same opaque internal error as any
+        // other server-side fault. Nothing about an existing variant's
+        // mapping moved to make room for it.
+        RaError::RerankBusy(_) => {
+            tracing::warn!("mcp tool reached a busy rerank session");
+            ErrorData::internal_error("internal error", None)
+        }
         RaError::Internal(detail) => {
             tracing::error!(error = %detail, "mcp tool failed");
             ErrorData::internal_error("internal error", None)
