@@ -209,6 +209,21 @@ pub(crate) struct CaseResult {
     /// For an `expect_empty` case: whether the list was empty — the top
     /// result was "correct" exactly when there was no top result.
     top_hit: bool,
+    /// Whether *every* expectation landed in the top K, not merely the first
+    /// one (recall-quality-plan.md Task 0.4, V3).
+    ///
+    /// The distinction is the difference between "an agent got an answer" and
+    /// "an agent got the whole answer", and it is what a multi-hop question
+    /// turns on: for `who leads the team that maintains the billing service`,
+    /// the bridge fact and the name together are the answer, and finding only
+    /// one of them is not the success the case means. `recall` already counts
+    /// that as 50%; `complete` says it plainly instead of as a fraction a
+    /// per-kind mean rounds away.
+    ///
+    /// For an `expect_empty` case it carries the pass bit, like `recall` and
+    /// `top_hit`: nothing came back, so every expectation there was (namely
+    /// none) was met.
+    complete: bool,
     /// 1 / (rank of the first expected memory found in the top K), None
     /// when none of them was found. Averaged into `Report::mrr`. For an
     /// `expect_empty` case: Some(1.0) when nothing was returned (the
@@ -260,6 +275,17 @@ pub struct Report {
     /// against.
     #[serde(default)]
     pub mrr: f64,
+    /// Fraction of the *scored* cases whose every expected memory landed in
+    /// the top K, 0–100 (recall-quality-plan.md Task 0.4).
+    ///
+    /// This is the completeness half of the story the other three hide. A
+    /// multi-hop case wants both the bridge fact and the name: recall@5 calls
+    /// finding one of them 50%, p@1 calls it a miss, MRR never sees the second
+    /// one at all. A fix that stitches a two-hop answer together therefore
+    /// moves *only* this number — which is why Phase 0 measures it before any
+    /// phase claims a gain.
+    #[serde(default)]
+    pub complete_at_k: f64,
     /// Median / 95th-percentile wall-clock of a single recall, in
     /// milliseconds, across every case. Includes the embedder call (for
     /// a remote provider, mostly network), so it is only meaningful
@@ -275,6 +301,11 @@ pub struct Report {
     /// way `by_kind` localises a recall regression.
     #[serde(default)]
     pub precision_at_1_by_kind: BTreeMap<String, f64>,
+    /// complete@k per `kind`, for the same reason: the `relational` and `chain`
+    /// kinds are where completeness is the whole question, and an overall mean
+    /// lets one of them collapse while the other improves.
+    #[serde(default)]
+    pub complete_at_k_by_kind: BTreeMap<String, f64>,
     /// Fraction of `expect_empty` cases that returned nothing at the
     /// floor, 0–100; 0.0 when the run had no negatives. The negative
     /// cases' own number, kept off the ranking means above.
@@ -771,6 +802,7 @@ pub(crate) fn score(
             informational: case.informational,
             recall: if passed { 1.0 } else { 0.0 },
             top_hit: passed,
+            complete: passed,
             reciprocal_rank: None,
             latency_ms,
             expect_empty: true,
@@ -809,6 +841,11 @@ pub(crate) fn score(
         top_hit: returned
             .first()
             .is_some_and(|top| case.expect.iter().any(|wanted| wanted == top)),
+        // `missed` is computed against the returned top K, so "nothing missed"
+        // is exactly "every expectation was inside it". One expected memory
+        // makes this the same bit as recall == 1.0; two is where it earns its
+        // place (see the field doc).
+        complete: missed.is_empty(),
         reciprocal_rank,
         latency_ms,
         expect_empty: false,
@@ -841,6 +878,7 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
 
     let mut recall_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut precision_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let mut complete_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for result in results {
         recall_by_kind
             .entry(result.kind.clone())
@@ -850,6 +888,10 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
             .entry(result.kind.clone())
             .or_default()
             .push(if result.top_hit { 1.0 } else { 0.0 });
+        complete_by_kind
+            .entry(result.kind.clone())
+            .or_default()
+            .push(if result.complete { 1.0 } else { 0.0 });
     }
 
     let latencies: Vec<f64> = results.iter().map(|r| r.latency_ms).collect();
@@ -878,9 +920,22 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
                 .map(|r| r.reciprocal_rank.unwrap_or(0.0))
                 .collect::<Vec<_>>(),
         ),
+        // Scored cases only, like the other three ranking means: a negative's
+        // `complete` bit is its abstain pass, and abstentions already have
+        // `abstention_rate` rather than a place in this average.
+        complete_at_k: mean(
+            &scored
+                .iter()
+                .map(|r| if r.complete { 1.0 } else { 0.0 })
+                .collect::<Vec<_>>(),
+        ),
         latency_ms_p50: percentile(&latencies, 50.0).unwrap_or(0.0),
         latency_ms_p95: percentile(&latencies, 95.0).unwrap_or(0.0),
         precision_at_1_by_kind: precision_by_kind
+            .into_iter()
+            .map(|(kind, values)| (kind, mean(&values)))
+            .collect(),
+        complete_at_k_by_kind: complete_by_kind
             .into_iter()
             .map(|(kind, values)| (kind, mean(&values)))
             .collect(),
@@ -931,10 +986,11 @@ fn print_report(results: &[CaseResult]) {
     println!("{}", "─".repeat(76));
     let scored_cases = results.iter().filter(|r| !r.expect_empty).count();
     println!(
-        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} scored cases, {} negative)",
+        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   complete@{K}: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} scored cases, {} negative)",
         report.recall_at_k,
         report.precision_at_1,
         report.mrr,
+        report.complete_at_k,
         report.latency_ms_p50,
         report.latency_ms_p95,
         scored_cases,
@@ -957,7 +1013,10 @@ fn print_report(results: &[CaseResult]) {
     }
     for (kind, score) in &report.by_kind {
         let precision = report.precision_at_1_by_kind.get(kind).unwrap_or(&0.0);
-        println!("  {kind:>16}: recall {score:.1}%   p@1 {precision:.1}%");
+        let complete = report.complete_at_k_by_kind.get(kind).unwrap_or(&0.0);
+        println!(
+            "  {kind:>16}: recall {score:.1}%   p@1 {precision:.1}%   complete@{K} {complete:.1}%"
+        );
     }
 }
 
@@ -1095,15 +1154,27 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
         ));
     }
 
-    for (metric, before, after) in [
+    let gated: Vec<(String, f64, f64)> = vec![
         (
-            "precision@1",
+            "precision@1".to_string(),
             baseline.precision_at_1,
             report.precision_at_1,
         ),
-        ("MRR", baseline.mrr, report.mrr),
-    ] {
-        if before == 0.0 {
+        ("MRR".to_string(), baseline.mrr, report.mrr),
+        // Task 0.4's completeness metric, gated like the others so a change
+        // that stops answering multi-hop questions in full cannot pass on a
+        // flat p@1. `K` is interpolated rather than spelled out: the metric
+        // means "every expectation inside the top K", and a future K change
+        // must move the label with it.
+        (
+            format!("complete@{K}"),
+            baseline.complete_at_k,
+            report.complete_at_k,
+        ),
+    ];
+
+    for (metric, before, after) in &gated {
+        if *before == 0.0 {
             // An old baseline never recorded MRR; treating the deserialised
             // zero as a score would either skip a real gate forever or fail
             // an honest zero, so the skip is explicit and printed.
@@ -1132,6 +1203,19 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
             let kind_drop = before - after;
             if kind_drop > max_drop {
                 println!("  {kind}: {before:.1}% → {after:.1}% ({kind_drop:.1} points worse)");
+            }
+        }
+    }
+    // Completeness too, and printed only on a drop like the recall line: a
+    // `chain` kind that stops completing two-hop answers while its p@1 holds
+    // steady is the regression this metric exists to catch.
+    for (kind, before) in &baseline.complete_at_k_by_kind {
+        if let Some(after) = report.complete_at_k_by_kind.get(kind) {
+            let kind_drop = before - after;
+            if kind_drop > max_drop {
+                println!(
+                    "  {kind}: complete@{K} {before:.1}% → {after:.1}% ({kind_drop:.1} points worse)"
+                );
             }
         }
     }
@@ -1171,6 +1255,11 @@ mod tests {
             informational: false,
             recall,
             top_hit,
+            // The helper has no expectation list to check against, so it can
+            // only say what the recall number implies: every expectation found
+            // is recall 1.0. A test that needs the two to disagree — a
+            // two-expectation case that found one — overrides this bit.
+            complete: recall >= 1.0,
             // A case with a top hit has its expected memory at rank 1.
             reciprocal_rank: if top_hit { Some(1.0) } else { None },
             latency_ms: 10.0,
@@ -1180,12 +1269,14 @@ mod tests {
     }
 
     /// A negative case's scored stand-in: pass/fail lives entirely in the
-    /// recall bit, as `score` writes it.
+    /// recall bit, as `score` writes it — including `complete`, which for
+    /// these carries the same abstain-pass bit (see `score`'s `expect_empty` arm).
     fn negative(passed: bool) -> CaseResult {
         CaseResult {
             expect_empty: true,
             recall: if passed { 1.0 } else { 0.0 },
             top_hit: passed,
+            complete: passed,
             ..result("negative", 0.0, false)
         }
     }
@@ -1238,6 +1329,74 @@ mod tests {
         let report = summarise(&[first, third, missing]);
         let expected = (1.0 + 1.0 / 3.0 + 0.0) / 3.0 * 100.0;
         assert!((report.mrr - expected).abs() < 1e-9, "{}", report.mrr);
+    }
+
+    #[test]
+    fn complete_at_k_counts_a_two_part_answer_whole_or_not_at_all() {
+        // Task 0.4's whole point in three cases: a two-hop question that found
+        // one of its two memories is a *failed* answer here, where recall@5
+        // books it as a half and MRR never looks at the second half at all.
+        let half_a_chain = CaseResult {
+            complete: false,
+            ..result("chain", 0.5, true)
+        };
+        let whole_chain = CaseResult {
+            complete: true,
+            ..result("chain", 1.0, true)
+        };
+        let no_answer = CaseResult {
+            complete: false,
+            ..result("chain", 0.0, false)
+        };
+
+        let report = summarise(&[half_a_chain, whole_chain, no_answer]);
+        assert_eq!(report.recall_at_k, 50.0, "recall still credits the half");
+        // Tolerance rather than `assert_eq!`: the mean is `1.0/3.0*100.0`, and
+        // writing the same number as `100.0/3.0` rounds differently in the last
+        // bit. The point is one-of-three, not the ULPs.
+        let one_of_three = 100.0 / 3.0;
+        assert!(
+            (report.complete_at_k - one_of_three).abs() < 1e-9,
+            "{}",
+            report.complete_at_k
+        );
+        assert!(
+            (report.complete_at_k_by_kind["chain"] - one_of_three).abs() < 1e-9,
+            "{:?}",
+            report.complete_at_k_by_kind
+        );
+    }
+
+    #[test]
+    fn a_single_expectation_completes_wherever_recall_reads_one() {
+        // The degenerate case, pinned because it is most of the eval: with one
+        // expected memory, complete and recall agree even when the answer is
+        // buried at rank 5 — p@1 is the metric that disagrees there.
+        let buried = CaseResult {
+            complete: true,
+            reciprocal_rank: Some(0.2),
+            ..result("needle", 1.0, false)
+        };
+        let report = summarise(&[buried]);
+        assert_eq!(report.complete_at_k, 100.0);
+        assert_eq!(report.precision_at_1, 0.0);
+    }
+
+    #[test]
+    fn negatives_keep_complete_out_of_the_ranking_mean() {
+        // Same rule as recall/p@1/MRR (see `negatives_move_abstention_never_the_ranking_means`):
+        // a flipping negative must not move the scored mean, or every phase's
+        // headroom number becomes partly a function of the abstention set. It
+        // does keep its own bit in the per-kind line, where `by_kind` and
+        // `precision_at_1_by_kind` already read negatives the same way.
+        let report = summarise(&[
+            result("paraphrase", 1.0, true),
+            negative(true),
+            negative(false),
+        ]);
+        assert_eq!(report.complete_at_k, 100.0, "one scored case, complete");
+        assert_eq!(report.abstention_rate, 50.0);
+        assert_eq!(report.complete_at_k_by_kind["negative"], 50.0);
     }
 
     #[test]
@@ -1463,6 +1622,8 @@ mod tests {
         assert_eq!(baseline.mrr, 0.0, "absent in an old baseline");
         assert_eq!(baseline.latency_ms_p50, 0.0);
         assert!(baseline.precision_at_1_by_kind.is_empty());
+        assert_eq!(baseline.complete_at_k, 0.0, "absent in an old baseline");
+        assert!(baseline.complete_at_k_by_kind.is_empty());
         assert!(
             baseline.embedder.is_empty(),
             "the field postdates old baselines"
@@ -1517,6 +1678,61 @@ mod tests {
             compare(&measured, baseline.path(), 5.0).is_ok(),
             "an unrecorded metric must not fail the gate"
         );
+    }
+
+    #[test]
+    fn complete_at_k_gates_once_recorded_and_is_skipped_before_that() {
+        // Task 0.4's DoD both ways. `eval/baseline.json` predates the field, so
+        // the first run after it must not be failed by a metric it never
+        // recorded; the run after re-recording must be.
+        let unrecorded = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                recall_at_k: 80.0,
+                precision_at_1: 70.0,
+                mrr: 60.0,
+                ..Report::default()
+            },
+            unrecorded.path(),
+        )
+        .unwrap();
+        let collapsed = Report {
+            complete_at_k: 10.0,
+            ..measured_with_ranking_means()
+        };
+        assert!(
+            compare(&collapsed, unrecorded.path(), 5.0).is_ok(),
+            "a baseline that never measured completeness cannot gate on it"
+        );
+
+        let recorded = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                complete_at_k: 80.0,
+                ..measured_with_ranking_means()
+            },
+            recorded.path(),
+        )
+        .unwrap();
+        let err = compare(&collapsed, recorded.path(), 5.0)
+            .expect_err("a 70-point completeness collapse must fail the gate");
+        assert!(
+            err.to_string().contains("complete@5"),
+            "the failure should name the metric: {err}"
+        );
+    }
+
+    /// A report whose three pre-existing ranking means are all set, for tests
+    /// that gate on a *newer* metric and must not trip the older ones on the
+    /// way (a default `Report` has 0.0 p@1 and MRR, which read as "unrecorded"
+    /// and make such a test pass for the wrong reason).
+    fn measured_with_ranking_means() -> Report {
+        Report {
+            recall_at_k: 80.0,
+            precision_at_1: 70.0,
+            mrr: 60.0,
+            ..Report::default()
+        }
     }
 
     #[test]
