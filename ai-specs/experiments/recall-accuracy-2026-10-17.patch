@@ -1,0 +1,245 @@
+diff --color -ruN pristine/src/memories/application/direct_memory_saver.rs main/src/memories/application/direct_memory_saver.rs
+--- pristine/src/memories/application/direct_memory_saver.rs	2026-10-17 03:25:10
++++ main/src/memories/application/direct_memory_saver.rs	2026-10-17 10:44:32
+@@ -58,9 +58,36 @@
+     pub fn execute(&self, context: &UserContext, new: NewMemory, actor: &str) -> Result<Memory> {
+         let memory = Memory::create(context.user_id(), new, self.clock.now())?;
+ 
++        // EXPERIMENT: contextual embedding — the labels the memory already
++        // carries, prepended to its content (no LLM, no query-time cost).
++        let embedded_text = match std::env::var("RA_EXP_CONTEXT").as_deref() {
++            Ok("full") | Ok("labels") => {
++                let mut parts = vec![memory.category().as_str().replace('.', " ")];
++                if let Some(sub) = memory.subcategory() {
++                    parts.push(sub.to_string());
++                }
++                if !memory.tags().is_empty() {
++                    parts.push(memory.tags().join(", "));
++                }
++                if std::env::var("RA_EXP_CONTEXT").as_deref() == Ok("full")
++                    && !memory.entities().is_empty()
++                {
++                    parts.push(
++                        memory
++                            .entities()
++                            .iter()
++                            .map(|e| e.name.clone())
++                            .collect::<Vec<_>>()
++                            .join(", "),
++                    );
++                }
++                format!("{}. {}", parts.join("; "), memory.content())
++            }
++            _ => memory.content().to_string(),
++        };
+         let embedding = self
+             .embedder
+-            .embed_one(memory.content(), EmbeddingTask::Document)?;
++            .embed_one(&embedded_text, EmbeddingTask::Document)?;
+ 
+         self.memories.insert(context, &memory, actor)?;
+ 
+diff --color -ruN pristine/src/memories/application/memory_recaller.rs main/src/memories/application/memory_recaller.rs
+--- pristine/src/memories/application/memory_recaller.rs	2026-10-17 03:25:10
++++ main/src/memories/application/memory_recaller.rs	2026-10-17 10:55:43
+@@ -427,6 +427,49 @@
+             );
+         }
+ 
++        // EXPERIMENT: let match strength (calibrated relevance) take part in
++        // the ordering RRF produced from ranks alone.
++        match std::env::var("RA_EXP_FUSE").ok().as_deref() {
++            Some("tiebreak") => ranked.sort_by(|a, b| {
++                b.score
++                    .partial_cmp(&a.score)
++                    .unwrap_or(std::cmp::Ordering::Equal)
++                    .then_with(|| {
++                        b.relevance
++                            .partial_cmp(&a.relevance)
++                            .unwrap_or(std::cmp::Ordering::Equal)
++                    })
++            }),
++            Some(spec) if spec.starts_with("blend:") => {
++                let lambda: f32 = spec["blend:".len()..].parse().unwrap_or(0.0);
++                for scored in &mut ranked {
++                    scored.score += lambda * scored.relevance;
++                }
++                ranked.sort_by(|a, b| {
++                    b.score
++                        .partial_cmp(&a.score)
++                        .unwrap_or(std::cmp::Ordering::Equal)
++                });
++            }
++            _ => {}
++        }
++
++        // EXPERIMENT: graph as expansion — the best graph hit that fusion left
++        // outside the client's top `limit` gets the slot right after #1.
++        if std::env::var("RA_EXP_GRAPH_SLOT").is_ok() && ranked.len() > 2 {
++            let limit = query.limit();
++            let promote = graph_hits.0.iter().find_map(|id| {
++                ranked
++                    .iter()
++                    .position(|s| s.memory.id() == *id)
++                    .filter(|&p| p >= limit.saturating_sub(1))
++            });
++            if let Some(position) = promote {
++                let hit = ranked.remove(position);
++                ranked.insert(1, hit);
++            }
++        }
++
+         // Before the truncate, so a caller asking for five results gets
+         // five relevant ones rather than three once the floor has eaten two
+         // of the five it was truncated to.
+@@ -486,17 +529,71 @@
+         // Scan the query for entities the graph knows — no model call —
+         // then hop from them. No seeds means the query named nothing
+         // known, so the leg stays silent and recall is its two-leg self.
+-        let seeds = graph.seeds(context, &seed_candidates(query.text()))?;
++        let mut seeds = graph.seeds(context, &seed_candidates(query.text()))?;
++
++        // EXPERIMENT (HippoRAG-2-style query-to-triple linking): seed from the
++        // endpoints of the k live relations whose text is closest to the
++        // query. In a real design the triple vectors are stored at ingest; here
++        // they are embedded per query, so only the accuracy is meaningful.
++        let env = |name: &str| std::env::var(name).ok();
++        let k: usize = env("RA_EXP_TRIPLE_K").and_then(|v| v.parse().ok()).unwrap_or(0);
++        let min_sim: f32 = env("RA_EXP_TRIPLE_MIN").and_then(|v| v.parse().ok()).unwrap_or(-1.0);
++        let rank_by_triple = env("RA_EXP_TRIPLE_RANK").is_some();
++        // memory id -> best similarity of any of its relations to the query
++        let mut best_triple: HashMap<String, f32> = HashMap::new();
++        if k > 0 || rank_by_triple {
++            let triples = graph.live_triples(context)?;
++            if !triples.is_empty() {
++                let texts: Vec<String> = triples
++                    .iter()
++                    .map(|(_, p, _, s, o, _)| format!("{s} {} {o}", p.replace('_', " ")))
++                    .collect();
++                let vectors = self.embedder.embed(&texts, EmbeddingTask::Document)?;
++                let q = self.embedder.embed_one(query.text(), EmbeddingTask::Query)?;
++                let mut ranked: Vec<(f32, usize)> = vectors
++                    .iter()
++                    .enumerate()
++                    .map(|(i, v)| (v.iter().zip(&q).map(|(a, b)| a * b).sum::<f32>(), i))
++                    .collect();
++                for &(sim, i) in &ranked {
++                    let slot = best_triple.entry(triples[i].5.clone()).or_insert(f32::MIN);
++                    *slot = slot.max(sim);
++                }
++                ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
++                for (sim, i) in ranked.into_iter().take(k) {
++                    if sim < min_sim {
++                        break;
++                    }
++                    for key in [&triples[i].0, &triples[i].2] {
++                        let key = EntityKey::new(key);
++                        if !seeds.iter().any(|s| s.as_str() == key.as_str()) {
++                            seeds.push(key);
++                        }
++                    }
++                }
++            }
++        }
++
+         if seeds.is_empty() {
+             return Ok(Vec::new());
+         }
+-        graph.neighbours(
++        let mut hits = graph.neighbours(
+             context,
+             &seeds,
+             self.max_hops,
+             query.as_of(),
+             self.hop_limit,
+-        )
++        )?;
++        if rank_by_triple {
++            // Query-aware order: a memory whose own relation best matches the
++            // question leads; structural order breaks ties (stable sort).
++            hits.sort_by(|a, b| {
++                let sa = best_triple.get(&a.to_string()).copied().unwrap_or(f32::MIN);
++                let sb = best_triple.get(&b.to_string()).copied().unwrap_or(f32::MIN);
++                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
++            });
++        }
++        Ok(hits)
+     }
+ 
+     /// Runs the rerank leg over the fused head, or nothing. Mirrors
+diff --color -ruN pristine/src/memories/domain/entity_graph.rs main/src/memories/domain/entity_graph.rs
+--- pristine/src/memories/domain/entity_graph.rs	2026-10-17 03:25:10
++++ main/src/memories/domain/entity_graph.rs	2026-10-17 10:52:46
+@@ -141,6 +141,15 @@
+     /// recall is exactly its two-leg self. Deduplicated; order unspecified.
+     fn seeds(&self, context: &UserContext, candidates: &[EntityKey]) -> Result<Vec<EntityKey>>;
+ 
++    /// EXPERIMENT: every live edge as (subject_key, predicate, object_key,
++    /// subject_name, object_name, memory_id).
++    fn live_triples(
++        &self,
++        _context: &UserContext,
++    ) -> Result<Vec<(String, String, String, String, String, String)>> {
++        Ok(Vec::new())
++    }
++
+     /// The memories reachable from `seeds` within `hops` edges, live at
+     /// `as_of` (or now, if `None`), best-first by hop distance then by how
+     /// many of the query's entities reach them, and capped at `limit`.
+diff --color -ruN pristine/src/memories/infrastructure/sqlite_entity_graph.rs main/src/memories/infrastructure/sqlite_entity_graph.rs
+--- pristine/src/memories/infrastructure/sqlite_entity_graph.rs	2026-10-17 03:25:10
++++ main/src/memories/infrastructure/sqlite_entity_graph.rs	2026-10-17 10:52:46
+@@ -258,6 +258,28 @@
+         })
+     }
+ 
++    fn live_triples(
++        &self,
++        context: &UserContext,
++    ) -> Result<Vec<(String, String, String, String, String, String)>> {
++        self.database.with_connection(|connection| {
++            let mut statement = connection
++                .prepare(
++                    "SELECT subject_key, predicate, object_key, subject_name, object_name, memory_id
++                     FROM memory_relations WHERE user_id = ?1 AND invalid_at IS NULL",
++                )
++                .map_err(|e| map_sqlite_error(e, "graph triples"))?;
++            let rows = statement
++                .query_map([context.user_id().to_string()], |row| {
++                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
++                })
++                .map_err(|e| map_sqlite_error(e, "graph triples"))?
++                .collect::<std::result::Result<Vec<_>, _>>()
++                .map_err(|e| map_sqlite_error(e, "graph triples"))?;
++            Ok(rows)
++        })
++    }
++
+     fn seeds(&self, context: &UserContext, candidates: &[EntityKey]) -> Result<Vec<EntityKey>> {
+         // Distinct, non-empty candidate keys. Deduping before the query
+         // keeps the IN-list small when a query repeats a name.
+diff --color -ruN pristine/src/providers/infrastructure/embeddings/fastembed_embedder.rs main/src/providers/infrastructure/embeddings/fastembed_embedder.rs
+--- pristine/src/providers/infrastructure/embeddings/fastembed_embedder.rs	2026-10-17 03:25:10
++++ main/src/providers/infrastructure/embeddings/fastembed_embedder.rs	2026-10-17 10:43:16
+@@ -75,10 +75,20 @@
+ }
+ 
+ impl Embedder for FastembedEmbedder {
+-    fn embed(&self, texts: &[String], _task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
++    fn embed(&self, texts: &[String], task: EmbeddingTask) -> Result<Vec<Vec<f32>>> {
+         if texts.is_empty() {
+             return Ok(Vec::new());
+         }
++
++        // EXPERIMENT: the BGE v1.5 model card's query instruction.
++        let prefixed: Vec<String>;
++        let texts: &[String] = match (task, std::env::var("RA_EXP_QUERY_PREFIX").ok()) {
++            (EmbeddingTask::Query, Some(prefix)) => {
++                prefixed = texts.iter().map(|t| format!("{prefix}{t}")).collect();
++                &prefixed
++            }
++            _ => texts,
++        };
+ 
+         let mut model = self
+             .model
