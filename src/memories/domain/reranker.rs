@@ -106,6 +106,25 @@ pub trait Reranker: Send + Sync {
     ) -> Result<Vec<f32>> {
         self.score(query, candidates)
     }
+
+    /// How many candidates to judge in one run, or `None` for "the head as
+    /// it was given".
+    ///
+    /// The recaller scores the head in runs of this length and takes each
+    /// run's scores as they arrive, which is what bounds the work a missed
+    /// deadline abandons. Inference cannot be pre-empted — an ONNX batch runs
+    /// to its end — so the run is the smallest unit that can be given up on,
+    /// and a head scored in one run means "abandon the whole head" while a
+    /// head scored in runs of eight means "abandon the last eight".
+    ///
+    /// This is a yield point, not a change to what is judged: scores are
+    /// per-`(query, candidate)` pairs, so the same candidates score the same
+    /// however they are batched, and the leg that comes back is the same list
+    /// either way (pinned for the real model by an `--ignored` ONNX test and
+    /// for the doubles by a comparison against the unchunked path).
+    fn preferred_chunk(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// What the recaller does with a configured reranker — the plan's

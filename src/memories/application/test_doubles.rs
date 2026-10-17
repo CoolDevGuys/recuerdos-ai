@@ -789,6 +789,77 @@ impl Reranker for SleepingReranker {
     }
 }
 
+/// Scores the head in runs of `chunk`, sleeping `per_chunk` for each run, and
+/// counts the runs it actually judged.
+///
+/// What the cancellation and partial-application tests need and the other
+/// doubles cannot give: a model that *yields*, one whose score for a candidate
+/// depends only on that candidate (so a chunked leg and a whole-head leg must
+/// agree exactly, which is the property chunking is allowed to rest on), and a
+/// trace of how far it got before the caller stopped wanting the answer.
+///
+/// Scores are the first digit in the candidate's content, so a fixture of
+/// "note number 0…4" produces a leg that does not depend on batch boundaries.
+pub struct ChunkedReranker {
+    chunk: usize,
+    per_chunk: Duration,
+    runs: Arc<AtomicUsize>,
+}
+
+impl ChunkedReranker {
+    pub fn new(chunk: usize, per_chunk: Duration) -> Self {
+        Self {
+            chunk: chunk.max(1),
+            per_chunk,
+            runs: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Runs of candidates judged so far — the count the cancellation tests
+    /// bound, since a run cannot be interrupted once it has started.
+    pub fn runs(&self) -> usize {
+        self.runs.load(Ordering::SeqCst)
+    }
+
+    fn judge(&self, candidates: &[RerankCandidate<'_>]) -> Vec<f32> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.per_chunk);
+        candidates
+            .iter()
+            .map(|candidate| {
+                // Offset past the fused scores on purpose: a judged candidate's
+                // replaced score must beat an unjudged one's, or a partial-leg
+                // test would be asserting which band each score landed in rather
+                // than which candidates were reordered.
+                10.0 + candidate
+                    .text
+                    .chars()
+                    .find_map(|ch| ch.to_digit(10))
+                    .unwrap_or(0) as f32
+            })
+            .collect()
+    }
+}
+
+impl Reranker for ChunkedReranker {
+    fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        Ok(self.judge(candidates))
+    }
+
+    fn score_before(
+        &self,
+        _query: &str,
+        candidates: &[RerankCandidate<'_>],
+        _deadline: Instant,
+    ) -> Result<Vec<f32>> {
+        Ok(self.judge(candidates))
+    }
+
+    fn preferred_chunk(&self) -> Option<usize> {
+        Some(self.chunk)
+    }
+}
+
 /// One busy session, in the shape the fastembed adapter's pool has: a caller
 /// that gets it holds it for `inference`, and a caller that cannot get it
 /// before its deadline is refused with [`RaError::RerankBusy`] **without
@@ -804,6 +875,7 @@ pub struct BusyReranker {
     session: Arc<Mutex<()>>,
     refusals: AtomicUsize,
     judged: AtomicUsize,
+    acquired: AtomicUsize,
 }
 
 impl BusyReranker {
@@ -816,6 +888,24 @@ impl BusyReranker {
             session: Arc::new(Mutex::new(())),
             refusals: AtomicUsize::new(0),
             judged: AtomicUsize::new(0),
+            acquired: AtomicUsize::new(0),
+        }
+    }
+
+    /// Blocks until some caller is *inside* the session, so a test that needs
+    /// "the session is busy" does not have to guess how long scheduling takes.
+    /// Every version of this test that slept a fixed interval flaked the first
+    /// time the suite ran under load.
+    pub fn wait_until_acquired(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            if self.acquired.load(Ordering::SeqCst) > 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -827,6 +917,13 @@ impl BusyReranker {
     /// How many heads were actually judged, whenever they finished.
     pub fn judged(&self) -> usize {
         self.judged.load(Ordering::SeqCst)
+    }
+
+    /// How many times the session was handed out. This is the exact form of
+    /// "nobody queued for it": a caller that waited instead of refusing would
+    /// have to take a second one to do its work.
+    pub fn acquired(&self) -> usize {
+        self.acquired.load(Ordering::SeqCst)
     }
 
     /// Takes the session from outside the trait, so a test can arrange "the
@@ -844,6 +941,7 @@ impl Reranker for BusyReranker {
             .session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.acquired.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.inference);
         self.judged.fetch_add(1, Ordering::SeqCst);
         Ok(vec![0.0; candidates.len()])
@@ -861,6 +959,7 @@ impl Reranker for BusyReranker {
         let asked_at = Instant::now();
         loop {
             if let Ok(_held) = self.session.try_lock() {
+                self.acquired.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(self.inference);
                 self.judged.fetch_add(1, Ordering::SeqCst);
                 return Ok(vec![0.0; candidates.len()]);

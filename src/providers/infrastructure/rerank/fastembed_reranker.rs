@@ -158,6 +158,17 @@ impl Reranker for FastembedReranker {
             })?;
         align_scores(ranked, candidates.len())
     }
+
+    /// The configured `[rerank].batch_size`: the run `fastembed` already
+    /// treats as one forward pass, so scoring the head a batch at a time costs
+    /// no extra inference — it only lets the recaller take the ranks between
+    /// batches and stop the rest.
+    ///
+    /// `load` clamps the batch to at least 1, so this is never `Some(0)`, which
+    /// would turn the recaller's chunk loop into a spin over no candidates.
+    fn preferred_chunk(&self) -> Option<usize> {
+        Some(self.batch_size.max(1))
+    }
 }
 
 impl FastembedReranker {
@@ -965,6 +976,56 @@ mod tests {
             scores[0] > scores[1],
             "scores must not swap across the batch split: {scores:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires the rerank ONNX model; run with --ignored"]
+    fn scoring_the_head_in_runs_returns_the_same_scores_as_one_call() {
+        // Phase 1.3 scores the head in `preferred_chunk` runs so a missed
+        // deadline can drop the rest. That is only legitimate because a score
+        // belongs to a `(query, candidate)` pair rather than to the batch that
+        // carried it — which is what this pins on the real model, where the
+        // doubles the recaller tests use cannot speak for ONNX.
+        let reranker = FastembedReranker::load(
+            "jina-reranker-v1-turbo-en",
+            model_cache_dir(),
+            1,
+            2, // so a 5-candidate head is three separate runs
+        )
+        .unwrap();
+        assert_eq!(reranker.preferred_chunk(), Some(2));
+
+        let texts = [
+            "pnpm is the preferred package manager",
+            "the backend deploys on Hetzner",
+            "the auth module is reviewed by Nadia",
+            "Postgres added parallel materialized views",
+            "which package manager does the user prefer, exactly: pnpm",
+        ];
+        let candidates: Vec<RerankCandidate> = texts
+            .iter()
+            .map(|text| RerankCandidate {
+                id: MemoryId::new(),
+                text,
+            })
+            .collect();
+
+        let question = "which package manager does the user prefer";
+        let whole = reranker.score(question, &candidates).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut in_runs = Vec::new();
+        for run in candidates.chunks(2) {
+            in_runs.extend(reranker.score_before(question, run, deadline).unwrap());
+        }
+
+        assert_eq!(in_runs.len(), whole.len());
+        for (position, (one, chunked)) in whole.iter().zip(&in_runs).enumerate() {
+            assert!(
+                (one - chunked).abs() < 1e-6,
+                "candidate {position} scored {one} in one call and {chunked} in \
+                 runs: {whole:?} vs {in_runs:?}"
+            );
+        }
     }
 
     fn model_cache_dir() -> PathBuf {

@@ -49,6 +49,7 @@ use crate::shared::ids::MemoryId;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// The longest entity name, in words, the query scanner will try to match.
@@ -575,48 +576,77 @@ impl MemoryRecaller {
             }
         };
         let rerank_ms = started.elapsed().as_millis() as u64;
+        if !leg.complete {
+            // The part that finished is applied, so this is not a failure and
+            // the client sees `applied`. It is still a host that could not
+            // judge the head it was asked to, which is a capacity fact the
+            // operator needs from somewhere: here it is a warning naming how
+            // much was lost, not a green `applied` that looks like a win.
+            tracing::warn!(
+                judged = leg.scores.len(),
+                depth,
+                rerank_ms,
+                "rerank leg applied the part of the head it finished before its deadline"
+            );
+        }
 
         if self.rerank_mode == RerankMode::Shadow {
             let changed =
-                self.log_shadow_comparison(query.text(), &ranked[..depth], &leg, rerank_ms);
+                self.log_shadow_comparison(query.text(), &ranked[..depth], &leg.scores, rerank_ms);
             return (
                 ranked,
                 Some(RerankTrace::Shadow {
-                    judged: leg.len(),
+                    judged: leg.scores.len(),
                     changed,
                     took_ms: rerank_ms,
                 }),
             );
         }
 
-        self.ranker.apply_rerank(&mut ranked, &leg, now);
+        self.ranker.apply_rerank(&mut ranked, &leg.scores, now);
         (
             ranked,
             Some(RerankTrace::Applied {
-                judged: leg.len(),
+                judged: leg.scores.len(),
                 took_ms: rerank_ms,
             }),
         )
     }
 
     /// Asks the reranker to score the head, honouring
-    /// [`rerank_timeout`](Self::rerank_timeout). With a deadline set the
-    /// scoring runs on a detached thread, because the contract is
-    /// synchronous and a timed-out call must not make the request wait
-    /// for inference it has given up on.
+    /// [`rerank_timeout`](Self::rerank_timeout) in runs of
+    /// [`Reranker::preferred_chunk`].
     ///
-    /// That thread waits for a session under the same deadline
-    /// ([`Reranker::score_before`]), so a saturated host stops spending work
-    /// on requests it has already answered: a thread that cannot get a
-    /// session returns busy rather than queueing behind the head in flight.
-    /// Inference already under way is still not bounded here — ONNX cannot be
-    /// pre-empted — which is what chunking the head buys (Phase 1.3).
+    /// Two different things are bounded here, and they were two different
+    /// bugs.
+    ///
+    /// *Waiting* for a session is bounded by the deadline itself
+    /// ([`Reranker::score_before`]): a saturated host gets `busy` back instead
+    /// of queueing a thread behind a head whose request has already been
+    /// answered.
+    ///
+    /// *Judging* is bounded by the chunk. Each run's scores are sent as they
+    /// land, and the flag below tells the worker to stop at its next boundary.
+    /// ONNX cannot be pre-empted mid-batch, so what a missed deadline abandons
+    /// is one run of inference rather than the whole head.
+    ///
+    /// What finished before the deadline is kept and applied: those ranks are
+    /// real evidence about those candidates, and [`apply_rerank`] already treats
+    /// a leg covering part of the head as an ordering for that part. Two is the
+    /// floor for using it, because one score cannot reorder anything — the same
+    /// reason [`RerankTrace::NotNeeded`] exists. A *model* error is not treated
+    /// that way: it is reported as the failure it is, because answering
+    /// `applied` while the model is broken hides exactly the thing the operator
+    /// needs to see.
+    ///
+    /// [`apply_rerank`]: crate::memories::domain::recall_ranker::RecallRanker::apply_rerank
     fn rerank_scores(
         &self,
         reranker: &Arc<dyn Reranker>,
         query: &str,
         head: &[ScoredMemory],
-    ) -> std::result::Result<Vec<(MemoryId, f32)>, RerankFailure> {
+    ) -> std::result::Result<RerankLeg, RerankFailure> {
+        let ids: Vec<MemoryId> = head.iter().map(|scored| scored.memory.id()).collect();
         if self.rerank_timeout.is_zero() {
             let candidates: Vec<RerankCandidate> = head
                 .iter()
@@ -627,49 +657,120 @@ impl MemoryRecaller {
                 .collect();
             return reranker
                 .score(query, &candidates)
-                .and_then(|scores| align_rerank(head, scores))
+                .and_then(|scores| align_positions(&ids, scores).map(order_best_first))
+                .map(|scores| RerankLeg {
+                    scores,
+                    complete: true,
+                })
                 .map_err(RerankFailure::model);
         }
 
-        let reranker = Arc::clone(reranker);
-        let query = query.to_string();
-        let texts: Vec<(MemoryId, String)> = head
-            .iter()
-            .map(|scored| (scored.memory.id(), scored.memory.content().to_string()))
-            .collect();
-        // One instant for both halves of the wait: the thread stops waiting
-        // for a session at it (`score_before`), and this side stops waiting
-        // for the answer at it (`recv_timeout`). Handing the thread a
-        // duration instead would let the two drift apart by the time it takes
-        // to spawn, which is exactly how a stage ends up scoring a head whose
-        // request was answered a moment ago.
+        // A model with no opinion on run size is scored in one run, which is
+        // exactly what this did before chunking existed.
+        let chunk = reranker.preferred_chunk().unwrap_or(head.len()).max(1);
+        let runs = head.len().div_ceil(chunk);
         let deadline = std::time::Instant::now() + self.rerank_timeout;
+        let stop = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let candidates: Vec<RerankCandidate> = texts
+        {
+            let reranker = Arc::clone(reranker);
+            let query = query.to_string();
+            let texts: Vec<(MemoryId, String)> = head
                 .iter()
-                .map(|(id, text)| RerankCandidate { id: *id, text })
+                .map(|scored| (scored.memory.id(), scored.memory.content().to_string()))
                 .collect();
-            // The receiver may have walked away (timeout): drop silently.
-            let _ = sender.send(reranker.score_before(&query, &candidates, deadline));
-        });
+            let stop = Arc::clone(&stop);
+            // One instant for both halves of the wait: the thread stops waiting
+            // for a session at it, and this side stops waiting for the answer at
+            // it. Handing the thread a duration instead would let the two drift
+            // apart by the time it takes to spawn, which is how a stage ends up
+            // scoring a head whose request was answered a moment ago.
+            std::thread::spawn(move || {
+                for batch in texts.chunks(chunk) {
+                    // Checked *before* starting a run, never during: the run
+                    // that is already inside the model finishes, and the one
+                    // after it is the work this saves.
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let candidates: Vec<RerankCandidate> = batch
+                        .iter()
+                        .map(|(id, text)| RerankCandidate { id: *id, text })
+                        .collect();
+                    let scores = reranker.score_before(&query, &candidates, deadline);
+                    // The receiver walked away at its deadline: say nothing
+                    // further, and let the flag end the loop.
+                    if sender.send(scores).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
 
-        match receiver.recv_timeout(self.rerank_timeout) {
-            Ok(scores) => scores
-                .and_then(|scores| align_rerank(head, scores))
-                .map_err(RerankFailure::from_error),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RerankFailure {
-                skip: RerankSkip::Deadline,
-                busy: false,
-                error: RaError::Internal(format!(
-                    "rerank exceeded its {} ms deadline",
-                    self.rerank_timeout.as_millis()
-                )),
+        let mut judged: Vec<(MemoryId, f32)> = Vec::with_capacity(head.len());
+        let mut next_run = 0usize;
+        let mut interrupted: Option<RerankFailure> = None;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            // One worker, sending sequentially, so the answers arrive in order
+            // and this side's own counter is the run index — no need to carry
+            // it across the channel to find out which candidates these are.
+            match receiver.recv_timeout(remaining) {
+                Ok(Ok(scores)) => {
+                    let batch = &ids[next_run * chunk..ids.len().min((next_run + 1) * chunk)];
+                    match align_positions(batch, scores) {
+                        Ok(pairs) => judged.extend(pairs),
+                        Err(error) => {
+                            interrupted = Some(RerankFailure::model(error));
+                            break;
+                        }
+                    }
+                    next_run += 1;
+                    if next_run == runs {
+                        break;
+                    }
+                }
+                Ok(Err(error)) => {
+                    interrupted = Some(RerankFailure::from_error(error));
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    interrupted = Some(RerankFailure {
+                        skip: RerankSkip::Deadline,
+                        busy: false,
+                        error: RaError::Internal(format!(
+                            "rerank exceeded its {} ms deadline",
+                            self.rerank_timeout.as_millis()
+                        )),
+                    });
+                    break;
+                }
+                // The scoring thread panicked (or died) rather than answering.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    interrupted = Some(RerankFailure::model(RaError::Internal(
+                        "rerank thread died".to_string(),
+                    )));
+                    break;
+                }
+            }
+        }
+        // Unconditionally, because both ways through this want it: a leg that
+        // stopped early must not spend inference on candidates it will not
+        // apply, and a complete leg has nothing left to ask the worker for.
+        stop.store(true, Ordering::SeqCst);
+
+        let scores = order_best_first(judged);
+        match interrupted {
+            Some(failure) if failure.skip == RerankSkip::Model => Err(failure),
+            Some(failure) if scores.len() < 2 => Err(failure),
+            Some(_) => Ok(RerankLeg {
+                scores,
+                complete: false,
             }),
-            // The scoring thread panicked (or died) rather than answering.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(RerankFailure::model(
-                RaError::Internal("rerank thread died".to_string()),
-            )),
+            None => Ok(RerankLeg {
+                scores,
+                complete: true,
+            }),
         }
     }
 
@@ -769,11 +870,14 @@ impl RerankFailure {
     }
 }
 
-/// Pairs each reranker score with the candidate it belongs to (the trait's
-/// alignment contract, enforced here) and orders the pairs best-first.
-/// Ties keep the incoming — fused — order, so the leg is deterministic in
-/// the same sense the fusion is.
-fn align_rerank(head: &[ScoredMemory], scores: Vec<f32>) -> Result<Vec<(MemoryId, f32)>> {
+/// Pairs each reranker score with the candidate it belongs to, in the order
+/// the candidates were given (the trait's alignment contract, enforced here).
+///
+/// A run-at-a-time leg builds itself from these: append each run's pairs and
+/// order once at the end, and the result is the same list a single whole-head
+/// call would have produced, because a score belongs to a `(query, candidate)`
+/// pair and not to the batch it happened to travel in.
+fn align_positions(head: &[MemoryId], scores: Vec<f32>) -> Result<Vec<(MemoryId, f32)>> {
     if scores.len() != head.len() {
         return Err(RaError::Internal(format!(
             "reranker returned {} scores for {} candidates",
@@ -781,14 +885,34 @@ fn align_rerank(head: &[ScoredMemory], scores: Vec<f32>) -> Result<Vec<(MemoryId
             head.len()
         )));
     }
-    let mut leg: Vec<(MemoryId, f32)> = head
-        .iter()
-        .map(|scored| scored.memory.id())
-        .zip(scores)
-        .collect();
-    leg.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(leg)
+    Ok(head.iter().copied().zip(scores).collect())
 }
+
+/// Orders a leg best-first. Ties keep the incoming — fused — order, so the leg
+/// is deterministic in the same sense the fusion is.
+fn order_best_first(mut leg: Vec<(MemoryId, f32)>) -> Vec<(MemoryId, f32)> {
+    leg.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    leg
+}
+
+/// What the rerank leg managed to judge: the judged candidates in rank order,
+/// and whether they were the whole head.
+///
+/// The second field is the difference between a stage that ran and one that ran
+/// out of time halfway. It is not a new wire value — a client sees
+/// `applied` with `judged` below the depth it asked for, which the SDK's
+/// existing shape carries — but the log and the audit counters need the fact
+/// itself, because "the last two of ten were cut" and "all ten were judged"
+/// mean different things about the machine.
+struct RerankLeg {
+    scores: Vec<(MemoryId, f32)>,
+    complete: bool,
+}
+
+// Invariant, held by `rerank_scores`: `scores` has at least two entries. A leg
+// too short to reorder anything comes back as `Err` (so the response says
+// `skipped`) rather than as an applied leg of one, and `log_shadow_comparison`
+// relies on that when it reads the leg's top result.
 
 /// A short, stable hash of the query for shadow logs: enough to correlate
 /// a log line with a request, not enough to read the query back.
@@ -866,7 +990,7 @@ fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::U
 mod tests {
     use super::*;
     use crate::memories::application::test_doubles::{
-        BusyReranker, Fixture, fixed_clock, new_memory, now,
+        BusyReranker, ChunkedReranker, Fixture, fixed_clock, new_memory, now,
     };
     use crate::memories::domain::category::Category;
     use crate::memories::domain::entity_graph::{EntityGraph, Relation};
@@ -1486,6 +1610,33 @@ mod tests {
     /// Two recalls with equal fingerprints are indistinguishable to every
     /// client, which is the identity DoD.
     type Fingerprint = Vec<(String, u32, u32, Option<usize>, Option<u32>)>;
+
+    /// The first digit in a fixture memory's content, which is what
+    /// `ChunkedReranker` scores on: lets a test compute the order it expects
+    /// from the order fusion produced, instead of hard-coding either.
+    fn digit(content: &str) -> u32 {
+        content
+            .chars()
+            .find_map(|ch| ch.to_digit(10))
+            .unwrap_or_else(|| panic!("no digit in fixture content {content:?}"))
+    }
+
+    /// Waits for a detached scoring thread to reach a state.
+    ///
+    /// The rerank leg's thread outlives the request by design — that is what
+    /// letting a deadline expire means — so a counter it owns cannot be read
+    /// the moment `execute_traced` returns. Asserting one immediately passes on
+    /// an idle machine and fails when the suite runs six test binaries at once,
+    /// which is a measurement error in the test rather than a defect found.
+    fn waits_for(predicate: impl Fn() -> bool) -> bool {
+        for _ in 0..400 {
+            if predicate() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
 
     fn fingerprint(results: &[ScoredMemory]) -> Fingerprint {
         results
@@ -2220,7 +2371,6 @@ mod tests {
         )
         .execute_traced(&fixture.alex, &query("pnpm"))
         .unwrap();
-        drop(held);
 
         // The wire says what it has always said for "the stage did not make
         // it": no third reason value, because the shipped SDKs reject one.
@@ -2235,13 +2385,29 @@ mod tests {
             "a busy stage should be `skipped`/`deadline`, got {:?}",
             report.rerank
         );
-        assert_eq!(busy.refusals(), 1, "the stage should have said busy");
+        // The session stays held while the refusal is waited for. Releasing it
+        // here would let a worker that the scheduler had not run yet take it
+        // *after* its own deadline and judge the head, and then there would be
+        // no refusal left to observe — the test would be reading whether this
+        // thread or that one won.
+        assert!(
+            waits_for(|| busy.refusals() == 1),
+            "the stage should have said busy; it has refused {} times",
+            busy.refusals()
+        );
         assert_eq!(busy.judged(), 0, "a refused stage must not score anything");
+        drop(held);
     }
 
     /// Phase 1.2's concurrency case: with one session and everything slower
     /// than the budget, the second recall is refused rather than turned into
     /// a queue that then does work nobody is waiting for.
+    ///
+    /// The intervals are deliberately far apart (a head that costs ten times
+    /// the budget) and the start of the second call is gated on the first
+    /// actually holding the session: an earlier version used 150 ms against
+    /// 20 ms and slept 20 ms to get there, and it failed the first time the
+    /// suite ran with six other test binaries competing for the CPU.
     #[test]
     fn a_second_recall_does_not_queue_behind_a_busy_session() {
         let fixture = Fixture::new();
@@ -2249,14 +2415,14 @@ mod tests {
             fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
         }
         let question = query("pnpm");
-        let busy = Arc::new(BusyReranker::new(Duration::from_millis(150)));
+        let busy = Arc::new(BusyReranker::new(Duration::from_millis(400)));
         let recaller = || {
             replace_recaller(
                 &fixture,
                 Arc::clone(&busy) as Arc<dyn Reranker>,
                 RerankMode::On,
                 30,
-                Duration::from_millis(20),
+                Duration::from_millis(40),
             )
         };
         let first_recaller = recaller();
@@ -2264,55 +2430,298 @@ mod tests {
 
         std::thread::scope(|scope| {
             let first = scope.spawn(|| first_recaller.execute_traced(&fixture.alex, &question));
-            // Long enough for the first caller to be *inside* the session.
-            std::thread::sleep(Duration::from_millis(20));
+            // Not a sleep: wait until the first caller is *inside* the session,
+            // so the second one's refusal is about the pool and not about how
+            // fast this machine scheduled a thread.
+            assert!(
+                busy.wait_until_acquired(Duration::from_secs(2)),
+                "the first recall never reached the session to hold it busy"
+            );
 
-            let started = std::time::Instant::now();
             let second = second_recaller
                 .execute_traced(&fixture.alex, &question)
                 .unwrap();
-            let waited = started.elapsed();
-
+            let took_ms = match second.rerank {
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
+                    took_ms,
+                    ..
+                }) => took_ms,
+                other => {
+                    panic!("a busy stage is `skipped`/`deadline` to the client, got {other:?}")
+                }
+            };
+            // The leg's own elapsed time rather than the whole request's:
+            // retrieval takes whatever this machine gives it, and what is under
+            // test is that the stage gave up at its budget instead of waiting for
+            // a session. A queued leg reports the cost of the head in flight —
+            // 400 ms — so 200 still separates refusing from queueing by a
+            // factor of two without depending on how fast a thread wakes here.
             assert!(
-                matches!(
-                    second.rerank,
-                    Some(RerankTrace::Skipped {
-                        reason: RerankSkip::Deadline,
-                        ..
-                    })
-                ),
-                "a busy stage is `deadline` to the client, got {:?}",
-                second.rerank
+                took_ms <= 200,
+                "the rerank leg took {took_ms} ms against a 40 ms budget: that looks like \
+                 queueing for the session, not refusing (the head in flight costs 400 ms)"
             );
             assert!(
-                waited < Duration::from_millis(120),
-                "the second recall waited {waited:?} for a session instead of \
-                 returning at its 20 ms budget"
+                waits_for(|| busy.refusals() == 1),
+                "the second recall should have been refused, having scored nothing; \
+                 refusals so far: {}",
+                busy.refusals()
             );
-            assert_eq!(
-                busy.refusals(),
-                1,
-                "the second recall should have been refused, having scored nothing"
-            );
-            assert_eq!(
-                busy.judged(),
-                0,
-                "the refused recall scored a head before its deadline"
-            );
+            // What it did *not* do is asserted after the scope, once the first
+            // head has certainly finished: `judged` counts both callers, so
+            // reading it here would be reading a race.
             first.join().unwrap().unwrap();
         });
 
-        // What the refusal bought, read after the first head finishes: exactly
-        // one head was ever judged. Before the timed acquire, the abandoned
-        // caller queued on the session and judged a request that had already
-        // been answered — the accumulating work reranking-plan §12 (part
-        // three) measured as 34 → 120 ms per pair on a busy host.
-        std::thread::sleep(Duration::from_millis(250));
-        assert_eq!(
-            busy.judged(),
-            1,
-            "a recall that was refused still queued and scored a head"
+        // What the refusal bought: exactly one head was ever judged, and — the
+        // exact statement of "it did not queue" — the session was handed out
+        // once. Before the timed acquire, the abandoned caller blocked on the
+        // session, took a second token, and judged a request the client had
+        // already been answered; that accumulating work is what
+        // reranking-plan §12 (part three) measured as 34 → 120 ms per pair on a
+        // busy host.
+        assert!(
+            waits_for(|| busy.judged() == 1),
+            "the head that got the session should have been judged, and it was \
+             {} times",
+            busy.judged()
         );
+        assert_eq!(
+            busy.acquired(),
+            1,
+            "the refused recall took a session: it queued behind the head in \
+             flight instead of giving up"
+        );
+    }
+
+    /// Phase 1.3: a deadline that arrives mid-head keeps the part that
+    /// finished, and the rest of the head is left exactly as fusion ordered it.
+    #[test]
+    fn a_head_finished_part_way_is_applied_and_the_tail_keeps_its_order() {
+        let fixture = Fixture::new();
+        for index in 0..8 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        // One candidate a run, 60 ms each against 200 ms of budget: three land,
+        // the fourth would arrive at 240 and is dropped. How many *actually*
+        // made it is read back from the trace, because a machine competing with
+        // five other test binaries shifts those arrivals — this test is about
+        // the shape of a partial leg, not about this many milliseconds.
+        let chunked = Arc::new(ChunkedReranker::new(1, Duration::from_millis(60)));
+        let traced = replace_recaller(
+            &fixture,
+            Arc::clone(&chunked) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_millis(200),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+
+        let fused = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+        let head_len = fused.len();
+        let judged = match traced.rerank {
+            Some(RerankTrace::Applied { judged, .. }) if judged >= 2 && judged < head_len => judged,
+            other => panic!(
+                "a head of {head_len} scored 60 ms a candidate against a 200 ms budget \
+                 should have been judged part way, got {other:?}"
+            ),
+        };
+
+        // The digit in "note number N about pnpm" is this double's score, so the
+        // expected order is computed from the fused one rather than assumed: the
+        // judged prefix reordered by score, the tail exactly as fusion left it.
+        let by_digit: Vec<(MemoryId, u32)> = fused
+            .iter()
+            .map(|scored| (scored.memory.id(), digit(scored.memory.content())))
+            .collect();
+        let mut head = by_digit[..judged].to_vec();
+        head.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        let mut expected: Vec<String> = head.iter().map(|(id, _)| id.to_string()).collect();
+        expected.extend(by_digit[judged..].iter().map(|(id, _)| id.to_string()));
+        let got: Vec<String> = traced
+            .results
+            .iter()
+            .map(|scored| scored.memory.id().to_string())
+            .collect();
+
+        assert_eq!(
+            got, expected,
+            "the {judged} judged candidates should be reordered into the top \
+             {judged}, the tail left alone"
+        );
+    }
+
+    /// Phase 1.3's cancellation bound: the run already inside the model
+    /// finishes (it cannot be pre-empted), the next one is never started, and
+    /// the stage is not left stuck afterwards.
+    #[test]
+    fn a_leg_that_gives_up_stops_at_the_next_chunk_boundary() {
+        let fixture = Fixture::new();
+        for index in 0..8 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let chunked = Arc::new(ChunkedReranker::new(1, Duration::from_millis(60)));
+        // How many candidates the stage is asked about at all: the relevance
+        // floor decides that, and this test is about what happens *inside* a
+        // head, not about how deep this fixture's happens to be.
+        let head_len = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap()
+            .len();
+
+        let traced = replace_recaller(
+            &fixture,
+            Arc::clone(&chunked) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_millis(200),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+        let judged = match traced.rerank {
+            Some(RerankTrace::Applied { judged, .. }) if judged < head_len => judged,
+            other => panic!(
+                "a 200 ms budget against 60 ms a candidate should have abandoned \
+                 part of a head of {head_len}, got {other:?}"
+            ),
+        };
+        // Long enough for anything the worker went on to do to finish and be
+        // counted.
+        std::thread::sleep(Duration::from_millis(400));
+
+        assert!(
+            chunked.runs() <= judged + 1,
+            "the caller gave up after judging {judged}; the run already in flight was \
+             allowed to finish, so at most {} runs of work should have been spent, not {}",
+            judged + 1,
+            chunked.runs()
+        );
+
+        // Not stuck: a recall with room to think still judges the whole head.
+        let full = replace_recaller(
+            &fixture,
+            Arc::clone(&chunked) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+        assert!(
+            matches!(
+                full.rerank,
+                Some(RerankTrace::Applied { judged, .. }) if judged == head_len
+            ),
+            "a stage that abandoned a head must still serve a later one in full \
+             ({head_len} candidates), got {:?}",
+            full.rerank
+        );
+    }
+
+    /// One score cannot reorder anything, so a leg that got one candidate is a
+    /// skip, not an `applied` of one: the client keeps the fused order and is
+    /// told the stage did not contribute.
+    #[test]
+    fn one_judged_candidate_is_a_skip_rather_than_an_applied_of_one() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        // 150 ms a candidate against a 200 ms budget: one lands, and the second
+        // would arrive at 300. The ratio is wide so that "exactly one" is not a
+        // statement about how the scheduler treats this process today.
+        let chunked = Arc::new(ChunkedReranker::new(1, Duration::from_millis(150)));
+        let traced = replace_recaller(
+            &fixture,
+            chunked as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_millis(200),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+        let plain = fixture
+            .recaller()
+            .execute(&fixture.alex, &question)
+            .unwrap();
+
+        assert!(
+            matches!(
+                traced.rerank,
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
+                    ..
+                })
+            ),
+            "one judged candidate is not a reorder, got {:?}",
+            traced.rerank
+        );
+        assert_eq!(
+            fingerprint(&traced.results),
+            fingerprint(&plain),
+            "a leg that was not applied changed the order"
+        );
+    }
+
+    /// The property the whole chunked path rests on: batching changes when the
+    /// recaller can take a rank, never which rank a candidate gets.
+    #[test]
+    fn runs_are_a_yield_point_and_not_a_change_to_the_ranking() {
+        let fixture = Fixture::new();
+        for index in 0..4 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+        let question = query("pnpm");
+        let one_at_a_time = Arc::new(ChunkedReranker::new(1, Duration::ZERO));
+        let whole_head = Arc::new(ChunkedReranker::new(8, Duration::ZERO));
+
+        let chunked = replace_recaller(
+            &fixture,
+            Arc::clone(&one_at_a_time) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+        let unchunked = replace_recaller(
+            &fixture,
+            Arc::clone(&whole_head) as Arc<dyn Reranker>,
+            RerankMode::On,
+            30,
+            Duration::from_secs(5),
+        )
+        .execute_traced(&fixture.alex, &question)
+        .unwrap();
+
+        assert_eq!(
+            fingerprint(&chunked.results),
+            fingerprint(&unchunked.results),
+            "scoring the head one candidate at a time changed the ranking"
+        );
+        // And the runs really happened: an identical result from two paths that
+        // both scored once would prove nothing. The head's depth comes from the
+        // trace rather than from the fixture, because the relevance floor
+        // decides how much of the five the stage is asked about.
+        let judged = match chunked.rerank {
+            Some(RerankTrace::Applied { judged, .. }) => judged,
+            other => panic!("a generous budget should judge the whole head, got {other:?}"),
+        };
+        assert_eq!(
+            one_at_a_time.runs(),
+            judged,
+            "a chunk of 1 should spend one run per judged candidate"
+        );
+        assert_eq!(whole_head.runs(), 1, "a chunk of 8 should be one run");
     }
 
     #[test]
