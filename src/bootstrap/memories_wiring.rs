@@ -328,39 +328,25 @@ impl RecallCore {
     }
 }
 
-/// One recall pipeline per side of the audit's comparison
-/// (`reranking-plan.md` Phase 6.2).
-pub(crate) struct AuditRecall {
-    /// No second stage: the ordering a client sees today in a deployment
-    /// with `[rerank].mode = "off"`, and the ordering the operator is
-    /// comparing against in any other.
-    pub plain: MemoryRecaller,
-    /// The same pipeline with the reranker attached and `mode = On`, so
-    /// what it prints is what enabling the stage would serve.
-    pub reranked: MemoryRecaller,
-}
-
-/// Builds the audit's two pipelines over a store opened for reading
-/// (`reranking-plan.md` Phase 6.2).
+/// The indexes, the ranker and the system of record, wired into a recall
+/// pipeline with **no** second stage — the part every audit side shares.
+///
+/// Every column of `rerank audit` / `recall audit` is built from here, so the
+/// wiring rules (read-only keyword index, one similarity baseline, one clock,
+/// the keyword leg must be populated) cannot drift between two sides of a
+/// comparison — an audit whose "before" pipeline had drifted from the served
+/// one would report a difference that was only the drift.
 ///
 /// Deliberately not a `Memories`: that context carries the saver, updater
-/// and forgetter, and a command whose entire promise is that it cannot
-/// change a store should not be handed the objects that would.
-///
-/// `depth` is the audit's own (`--depth`, defaulting to `[rerank].depth`)
-/// and the timeout is *none*: this is an offline tool, so measuring what
-/// the model actually costs matters more than bounding a request nobody is
-/// waiting for. The configured `timeout_ms` is still what a live
-/// deployment would enforce, which is why the report prints both.
-pub(crate) fn assemble_audit_recall(
+/// and forgetter, and a command whose entire promise is that it cannot change
+/// a store should not be handed the objects that would.
+fn assemble_recall_base(
     config: &AppConfig,
     database: &Arc<SqliteDatabase>,
-    embedder: Arc<dyn Embedder>,
-    reranker: Arc<dyn Reranker>,
+    embedder: &Arc<dyn Embedder>,
     context: &UserContext,
-    depth: usize,
-) -> Result<AuditRecall> {
-    let core = RecallCore::open(config, database, &embedder, true, Arc::new(SystemClock))?;
+) -> Result<MemoryRecaller> {
+    let core = RecallCore::open(config, database, embedder, true, Arc::new(SystemClock))?;
     // Refuse a store whose keyword leg is dead rather than audit it. The
     // recaller treats a failing keyword search as degradation — right for a
     // request, wrong for a measurement: the "before" column would be a
@@ -373,23 +359,52 @@ pub(crate) fn assemble_audit_recall(
             context.handle()
         )));
     }
-    let base = MemoryRecaller::new(
+    Ok(MemoryRecaller::new(
         Arc::clone(&core.repository),
         Arc::clone(&core.vectors),
         Arc::clone(&core.text),
-        Arc::clone(&embedder),
+        Arc::clone(embedder),
         core.ranker,
         Arc::clone(&core.clock),
         core.graph,
         config.graph.max_hops,
         config.graph.hop_limit,
-    );
-    // One handle without the stage, one with — from the same clone, so the
-    // only difference between the two orderings is the thing being judged.
-    Ok(AuditRecall {
-        plain: base.with_second_stage(None, RerankMode::Off, depth, Duration::ZERO),
-        reranked: base.with_second_stage(Some(reranker), RerankMode::On, depth, Duration::ZERO),
-    })
+    ))
+}
+
+/// One side of a comparison, built from that side's own config over a store
+/// opened for reading (recall-quality-plan.md Task 0.5).
+///
+/// The `rerank audit` alias calls this twice with the *same* config, forcing
+/// the mode `Off` then `On`; `recall audit --compare-config` calls it once per
+/// config, so the whole config is what differs — graph weights, recency,
+/// hybrid on/off, the ranker's strategy. The guarantees are unchanged from the
+/// rerank audit: the keyword index is read-only, nothing on this path writes,
+/// and the daemon may stay running.
+///
+/// `reranker` is the model to attach and `mode` this side's effective mode:
+/// `[rerank].mode` as configured for a `--compare-config` side, or the forced
+/// `On` / `Off` of the `rerank audit` alias. Asking for a stage with no model
+/// is a wiring bug and says so, rather than quietly serving one side a
+/// different pipeline than it claimed to run.
+pub(crate) fn assemble_recall_side(
+    config: &AppConfig,
+    database: &Arc<SqliteDatabase>,
+    embedder: Arc<dyn Embedder>,
+    reranker: Option<Arc<dyn Reranker>>,
+    mode: RerankMode,
+    context: &UserContext,
+    depth: usize,
+) -> Result<MemoryRecaller> {
+    if mode != RerankMode::Off && reranker.is_none() {
+        return Err(RaError::Internal(format!(
+            "an audit side asked for rerank mode {mode:?} with no model attached"
+        )));
+    }
+    let base = assemble_recall_base(config, database, &embedder, context)?;
+    // No deadline, exactly as the rerank audit: an offline tool measuring what
+    // a stage costs must not be cut off in the middle of it.
+    Ok(base.with_second_stage(reranker, mode, depth, Duration::ZERO))
 }
 
 /// Resolve the vector-leg relevance baseline for one instance (task 2.2).

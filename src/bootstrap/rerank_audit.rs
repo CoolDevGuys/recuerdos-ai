@@ -1,5 +1,19 @@
-//! `recuerdos-ai rerank audit` — the reranker's opinion about memories that
-//! already exist (reranking-plan.md Phase 6.2).
+//! `recuerdos-ai rerank audit` / `recuerdos-ai recall audit` — the pipeline's
+//! opinion about memories that already exist (reranking-plan.md Phase 6.2,
+//! recall-quality-plan.md Task 0.5).
+//!
+//! # Two commands, one measurement
+//!
+//! `rerank audit` compares one config with and without its second stage: the
+//! pair Phase 6.2 shipped, now expressed as the special case where both sides
+//! come from the same file and the mode is forced `off` then `on`.
+//!
+//! `recall audit --config a.toml --compare-config b.toml` compares **two
+//! configs** — any difference between them, not only the reranker: graph
+//! weights, recency, hybrid on/off, the fusion strategy. That is what the
+//! recall-quality plan needs in order to judge a knob on real memories instead
+//! of on the eval corpus, and with no second file the two sides are the same
+//! config, which is the self-comparison that must report zero changes.
 //!
 //! # Why a command, and why over a real store
 //!
@@ -30,9 +44,15 @@
 //! * **It works with the daemon running.** No writer, so no fight for
 //!   tantivy's per-index-directory writer lock. (SQLite is opened normally,
 //!   which means the usual WAL reader alongside the daemon's writer.)
-//! * **Both sides are the real pipeline.** The two recallers are one `Clone`
-//!   over one set of indexes, so the only difference between the columns is
-//!   the second stage — not a hand-duplicated wiring that drifted.
+//! * **Both sides are the real pipeline.** Each column is assembled by
+//!   `memories_wiring::assemble_recall_side` from its own config over the same
+//!   store, so the difference between the columns is the config being judged and
+//!   not a hand-duplicated wiring that drifted. `rerank audit`'s pair comes from
+//!   one config, so only the stage differs.
+//! * **One store, one embedder.** A `--compare-config` naming a different
+//!   `[embeddings].model` or a different `[storage].path` is refused: the vectors
+//!   on disk were built by one model and one directory, and a column measured
+//!   against anything else is a confident report about nothing.
 //!
 //! # What it changes about the live pipeline, and why that is disclosed
 //!
@@ -52,17 +72,17 @@
 use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::eval::{percentile, truncate};
 use crate::bootstrap::memories_wiring::{
-    self, AuditRecall, assemble_audit_recall, load_reranker_for_audit, rerank_strategy,
+    self, assemble_recall_side, load_reranker_for_audit, rerank_strategy,
 };
 use crate::bootstrap::wiring;
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
 use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
-use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
+use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, RerankTrace};
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{RerankStrategy, ScoredMemory};
-use crate::memories::domain::reranker::{RerankCandidate, Reranker};
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use crate::shared::sqlite::SqliteDatabase;
@@ -101,6 +121,37 @@ pub struct AuditOptions<'a> {
     pub limit: usize,
     /// `Some` overrides `[rerank].depth`; `None` audits the configured depth.
     pub depth: Option<usize>,
+    /// The second config, for `recall audit --compare-config`
+    /// (recall-quality-plan.md Task 0.5). `None` is the `rerank audit` alias:
+    /// the *same* config replayed with the rerank stage forced off and on,
+    /// which is what Phase 6.2 shipped.
+    ///
+    /// Given a config, the two columns are that pair of configs as written —
+    /// `[rerank].mode` and `[rerank].depth` included, so a side that ships
+    /// `mode = "off"` is measured with no stage rather than a hypothetical one.
+    pub compare: Option<&'a AppConfig>,
+}
+
+/// What one column of the comparison was built from, so a report can be read
+/// a month later without remembering which file was which.
+#[derive(Debug, Clone, Serialize)]
+pub struct SideInfo {
+    /// How the column was asked for: the config path for `recall audit`,
+    /// `"[rerank].mode = off"` / `"on"` for the alias.
+    pub label: String,
+    /// The reranker this column actually ran with, or `"none"`.
+    pub reranker: String,
+    /// How this column's rerank leg is fused, weight included when it has one.
+    pub strategy: String,
+    /// The mode this column ran with, and whether it was forced: `off`, `on`,
+    /// `shadow`, or e.g. `off (forced)`.
+    pub mode: String,
+    /// The head this column's stage judges (`[rerank].depth`, or `--depth`).
+    pub depth: usize,
+    /// Wall-clock recall per query, in milliseconds: the whole pipeline,
+    /// embedder included. `None` when nothing ran.
+    pub recall_ms_p50: Option<f64>,
+    pub recall_ms_p95: Option<f64>,
 }
 
 /// The whole run: what was measured, per query, and the summary.
@@ -117,6 +168,10 @@ pub struct AuditReport {
     pub embedder: String,
     pub reranker: String,
     /// How the rerank leg is fused, weight included when it has one.
+    ///
+    /// The *`after`* side's strategy, which for the alias is the only side
+    /// with a choice to make. Two-config runs read [`AuditReport::before`] and
+    /// [`AuditReport::after`] instead: there, each side has its own.
     pub strategy: String,
     /// The head the reranker judged per query (`--depth` or `[rerank].depth`).
     pub depth: usize,
@@ -131,6 +186,13 @@ pub struct AuditReport {
     /// `[retrieval].min_relevance`: what a live request drops below. The
     /// audit runs floorless (module docs).
     pub live_min_relevance: f32,
+    /// The `before` column: which config it came from, which stage it ran, and
+    /// what it cost (Task 0.5).
+    pub before: SideInfo,
+    /// The `after` column, same shape. For the `rerank audit` alias this is
+    /// the same config with the stage forced on, so its numbers agree with
+    /// the `reranker`/`strategy`/`depth` fields above.
+    pub after: SideInfo,
     pub queries: Vec<QueryAudit>,
     pub summary: AuditSummary,
 }
@@ -168,6 +230,17 @@ pub struct QueryAudit {
     /// candidates to reorder).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
+    /// What the *reference* column's own second stage did, when that side has
+    /// one: `applied`, `skipped-deadline`, `skipped-model`, `not-needed` or
+    /// `shadow`.
+    ///
+    /// Absent for the `rerank audit` alias, whose reference column never has a
+    /// stage. It exists for `recall audit --compare-config`: with a stage on
+    /// both sides, "the after column moved" can mean the before column's stage
+    /// gave up, and a report that could not say so would blame the change under
+    /// test for the reference side's failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_stage: Option<String>,
     /// 1-based rank of the first memory containing `expect` before / after,
     /// `None` when there was no expectation or it was not in the window.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -261,9 +334,27 @@ pub struct AuditSummary {
     pub precision_at_1_after: Option<f64>,
     pub mrr_before: Option<f64>,
     pub mrr_after: Option<f64>,
+    /// 0–100 over `expectations`: the expectation was *somewhere* in the
+    /// window, before / after — `complete@k` in the audit's one-expectation
+    /// form (recall-quality-plan.md Task 0.4 defines it over a case's whole
+    /// `expect` list; a query file carries one substring, so "complete" here
+    /// is "the answer survived into what a client is shown").
+    ///
+    /// It is the figure the two-config comparison needs most: a change that
+    /// pulls the answer to rank 1 while dropping a second half of it out of
+    /// the window shows up as p@1 up, complete down — which one number cannot
+    /// say. Same `None`-when-unmeasured rule as the four above.
+    pub complete_before: Option<f64>,
+    pub complete_after: Option<f64>,
 }
 
 /// Runs the audit against the store in `config` and returns the report.
+///
+/// `config` is the `--config` side, and it is also *the store*: `[storage]`
+/// and `[embeddings]` are read from it alone, because the vectors on disk were
+/// built by exactly one model and a second config that quietly swapped it would
+/// not be a different pipeline over the same memories — it would be a
+/// measurement of nothing. [`plan_sides`] refuses that.
 ///
 /// Rendering is the caller's job ([`print_human`], or serde for `--json`) so
 /// nothing here depends on stdout.
@@ -286,46 +377,162 @@ pub fn run(config: &AppConfig, options: &AuditOptions) -> Result<AuditReport> {
     // at all — and `verify_pin` inside the assembly refuses that mismatch
     // rather than reporting nonsense built on a dimension error.
     let embedder = memories_wiring::build_embedder(config)?;
-    let model = load_reranker_for_audit(config)?;
-    let reranker_name = model.model_id().to_string();
-    let depth = options.depth.unwrap_or(config.rerank.depth);
+    let sides = plan_sides(config, options)?;
 
     // stderr, deliberately: the report is stdout, and with `--json` stdout is
     // a file someone parses.
     eprintln!(
-        "auditing {} queries for user {} ({} results each, rerank depth {depth})",
+        "auditing {} queries for user {} ({} results each): {} vs {}",
         queries.len(),
         context.handle(),
-        options.limit
+        options.limit,
+        sides[0].label,
+        sides[1].label,
     );
 
-    let replay = Replay {
-        config,
+    replay_orderings(Replay {
         database: &database,
         context: &context,
         embedder,
-        reranker: Arc::new(model),
-        reranker_name,
         queries: &queries,
         limit: options.limit,
-        depth,
-    };
-    replay_orderings(replay)
+        sides,
+    })
 }
 
-/// Everything a replay needs, as one value: the store, the models, and the
-/// queries — nine separate arguments would have been a call site nobody could
-/// read.
-struct Replay<'a> {
+/// One column of the comparison: the config it was built from, the second
+/// stage it actually runs, and what to call it in the report.
+struct Side<'a> {
+    label: String,
     config: &'a AppConfig,
+    /// The mode this column runs with — `[rerank].mode` as written, or the
+    /// alias's `Off`/`On`.
+    mode: RerankMode,
+    /// Whether that mode was forced rather than configured, so the report can
+    /// say "off (forced)" instead of implying the deployment runs that way.
+    forced: bool,
+    /// The model to attach: `Some` only when `mode` is not `Off`.
+    reranker: Option<Arc<dyn Reranker>>,
+    /// Its id, or [`NO_RERANKER`]. Kept as a string because the trait has no
+    /// `model_id`; the concrete loader does.
+    reranker_name: String,
+    depth: usize,
+}
+
+/// The label for a column that runs no second stage.
+const NO_RERANKER: &str = "none";
+
+/// Which two pipelines the report compares.
+///
+/// With `--compare-config`, both sides are *as written*: a side whose
+/// `[rerank].mode` is `off` runs no stage and pays nothing for a model, and a
+/// side whose mode is `on` loads its own. Without it — the `rerank audit` alias
+/// — the two sides are the one config with the stage forced off and on, which
+/// is Phase 6.2's behaviour and loads the model whatever the config says,
+/// because deciding whether to enable it is the whole point of the command.
+fn plan_sides<'a>(config: &'a AppConfig, options: &AuditOptions<'a>) -> Result<[Side<'a>; 2]> {
+    let Some(compare) = options.compare else {
+        let model = load_reranker_for_audit(config)?;
+        let name = model.model_id().to_string();
+        let depth = options.depth.unwrap_or(config.rerank.depth);
+        return Ok([
+            Side {
+                label: "[rerank].mode = off (forced)".to_string(),
+                config,
+                mode: RerankMode::Off,
+                forced: true,
+                reranker: None,
+                reranker_name: NO_RERANKER.to_string(),
+                depth,
+            },
+            Side {
+                label: format!("[rerank].mode = on (forced, {name})"),
+                config,
+                mode: RerankMode::On,
+                forced: true,
+                reranker: Some(Arc::new(model)),
+                reranker_name: name,
+                depth,
+            },
+        ]);
+    };
+
+    refuse_a_different_store(config, compare)?;
+    Ok([
+        side_as_configured("--config", config, options.depth)?,
+        side_as_configured("--compare-config", compare, options.depth)?,
+    ])
+}
+
+/// One `--compare-config` side, exactly as its config describes it.
+///
+/// The model is loaded only if the side asks for a stage. That matters twice
+/// over on the small box this command is for: a gigabyte of weights nobody
+/// asked to run, and a two-minute first load that looks like a hang.
+fn side_as_configured<'a>(
+    label: &str,
+    config: &'a AppConfig,
+    depth: Option<usize>,
+) -> Result<Side<'a>> {
+    let mode = memories_wiring::parse_rerank_mode(&config.rerank.mode)?;
+    // Loaded once, and its id read off the loaded model: the loader downloads
+    // a gigabyte on a cold cache, so calling it twice to learn a name would be
+    // an expensive way of printing a string.
+    let (reranker, reranker_name) = match mode {
+        RerankMode::Off => (None, NO_RERANKER.to_string()),
+        _ => {
+            let model = load_reranker_for_audit(config)?;
+            let name = model.model_id().to_string();
+            (Some(Arc::new(model) as Arc<dyn Reranker>), name)
+        }
+    };
+    Ok(Side {
+        label: format!("{label} · rerank {}", mode_name(mode)),
+        config,
+        mode,
+        forced: false,
+        reranker,
+        reranker_name,
+        depth: depth.unwrap_or(config.rerank.depth),
+    })
+}
+
+/// Refuse a second config that would not be reading this store.
+///
+/// `[storage].path` and `[embeddings].model` are not tuning knobs: one picks a
+/// different database, the other a model whose vectors this store does not
+/// contain. Either would produce a confident report about nothing, so the
+/// command stops and names the difference instead.
+fn refuse_a_different_store(config: &AppConfig, compare: &AppConfig) -> Result<()> {
+    if compare.embeddings.model != config.embeddings.model {
+        return Err(RaError::Validation(format!(
+            "the two configs name different embedding models ({} vs {}): the vectors in this \
+             store were built by one of them, so one side would be scored against vectors it \
+             cannot read",
+            config.embeddings.model, compare.embeddings.model
+        )));
+    }
+    if compare.data_dir() != config.data_dir() {
+        return Err(RaError::Validation(format!(
+            "the two configs point at different stores ({} vs {}): the audit replays one \
+             store's queries over that same store, never over a second one",
+            config.data_dir().display(),
+            compare.data_dir().display()
+        )));
+    }
+    Ok(())
+}
+
+/// Everything a replay needs, as one value: the store, the two pipelines, and
+/// the queries — several separate arguments would have been a call site nobody
+/// could read.
+struct Replay<'a> {
     database: &'a Arc<SqliteDatabase>,
     context: &'a UserContext,
     embedder: Arc<dyn Embedder>,
-    reranker: Arc<dyn Reranker>,
-    reranker_name: String,
     queries: &'a [AuditQuery],
     limit: usize,
-    depth: usize,
+    sides: [Side<'a>; 2],
 }
 
 /// The measurement, over a store and models handed in.
@@ -336,72 +543,162 @@ struct Replay<'a> {
 /// real read-only indexes and the real arithmetic.
 fn replay_orderings(input: Replay<'_>) -> Result<AuditReport> {
     let Replay {
-        config,
         database,
         context,
         embedder,
-        reranker,
-        reranker_name,
         queries,
         limit,
-        depth,
+        sides,
     } = input;
+    let [before_side, after_side] = sides;
 
-    let metered = Arc::new(MeteredReranker::new(reranker));
-    let recall = assemble_audit_recall(
-        config,
-        database,
-        Arc::clone(&embedder),
-        Arc::clone(&metered) as Arc<dyn Reranker>,
-        context,
-        depth,
-    )?;
+    // Read off before the sides are consumed by wiring: this is what the
+    // report says about the *deployment* side (the `--config` config), which
+    // for the alias is the same file both columns came from.
+    let before_config = before_side.config;
+    let after_depth = after_side.depth;
+    let mut before_info = describe(&before_side);
+    let mut after_info = describe(&after_side);
 
-    let rows = queries
-        .iter()
-        .map(|query| audit_one(&recall, context, query, limit))
-        .collect::<Result<Vec<_>>>()?;
+    let (before, before_meter) = wire_side(before_side, database, &embedder, context)?;
+    let (after, after_meter) = wire_side(after_side, database, &embedder, context)?;
 
-    let strategy = match rerank_strategy(&config.rerank) {
-        RerankStrategy::Rrf { weight } => format!("rrf(weight {weight})"),
-        RerankStrategy::Replace => "replace".to_string(),
-    };
-    let summary = summarise(&rows, &metered.timings());
+    let mut rows = Vec::with_capacity(queries.len());
+    let mut before_ms = Vec::with_capacity(queries.len());
+    let mut after_ms = Vec::with_capacity(queries.len());
+    for query in queries {
+        let pairing = audit_pair(&before, &after, context, query, limit)?;
+        before_ms.push(pairing.before_ms);
+        after_ms.push(pairing.after_ms);
+        rows.push(pairing.audit);
+    }
+
+    before_info.recall_ms_p50 = percentile(&before_ms, 50.0);
+    before_info.recall_ms_p95 = percentile(&before_ms, 95.0);
+    after_info.recall_ms_p50 = percentile(&after_ms, 50.0);
+    after_info.recall_ms_p95 = percentile(&after_ms, 95.0);
+
+    // The summary's rerank-stage figures belong to the *after* column: on the
+    // alias that is the only stage in the run, and on a two-config comparison it
+    // is the side the operator is deciding about. The before column's stage is
+    // per query instead ([`QueryAudit::before_stage`]), because a run where both
+    // sides rerank has no single "the stage" to summarise.
+    let after_calls = after_meter
+        .as_ref()
+        .map_or_else(Vec::new, |meter| meter.timings());
+    let _ = &before_meter;
+    let summary = summarise(&rows, &after_calls);
 
     Ok(AuditReport {
         user: context.handle().to_string(),
         embedder: embedder.model_id().to_string(),
-        reranker: reranker_name,
-        strategy,
-        depth,
+        reranker: after_info.reranker.clone(),
+        strategy: after_info.strategy.clone(),
+        depth: after_depth,
         limit,
-        configured_mode: config.rerank.mode.clone(),
-        live_timeout_ms: config.rerank.timeout_ms,
-        live_min_relevance: config.retrieval.min_relevance,
+        // What the deployment in `--config` serves today — the reference side,
+        // which for the alias is the same config both columns came from.
+        configured_mode: before_config.rerank.mode.clone(),
+        live_timeout_ms: before_config.rerank.timeout_ms,
+        live_min_relevance: before_config.retrieval.min_relevance,
+        before: before_info,
+        after: after_info,
         queries: rows,
         summary,
     })
 }
 
+/// Wire one side into a recall pipeline, metering its second stage if it has
+/// one (so [`AuditSummary`]'s stage latency belongs to the side that ran it).
+fn wire_side(
+    side: Side<'_>,
+    database: &Arc<SqliteDatabase>,
+    embedder: &Arc<dyn Embedder>,
+    context: &UserContext,
+) -> Result<(MemoryRecaller, Option<Arc<MeteredReranker>>)> {
+    let Side {
+        config,
+        mode,
+        reranker,
+        depth,
+        ..
+    } = side;
+    let metered = reranker.map(MeteredReranker::new).map(Arc::new);
+    let stage = metered
+        .as_ref()
+        .map(|meter| Arc::clone(meter) as Arc<dyn Reranker>);
+    let recaller = assemble_recall_side(
+        config,
+        database,
+        Arc::clone(embedder),
+        stage,
+        mode,
+        context,
+        depth,
+    )?;
+    Ok((recaller, metered))
+}
+
+/// What one side was, in the words the report prints. The latency fields are
+/// filled in by [`replay_orderings`], which is the only place that has run it.
+fn describe(side: &Side) -> SideInfo {
+    SideInfo {
+        label: side.label.clone(),
+        reranker: side.reranker_name.clone(),
+        strategy: match rerank_strategy(&side.config.rerank) {
+            RerankStrategy::Rrf { weight } => format!("rrf(weight {weight})"),
+            RerankStrategy::Replace => "replace".to_string(),
+        },
+        mode: match side.forced {
+            true => format!("{} (forced)", mode_name(side.mode)),
+            false => mode_name(side.mode),
+        },
+        depth: side.depth,
+        recall_ms_p50: None,
+        recall_ms_p95: None,
+    }
+}
+
+/// `RerankMode` as the report spells it.
+fn mode_name(mode: RerankMode) -> String {
+    match mode {
+        RerankMode::Off => "off".to_string(),
+        RerankMode::Shadow => "shadow".to_string(),
+        RerankMode::On => "on".to_string(),
+    }
+}
+
+/// One query through both columns: the two orderings, and what each side cost.
+struct Pairing {
+    audit: QueryAudit,
+    before_ms: f64,
+    after_ms: f64,
+}
+
 /// Both orderings for one query.
-fn audit_one(
-    recall: &AuditRecall,
+fn audit_pair(
+    before: &MemoryRecaller,
+    after: &MemoryRecaller,
     context: &UserContext,
     query: &AuditQuery,
     limit: usize,
-) -> Result<QueryAudit> {
+) -> Result<Pairing> {
     let request = RecallQuery::new(&query.text, limit as i64)?;
     // Untracked, both sides: this is the whole reason 6.1 exists.
-    let before = recall.plain.execute_untracked(context, &request)?;
-    let report = recall
-        .reranked
-        .execute_untracked_traced(context, &request)?;
-    let after = report.results;
+    let started = Instant::now();
+    let before_report = before.execute_untracked_traced(context, &request)?;
+    let before_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let started = Instant::now();
+    let after_report = after.execute_untracked_traced(context, &request)?;
+    let after_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+    let before_hits = before_report.results;
+    let after_hits = after_report.results;
 
     // Whether the "after" column is actually reranked. `None` means no stage
-    // ran at all, which for the audit can only be a wiring bug — treated as
+    // ran at all, which for the alias can only be a wiring bug — treated as
     // "did not contribute", because that is what the reader needs to know.
-    let (contributed, skip_reason) = match &report.rerank {
+    let (contributed, skip_reason) = match &after_report.rerank {
         Some(RerankTrace::Applied { .. }) => (true, None),
         Some(RerankTrace::Skipped { reason, .. }) => (
             false,
@@ -414,17 +711,38 @@ fn audit_one(
         Some(RerankTrace::Shadow { .. }) | None => (false, Some("not-applied")),
     };
 
-    let (before_positions, after_positions) = (ranks(&before), ranks(&after));
-    Ok(QueryAudit {
-        text: query.text.clone(),
-        expect: query.expect.clone(),
-        before: lines(&before, &after_positions),
-        after: lines(&after, &before_positions),
-        top1_changed: changed_top1(&before, &after),
-        contributed,
-        skip_reason: skip_reason.map(str::to_string),
-        expected_before: expected_rank(&before, query.expect.as_deref()),
-        expected_after: expected_rank(&after, query.expect.as_deref()),
+    let (before_positions, after_positions) = (ranks(&before_hits), ranks(&after_hits));
+    Ok(Pairing {
+        audit: QueryAudit {
+            text: query.text.clone(),
+            expect: query.expect.clone(),
+            before: lines(&before_hits, &after_positions),
+            after: lines(&after_hits, &before_positions),
+            top1_changed: changed_top1(&before_hits, &after_hits),
+            contributed,
+            skip_reason: skip_reason.map(str::to_string),
+            // `None` when the reference side has no stage at all — the usual
+            // case, and the reason this is not simply a bool.
+            before_stage: before_report.rerank.as_ref().and_then(stage_name),
+            expected_before: expected_rank(&before_hits, query.expect.as_deref()),
+            expected_after: expected_rank(&after_hits, query.expect.as_deref()),
+        },
+        before_ms,
+        after_ms,
+    })
+}
+
+/// What a column's second stage did, in one word, or `None` when it never had
+/// the chance (no stage configured).
+fn stage_name(trace: &RerankTrace) -> Option<String> {
+    Some(match trace {
+        RerankTrace::Applied { .. } => "applied".to_string(),
+        RerankTrace::Skipped { reason, .. } => match reason {
+            RerankSkip::Deadline => "skipped-deadline".to_string(),
+            RerankSkip::Model => "skipped-model".to_string(),
+        },
+        RerankTrace::NotNeeded { .. } => "not-needed".to_string(),
+        RerankTrace::Shadow { .. } => "shadow".to_string(),
     })
 }
 
@@ -578,7 +896,21 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
         }),
         mrr_before: mean_credential(&expected, |row| row.expected_before),
         mrr_after: mean_credential(&expected, |row| row.expected_after),
+        complete_before: mean_presence(&expected, |row| row.expected_before),
+        complete_after: mean_presence(&expected, |row| row.expected_after),
     }
+}
+
+/// The share of queries whose expectation is in the window at all: `1` when
+/// [`mean_credential`] would score it by *where* it landed, this scores only
+/// *whether* it landed. `None` when nothing was expected, for the same reason
+/// the four figures above are.
+fn mean_presence(rows: &[&QueryAudit], rank: fn(&QueryAudit) -> Option<usize>) -> Option<f64> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mean = rows.iter().filter(|row| rank(row).is_some()).count() as f64 / rows.len() as f64;
+    Some(mean * 100.0)
 }
 
 /// A reranker that records how long each call took.
@@ -758,12 +1090,20 @@ pub fn parse_queries(path: &Path) -> Result<Vec<AuditQuery>> {
 /// [`AuditReport`] for why `--json` leaves it out.
 pub fn print_human(report: &AuditReport) {
     println!(
-        "user {} · embedder {} · reranker {}",
-        report.user, report.embedder, report.reranker
+        "user {} · embedder {} · {} results per query",
+        report.user, report.embedder, report.limit
     );
     println!(
-        "strategy {} · depth {} · limit {} · live rerank timeout {} ms (none here)",
-        report.strategy, report.depth, report.limit, report.live_timeout_ms
+        "  before  {} · reranker {} · strategy {} · depth {}",
+        report.before.label, report.before.reranker, report.before.strategy, report.before.depth
+    );
+    println!(
+        "  after   {} · reranker {} · strategy {} · depth {} (a live request would bound it at {} ms; this audit does not)",
+        report.after.label,
+        report.after.reranker,
+        report.after.strategy,
+        report.after.depth,
+        report.live_timeout_ms,
     );
     println!(
         "serving mode {:?} — {}",
@@ -799,7 +1139,7 @@ pub fn print_human(report: &AuditReport) {
 
     let summary = &report.summary;
     println!("\n{}", "─".repeat(78));
-    if summary.contributed < summary.queries {
+    if summary.contributed < summary.queries && report.after.reranker != NO_RERANKER {
         // Before any number, because this is the case where the numbers
         // describe nothing: a stage that missed its deadline served the
         // `before` order, so the two columns agree for a reason that has
@@ -850,15 +1190,24 @@ pub fn print_human(report: &AuditReport) {
                 _ => "candidates".to_string(),
             };
             println!(
-                "rerank latency: p50 {:.0} ms   p95 {:.0} ms   ({} calls, {judged} judged; depth ceiling {})",
-                p50, p95, summary.rerank_calls, report.depth
+                "rerank latency (after side only): p50 {:.0} ms   p95 {:.0} ms   ({} calls, {judged} judged; depth ceiling {})",
+                p50, p95, summary.rerank_calls, report.after.depth
             );
         }
         _ => println!(
-            "rerank latency: not measured — the stage ran {} times (nothing to reorder below 2 candidates)",
+            "rerank latency: not measured — the after side ran its stage {} times (nothing to reorder below 2 candidates)",
             summary.rerank_calls
         ),
     }
+    // The pair a config change is judged on: the same queries, the same store,
+    // wall clock per column. The embedder is in both numbers, so the *difference*
+    // is what the change cost and the absolute is not comparable to another
+    // machine's — same rule `eval`'s latency columns follow.
+    println!(
+        "recall latency: {}   vs   {}",
+        recall_latency(&report.before),
+        recall_latency(&report.after),
+    );
     if summary.expectations == 0 {
         println!(
             "no `expect` in the query file: p@1 and MRR before/after need to be told \
@@ -866,13 +1215,16 @@ pub fn print_human(report: &AuditReport) {
         );
     } else {
         println!(
-            "expectations ({} of {} queries): p@1 {} → {}   MRR {} → {}",
+            "expectations ({} of {} queries): p@1 {} → {}   MRR {} → {}   complete@{} {} → {}",
             summary.expectations,
             summary.queries,
             percent(summary.precision_at_1_before),
             percent(summary.precision_at_1_after),
             percent(summary.mrr_before),
-            percent(summary.mrr_after)
+            percent(summary.mrr_after),
+            report.limit,
+            percent(summary.complete_before),
+            percent(summary.complete_after),
         );
     }
     if summary.top1_changed > 0 {
@@ -946,6 +1298,16 @@ fn short_id(id: &str) -> String {
 
 fn rank_text(rank: Option<usize>) -> String {
     rank.map_or_else(|| "absent".to_string(), |rank| rank.to_string())
+}
+
+/// One column's wall-clock line: `p50 8 ms p95 10 ms`, or the reason there is
+/// no number. Printed as a pair in the summary so the two columns read
+/// side by side.
+fn recall_latency(side: &SideInfo) -> String {
+    match (side.recall_ms_p50, side.recall_ms_p95) {
+        (Some(p50), Some(p95)) => format!("p50 {p50:.1} ms p95 {p95:.1} ms"),
+        _ => "not measured".to_string(),
+    }
 }
 
 fn percent(value: Option<f64>) -> String {
@@ -1045,16 +1407,75 @@ mod tests {
         depth: usize,
         queries: &[AuditQuery],
     ) -> AuditReport {
+        replay_sides(
+            store,
+            who,
+            8,
+            alias_sides(&store.config, Some(reranker), depth),
+            queries,
+        )
+    }
+
+    /// The `rerank audit` alias's pair over one config: stage forced off, then
+    /// forced on with the handed-in model. Tests script the reranker where
+    /// [`plan_sides`] would load `[rerank].model` from disk, and keep the fake's
+    /// name so the report's assertions read as they always did.
+    fn alias_sides<'a>(
+        config: &'a AppConfig,
+        reranker: Option<Arc<dyn Reranker>>,
+        depth: usize,
+    ) -> [Side<'a>; 2] {
+        [
+            Side {
+                label: "off".to_string(),
+                config,
+                mode: RerankMode::Off,
+                forced: true,
+                reranker: None,
+                reranker_name: NO_RERANKER.to_string(),
+                depth,
+            },
+            Side {
+                label: "on".to_string(),
+                config,
+                mode: RerankMode::On,
+                forced: true,
+                reranker,
+                reranker_name: "fake-reranker".to_string(),
+                depth,
+            },
+        ]
+    }
+
+    /// A `--compare-config` side with no second stage: the two-config tests
+    /// vary the ranking config, not the model, and loading a real model is not
+    /// what they are about.
+    fn plain_side<'a>(label: &str, config: &'a AppConfig) -> Side<'a> {
+        Side {
+            label: label.to_string(),
+            config,
+            mode: RerankMode::Off,
+            forced: false,
+            reranker: None,
+            reranker_name: NO_RERANKER.to_string(),
+            depth: config.rerank.depth,
+        }
+    }
+
+    fn replay_sides(
+        store: &Store,
+        who: &UserContext,
+        limit: usize,
+        sides: [Side<'_>; 2],
+        queries: &[AuditQuery],
+    ) -> AuditReport {
         replay_orderings(Replay {
-            config: &store.config,
             database: &store.database,
             context: who,
             embedder: Arc::clone(&store.embedder),
-            reranker,
-            reranker_name: "fake-reranker".to_string(),
             queries,
-            limit: 8,
-            depth,
+            limit,
+            sides,
         })
         .expect("the audit should run over a seeded store")
     }
@@ -1243,8 +1664,10 @@ mod tests {
 
         // The operator's own memories stay in the terminal: the report is the
         // artefact that gets pasted into an issue or read by a Phase 7 script.
+        // The operator's `expect` is their own sentence and stays (it is what
+        // the ranks are read against); what must not travel is the store's text.
         assert!(
-            !encoded.contains("pnpm"),
+            !encoded.contains("the user prefers"),
             "memory content leaked into --json: {encoded}"
         );
         let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
@@ -1303,6 +1726,200 @@ mod tests {
         }
     }
 
+    #[test]
+    fn two_sides_of_one_config_change_nothing_and_report_the_same_numbers() {
+        // The self-comparison `recall audit` runs with no `--compare-config`,
+        // and the shape every two-config run must reduce to when the configs
+        // agree. Anything other than zero here means the two pipelines are not
+        // the same measurement — a stray `with_second_stage`, a second index
+        // open, a ranker built twice with different inputs — and the whole
+        // command would be reporting its own wiring.
+        let store = three_memories();
+        let mut also_the_same = store.config.clone();
+        // A knob that cannot move this store: three memories saved in the same
+        // second, so every recency band ranks them identically.
+        also_the_same.retrieval.recency_half_life_days = 1;
+
+        let report = replay_sides(
+            &store,
+            &store.alex,
+            8,
+            [
+                plain_side("as configured", &store.config),
+                plain_side("recency half-life 1 day", &also_the_same),
+            ],
+            &[audit("which package manager", Some("pnpm"))],
+        );
+
+        let row = &report.queries[0];
+        assert!(!row.top1_changed, "identical configs changed the head");
+        assert_eq!(ids(&row.before), ids(&row.after), "the orderings differed");
+        assert_eq!(report.summary.top1_changed, 0);
+        assert_eq!(report.summary.mean_rank_displacement, 0.0);
+        assert_eq!(
+            report.summary.precision_at_1_before,
+            report.summary.precision_at_1_after
+        );
+        assert_eq!(report.summary.mrr_before, report.summary.mrr_after);
+        assert_eq!(
+            report.summary.complete_before,
+            report.summary.complete_after
+        );
+        // Both columns say what they were, because a report that cannot tell
+        // its own sides apart cannot be read a month later.
+        assert_eq!(report.before.reranker, NO_RERANKER);
+        assert_eq!(report.after.reranker, NO_RERANKER);
+        assert!(
+            report.after.label.contains("half-life"),
+            "{:?}",
+            report.after
+        );
+    }
+
+    #[test]
+    fn a_reference_side_that_reranks_says_so_instead_of_blaming_the_change() {
+        // With a stage on the *before* side and none on the after side, the
+        // movement is the reference column's own doing. `skip_reason` describes
+        // the after side (unchanged from Phase 6.2) and `before_stage` the
+        // reference, so the two together say which column moved and why.
+        let store = three_memories();
+        let reference = Side {
+            label: "deployed (reranks)".to_string(),
+            config: &store.config,
+            mode: RerankMode::On,
+            forced: false,
+            reranker: Some(Arc::new(FakeReranker::reversing())),
+            reranker_name: "fake-reranker".to_string(),
+            depth: 30,
+        };
+        let report = replay_sides(
+            &store,
+            &store.alex,
+            8,
+            [reference, plain_side("candidate (no stage)", &store.config)],
+            &[audit("which package manager", None)],
+        );
+
+        let row = &report.queries[0];
+        assert_eq!(row.before_stage.as_deref(), Some("applied"));
+        assert_eq!(row.skip_reason.as_deref(), Some("not-applied"));
+        assert!(!row.contributed, "the after side ran no stage");
+        assert!(row.top1_changed, "the reference column did move the head");
+        // The summary's stage figures belong to the after column, which ran
+        // none: a nonzero call count here would be the before side's cost
+        // charged to the change under test.
+        assert_eq!(report.summary.rerank_calls, 0);
+    }
+
+    #[test]
+    fn a_second_config_reading_another_store_or_model_is_refused() {
+        // One store, one embedder: these are not tuning knobs, and a report
+        // built over two different corpora would read exactly like a real
+        // comparison.
+        let base = AppConfig::default();
+
+        let mut other_model = base.clone();
+        other_model.embeddings.model = "some-other-model".to_string();
+        let error = refuse_a_different_store(&base, &other_model)
+            .expect_err("a different embedder cannot be compared");
+        assert!(error.to_string().contains("embedding model"), "{error}");
+        assert!(
+            error.to_string().contains("some-other-model"),
+            "should name what it refused: {error}"
+        );
+
+        let mut other_store = base.clone();
+        other_store.storage.path = "/tmp/somewhere-else".to_string();
+        let error = refuse_a_different_store(&base, &other_store)
+            .expect_err("a different store cannot be compared");
+        assert!(error.to_string().contains("different stores"), "{error}");
+
+        assert!(
+            refuse_a_different_store(&base, &base.clone()).is_ok(),
+            "the same config against itself is the self-comparison, and legal"
+        );
+    }
+
+    #[test]
+    fn a_two_config_comparison_leaves_the_store_byte_identical_too() {
+        // The purity promise belongs to the command, not to one of its two
+        // shapes: `--compare-config` opens the keyword index read-only and runs
+        // both sides untracked, twice over.
+        let store = three_memories();
+        let before = snapshot(&store.database);
+        let queries = [audit("which package manager", None)];
+        let mut candidate = store.config.clone();
+        candidate.graph.rank_weight = 0.0;
+
+        replay_sides(
+            &store,
+            &store.alex,
+            8,
+            [
+                plain_side("as configured", &store.config),
+                plain_side("graph weight 0", &candidate),
+            ],
+            &queries,
+        );
+        replay_sides(
+            &store,
+            &store.alex,
+            8,
+            [
+                plain_side("as configured", &store.config),
+                plain_side("graph weight 0", &candidate),
+            ],
+            &queries,
+        );
+
+        assert_eq!(snapshot(&store.database), before, "the audit wrote");
+    }
+
+    #[test]
+    fn complete_at_k_counts_the_answer_being_in_the_window_at_all() {
+        // The arithmetic, stated directly: p@1 asks "was it first", MRR asks
+        // "how far down", complete@k asks only "did the client see it". Two
+        // cases — an answer at rank 1 that stays, an answer at rank 3 that falls
+        // out of the window — leave p@1 identical and completeness halved. No
+        // other number in the report says that on its own.
+        let row = |before: Option<usize>, after: Option<usize>| QueryAudit {
+            text: "which package manager".to_string(),
+            expect: Some("pnpm".to_string()),
+            before: Vec::new(),
+            after: Vec::new(),
+            top1_changed: before != after,
+            contributed: false,
+            skip_reason: None,
+            before_stage: None,
+            expected_before: before,
+            expected_after: after,
+        };
+        let summary = summarise(&[row(Some(1), Some(1)), row(Some(3), None)], &[]);
+
+        assert_eq!(summary.expectations, 2);
+        assert_eq!(summary.complete_before, Some(100.0));
+        assert_eq!(summary.complete_after, Some(50.0));
+        assert_eq!(summary.precision_at_1_before, Some(50.0));
+        assert_eq!(summary.precision_at_1_after, Some(50.0));
+        assert!(
+            summary.mrr_before.unwrap() > summary.mrr_after.unwrap(),
+            "rank 3 → absent should cost MRR too: {:?} → {:?}",
+            summary.mrr_before,
+            summary.mrr_after
+        );
+
+        let unmeasured = summarise(
+            &[QueryAudit {
+                expect: None,
+                ..row(Some(1), Some(1))
+            }],
+            &[],
+        );
+        assert_eq!(
+            unmeasured.complete_before, None,
+            "an invented 0.0% reads as a disaster rather than as no data"
+        );
+    }
     #[test]
     fn an_audit_sees_only_the_user_it_was_told_to_read() {
         let store = store(&[
@@ -1416,6 +2033,7 @@ mod tests {
                 user: Some("alex"),
                 limit: 8,
                 depth: None,
+                compare: None,
             },
         )
         .expect_err("no queries to run");
