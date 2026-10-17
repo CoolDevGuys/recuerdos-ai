@@ -35,7 +35,7 @@ use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -400,7 +400,11 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
 /// * a `current-fact` case whose expected memory is *older* than another
 ///   memory about the same entity is not testing whether the current fact
 ///   wins: the recency multiplier hands it the ranking on a plate, or
-///   takes it away, and the case measures an accident (Task 0.2).
+///   takes it away, and the case measures an accident (Task 0.2);
+/// * a `vocab-gap` case whose expectation shares a content word with the
+///   query is not testing a vocabulary gap either — it is an ordinary case
+///   wearing a label that makes the phase-5 numbers mean something they do
+///   not (Task 0.7).
 pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     for case in &set.cases {
@@ -448,6 +452,12 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
         .filter(|case| case.kind == CURRENT_FACT_KIND)
     {
         if let Some(issue) = superseded_current_fact(set, case) {
+            issues.push(issue);
+        }
+    }
+
+    for case in set.cases.iter().filter(|case| case.kind == VOCAB_GAP_KIND) {
+        if let Some(issue) = vocabulary_gap_named_in_query(set, case) {
             issues.push(issue);
         }
     }
@@ -518,6 +528,79 @@ fn superseded_current_fact(set: &EvalSet, case: &Case) -> Option<String> {
                     expected_age
                 ));
             }
+        }
+    }
+    None
+}
+
+/// The kind whose whole premise is that the query shares no content word
+/// with the memory that answers it (recall-quality-plan.md Task 0.7).
+const VOCAB_GAP_KIND: &str = "vocab-gap";
+
+/// Grammar, not topic: a `vocab-gap` case that overlaps with its answer on
+/// one of these still shares no vocabulary. Deliberately short — it holds the
+/// function words this corpus writes, because a longer list's only effect is
+/// to hide a shared word that was worth seeing.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "after", "and", "any", "are", "as", "at", "be", "before", "but", "by", "can", "did", "do",
+    "does", "for", "from", "had", "has", "have", "how", "if", "in", "into", "is", "it", "its",
+    "me", "my", "no", "not", "of", "on", "or", "our", "out", "so", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "to", "up", "us", "was", "we", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// The topical words of a piece of text: lowercased runs of alphanumerics,
+/// minus [`FUNCTION_WORDS`] and single letters.
+///
+/// Coarser on purpose than the index's analyzer (which tokenises per field and
+/// drops its own stopwords): the question here is "do these two sentences talk
+/// about the same thing using the same words", and being stricter than the
+/// analyzer means a case can only pass this check by sharing nothing at all.
+fn content_words(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() > 1 && !FUNCTION_WORDS.contains(word))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a `vocab-gap` case names its own answer.
+///
+/// The kind exists to measure the answer whose wording has nothing in common
+/// with the question — Phase 5's ingest-time probes are scored on exactly that,
+/// and §0.9 freezes these cases so it cannot be done from them. A case that
+/// shares a content word measures ordinary lexical matching while reporting as
+/// a vocabulary gap, so the claim gets checked the way the `current-fact`
+/// ages are: at load, where the mistake was made.
+fn vocabulary_gap_named_in_query(set: &EvalSet, case: &Case) -> Option<String> {
+    let asked = content_words(&case.query);
+    for wanted in &case.expect {
+        let Some(answer) = set.memories.iter().find(|memory| &memory.content == wanted) else {
+            continue; // an expectation with no memory is the parse test's to report
+        };
+        // Content, tags and category: the three fields the keyword leg's query
+        // parser is built over, so a shared word in any of them is one a real
+        // request can match on.
+        let visible = format!(
+            "{} {} {}",
+            answer.content,
+            answer.tags.join(" "),
+            answer.category
+        );
+        let seen = content_words(&visible);
+        let shared: Vec<&String> = seen.intersection(&asked).collect();
+        if !shared.is_empty() {
+            return Some(format!(
+                "case {:?} is kind {VOCAB_GAP_KIND}, which claims nothing in the query appears in \
+                 the memory that answers it, but they share {} — reword one side, or move the case \
+                 to the kind it actually measures",
+                case.name,
+                shared
+                    .iter()
+                    .map(|word| format!("{word:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
     None
@@ -1977,6 +2060,57 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_a_vocab_gap_case_that_names_its_own_answer() {
+        // The kind's whole claim is that the question cannot lean on a shared
+        // word. Let one through and every Phase 5 number measured on it means
+        // something other than what it says.
+        let set = EvalSet {
+            memories: vec![test_memory(
+                "Catering for the Lisbon office excludes shellfish",
+                "fact.project",
+            )],
+            cases: vec![Case {
+                kind: "vocab-gap".to_string(),
+                query: "what about shellfish at the team lunch".to_string(),
+                informational: true,
+                ..case(
+                    "dietary",
+                    vec!["Catering for the Lisbon office excludes shellfish"],
+                    false,
+                )
+            }],
+        };
+
+        let error = validate(&set, Path::new("x.toml")).unwrap_err().to_string();
+        assert!(error.contains("vocab-gap"), "{error}");
+        assert!(error.contains("\"shellfish\""), "{error}");
+    }
+
+    #[test]
+    fn a_vocab_gap_case_sharing_only_grammar_still_validates() {
+        // "for" and "a" appear on both sides and mean nothing: the topical
+        // vocabulary is still disjoint, which is what the kind is about.
+        let set = EvalSet {
+            memories: vec![test_memory(
+                "Catering for the Lisbon office excludes shellfish",
+                "fact.project",
+            )],
+            cases: vec![Case {
+                kind: "vocab-gap".to_string(),
+                query: "are there dietary requirements for a team lunch".to_string(),
+                informational: true,
+                ..case(
+                    "dietary",
+                    vec!["Catering for the Lisbon office excludes shellfish"],
+                    false,
+                )
+            }],
+        };
+
+        validate(&set, Path::new("x.toml")).expect("sharing only function words keeps the gap");
+    }
+
+    #[test]
     fn validate_rejects_a_current_fact_the_corpus_has_already_superseded() {
         // The `current-fact` kind asks "does the current fact win?". If the
         // corpus seeds the expected memory as the older of two about the same
@@ -2255,10 +2389,45 @@ mod tests {
                  informational flag needs the defect it hides to be recorded in §12 first"
             );
         }
-        assert!(
-            set.cases.iter().all(|c| !c.informational),
-            "no case in the committed set is informational after Phase 2.5"
-        );
+
+        // Task 0.7 (recall-quality-plan.md) added four kinds that document
+        // defects its own phases have not fixed — `chain` (Phase 3), `alias`
+        // (Phase 6), `temporal` (Phase 7) and `vocab-gap` (Phase 5) — and they
+        // are the *only* muted cases in the file. That keeps the promise
+        // Phase 2.5 made in the shape it still means: nothing is informational
+        // because someone found the red inconvenient. Each promotion therefore
+        // means deleting the flag from its kind and re-recording the baseline,
+        // not editing this list.
+        const PHASE_ZERO_SEVEN: [(&str, usize); 4] = [
+            ("chain", 4),
+            ("temporal", 4),
+            ("alias", 4),
+            ("vocab-gap", 6),
+        ];
+        for (kind, minimum) in PHASE_ZERO_SEVEN {
+            let cases: Vec<&Case> = set.cases.iter().filter(|c| c.kind == kind).collect();
+            assert!(
+                cases.len() >= minimum,
+                "the {kind} kind from recall-quality-plan.md Task 0.7 needs {minimum} cases, \
+                 found {}",
+                cases.len()
+            );
+            assert!(
+                cases.iter().all(|case| case.informational),
+                "{kind} measures a defect its phase has not fixed yet; gating on it would redden \
+                 CI for a known gap, and the phase would arrive with nothing to move"
+            );
+        }
+        for case in set.cases.iter().filter(|case| case.informational) {
+            assert!(
+                PHASE_ZERO_SEVEN.iter().any(|(kind, _)| *kind == case.kind),
+                "case {:?} (kind {:?}) is informational without a phase that owns its defect — \
+                 record the defect in the plan before muting it",
+                case.name,
+                case.kind
+            );
+        }
+
         assert!(
             set.cases
                 .iter()
