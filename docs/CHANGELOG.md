@@ -81,6 +81,29 @@ memories before you spend either.
   `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
   carries no rerank model, since the default does not use one.
 
+## v0.4.3 — A release to publish the Python SDK
+
+Nothing server-side changed. This cut exists because `release.yml` publishes the
+Python client when a tag goes out, and the SDK's `0.4.0` — merged after
+`v0.4.2` — would otherwise have sat unreleased on `main`, unnoticed by anyone
+installing from PyPI.
+
+**The Python SDK goes to 0.4.0.** `search_report()` returns what a search
+response says *above* the results: the hits, the server's own `took_ms`, the
+relevance floor that produced the list, and what the optional rerank stage did —
+`applied`, `shadow`, `not_needed`, or `skipped` with a reason, absent when no
+stage is configured (including any server older than `v0.4.2`). `search()` is
+now `search_report().hits`, unchanged for callers who only want memories. Two
+gaps turned up while doing it: the client had no `min_relevance` parameter at
+all, though `docs/api.md` tells callers to read the floor and retry at `0.0`
+([sdk-python.md](sdk-python.md)); and `recuerdos_ai.__version__` reported
+`0.2.0` for two releases whose packaging said `0.3.0`, now pinned against the
+installed distribution so it cannot drift again.
+
+The crate is bumped to `0.4.3` so the binaries built from this tag report the
+version they were tagged with. On the server side `v0.4.2..v0.4.3` is that one
+line and nothing else.
+
 ## v0.4.2 — The second stage now says whether it ran
 
 The same deployment that surfaced the v0.4.1 template defect turned up a second
