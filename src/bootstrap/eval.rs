@@ -135,7 +135,7 @@ pub(crate) struct SeedMemory {
     /// is a multiplier on its rank score, so age decides results. Left unset
     /// the memory gets a stable pseudo-random age derived from its content
     /// (see [`seeded_age_days`]), which is what makes the eval behave like a
-    /// real store without anyone hand-ageing 104 entries.
+    /// real store without anyone hand-ageing a hundred entries.
     ///
     /// **Set it explicitly wherever the corpus encodes an order** — a
     /// superseded fact, a "current" fact, a distractor that is meant to be
@@ -652,8 +652,8 @@ pub(crate) fn seeded_age_days(seed: &SeedMemory) -> f32 {
 /// 365 days because that is a year of a personal store, and four times the
 /// configured 90-day recency half-life: the whole floored band gets exercised
 /// rather than just its fresh end. Folding into *seconds* rather than days
-/// keeps two different contents from landing on the same instant (104 entries
-/// over 365 buckets would collide constantly, and a collision is an exact
+/// keeps two different contents from landing on the same instant (a hundred
+/// entries over 365 buckets would collide constantly, and a collision is an exact
 /// score tie — the thing this task exists to remove).
 fn hashed_age_days(content: &str) -> f32 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
