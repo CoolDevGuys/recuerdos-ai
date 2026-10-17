@@ -309,6 +309,16 @@ pub struct AuditSummary {
     /// this is zero unless that policy changes — it is counted rather than
     /// assumed away, because the blind spot is the interesting part.
     pub skipped_deadline: usize,
+    /// …how many were refused a session outright, having judged nothing.
+    ///
+    /// Zero for an audit that replays one query at a time with no deadline —
+    /// which is what this command does today (see [`QueryAudit::contributed`]),
+    /// so the row reads 0 more often than not. Counted anyway, for the same
+    /// reason as the row above: keeping the two apart is what stops a report
+    /// from blaming a busy host's queue on `[rerank].timeout_ms`, and a replay
+    /// that ever runs queries concurrently would otherwise inherit that
+    /// misreading silently.
+    pub skipped_busy: usize,
     /// …how many failed inside the model (including scores that did not line
     /// up with the candidates given). The one a real audit can hit today.
     pub skipped_model: usize,
@@ -698,18 +708,7 @@ fn audit_pair(
     // Whether the "after" column is actually reranked. `None` means no stage
     // ran at all, which for the alias can only be a wiring bug — treated as
     // "did not contribute", because that is what the reader needs to know.
-    let (contributed, skip_reason) = match &after_report.rerank {
-        Some(RerankTrace::Applied { .. }) => (true, None),
-        Some(RerankTrace::Skipped { reason, .. }) => (
-            false,
-            Some(match reason {
-                RerankSkip::Deadline => "deadline",
-                RerankSkip::Model => "model",
-            }),
-        ),
-        Some(RerankTrace::NotNeeded { .. }) => (false, Some("not-needed")),
-        Some(RerankTrace::Shadow { .. }) | None => (false, Some("not-applied")),
-    };
+    let (contributed, skip_reason) = outcome(&after_report.rerank);
 
     let (before_positions, after_positions) = (ranks(&before_hits), ranks(&after_hits));
     Ok(Pairing {
@@ -734,13 +733,44 @@ fn audit_pair(
 
 /// What a column's second stage did, in one word, or `None` when it never had
 /// the chance (no stage configured).
+/// Whether the second stage's order is really in the column it produced, and
+/// the name of whatever stopped it.
+///
+/// Extracted from the pairing so the busy case is pinned rather than folded in:
+/// a stage that was refused a session is not a stage that ran out of inference
+/// time, and reporting `deadline` for it sends the operator to `timeout_ms`,
+/// which is the one setting that cannot help. The client keeps hearing
+/// `deadline` (invariant 3.5); this report is for the person who owns the host.
+fn outcome(trace: &Option<RerankTrace>) -> (bool, Option<&'static str>) {
+    match trace {
+        Some(RerankTrace::Applied { .. }) => (true, None),
+        Some(RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            busy: true,
+            ..
+        }) => (false, Some("busy")),
+        Some(RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            ..
+        }) => (false, Some("deadline")),
+        Some(RerankTrace::Skipped {
+            reason: RerankSkip::Model,
+            ..
+        }) => (false, Some("model")),
+        Some(RerankTrace::NotNeeded { .. }) => (false, Some("not-needed")),
+        Some(RerankTrace::Shadow { .. }) | None => (false, Some("not-applied")),
+    }
+}
+
 fn stage_name(trace: &RerankTrace) -> Option<String> {
     Some(match trace {
         RerankTrace::Applied { .. } => "applied".to_string(),
-        RerankTrace::Skipped { reason, .. } => match reason {
-            RerankSkip::Deadline => "skipped-deadline".to_string(),
-            RerankSkip::Model => "skipped-model".to_string(),
-        },
+        RerankTrace::Skipped { reason, busy, .. } => match (reason, *busy) {
+            (RerankSkip::Deadline, true) => "skipped-busy",
+            (RerankSkip::Deadline, false) => "skipped-deadline",
+            (RerankSkip::Model, _) => "skipped-model",
+        }
+        .to_string(),
         RerankTrace::NotNeeded { .. } => "not-needed".to_string(),
         RerankTrace::Shadow { .. } => "shadow".to_string(),
     })
@@ -875,6 +905,7 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
         rerank_calls: timings.len(),
         contributed: rows.iter().filter(|row| row.contributed).count(),
         skipped_deadline: rows.iter().filter(|row| row.died_at("deadline")).count(),
+        skipped_busy: rows.iter().filter(|row| row.died_at("busy")).count(),
         skipped_model: rows.iter().filter(|row| row.died_at("model")).count(),
         not_needed: rows.iter().filter(|row| row.died_at("not-needed")).count(),
         rerank_candidates_low: percentile(&judged, 0.0).map(|value| value as usize),
@@ -1152,6 +1183,15 @@ pub fn print_human(report: &AuditReport) {
             summary.contributed, summary.queries, quiet
         );
         let mut reasons: Vec<String> = Vec::new();
+        if summary.skipped_busy > 0 {
+            // Named first, because the advice differs: raising `timeout_ms` buys
+            // nothing for a stage that never held a session.
+            reasons.push(format!(
+                "{} were refused a rerank session (raise [rerank].max_concurrency, or \
+                 lower [rerank].depth)",
+                summary.skipped_busy
+            ));
+        }
         if summary.skipped_deadline > 0 {
             reasons.push(format!(
                 "{} ran out of time (raise [rerank].timeout_ms, or lower [rerank].depth)",
@@ -1654,6 +1694,42 @@ mod tests {
         assert_eq!(narrow.summary.contributed, 0);
         assert_eq!(narrow.summary.not_needed, 1);
         assert_eq!(narrow.queries[0].skip_reason.as_deref(), Some("not-needed"));
+    }
+
+    #[test]
+    fn a_refused_session_is_not_reported_as_having_run_out_of_time() {
+        // Same trace shape, same wire, opposite remedies: `timeout_ms` is the
+        // wrong knob for a host that never held a session, so the report has to
+        // be able to say which one it looked at. Pinned here rather than through
+        // a full replay because the audit runs deadline-free and one query at a
+        // time, so no real run of this command can produce a busy row today —
+        // the point is that the mapping is not allowed to guess.
+        let refused = RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            candidates: 10,
+            took_ms: 250,
+            busy: true,
+        };
+        let slow = RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            candidates: 10,
+            took_ms: 250,
+            busy: false,
+        };
+
+        // `outcome` reads the `Option` the report holds; `stage_name` the trace.
+        assert_eq!(outcome(&Some(refused.clone())), (false, Some("busy")));
+        assert_eq!(outcome(&Some(slow.clone())), (false, Some("deadline")));
+        assert_eq!(
+            stage_name(&refused).as_deref(),
+            Some("skipped-busy"),
+            "the reference column must name a busy stage as one"
+        );
+        assert_eq!(
+            stage_name(&slow).as_deref(),
+            Some("skipped-deadline"),
+            "and must not call a stage that ran out of time busy"
+        );
     }
 
     #[test]

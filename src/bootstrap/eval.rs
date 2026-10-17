@@ -865,6 +865,11 @@ pub(crate) fn score(
             match report.rerank {
                 Some(RerankTrace::Skipped {
                     reason: RerankSkip::Deadline,
+                    busy: true,
+                    ..
+                }) => "no session was free — [rerank].max_concurrency",
+                Some(RerankTrace::Skipped {
+                    reason: RerankSkip::Deadline,
                     ..
                 }) => "past [rerank].timeout_ms",
                 _ => "model failure",

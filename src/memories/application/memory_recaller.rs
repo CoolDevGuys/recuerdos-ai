@@ -122,6 +122,18 @@ pub enum RerankTrace {
         /// How many candidates it was about to judge when it gave up.
         candidates: usize,
         took_ms: u64,
+        /// Whether the stage was refused a session rather than running out of
+        /// inference time.
+        ///
+        /// Not on the wire, and that is a decision rather than an oversight:
+        /// `reason` carries one value for both kinds of "it did not make it",
+        /// because a third would break every SDK already shipped (invariant
+        /// 3.5), so `RerankResponse` drops this field on its way out. It stays
+        /// on the trace because the distinction is the actionable half — "raise
+        /// `timeout_ms`" is bad advice for a host that never had a session to
+        /// give — and the `warn!` line and `recall audit`'s counters are where
+        /// an operator is supposed to read it.
+        busy: bool,
     },
 }
 
@@ -571,6 +583,7 @@ impl MemoryRecaller {
                         reason: failure.skip,
                         candidates: depth,
                         took_ms,
+                        busy: failure.busy,
                     }),
                 );
             }
@@ -810,6 +823,11 @@ impl MemoryRecaller {
             name: "rerank_shadow",
             query_hash = %query_hash(query),
             depth = head.len(),
+            // Usually the same as `depth`, and the whole story when it is not:
+            // a leg cut off mid-head compares the top of the head with what the
+            // stage managed to judge, and a reader who cannot see that number
+            // cannot tell a disagreement from an unfinished look.
+            judged = leg.len(),
             rerank_ms,
             top1_before = %top1_before,
             top1_after = %top1_after,
