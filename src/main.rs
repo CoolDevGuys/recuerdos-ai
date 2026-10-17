@@ -155,6 +155,37 @@ enum Command {
         #[arg(long, global = true)]
         config: Option<PathBuf>,
     },
+    /// Compare two recall configurations over memories that already exist.
+    ///
+    /// Hidden, like `eval` and `rerank audit`: an operator measuring a decision,
+    /// not something a client calls. Replays every query in `--queries` twice
+    /// over the store `--config` points at — once through that config's
+    /// pipeline, once through `--compare-config`'s — and prints both orderings,
+    /// what moved, and what each side cost.
+    ///
+    /// With no `--compare-config` the two columns are the same config replayed
+    /// twice. That is not a no-op: it is the self-comparison, and it must show
+    /// zero changes. It is how a store's current ranking gets recorded before
+    /// anything is allowed to change it.
+    ///
+    /// It changes nothing: the keyword index is opened read-only and both
+    /// recalls are untracked, so memories, access counters and importance are
+    /// byte-identical afterwards. The daemon may stay running.
+    #[command(hide = true)]
+    Recall {
+        #[command(subcommand)]
+        command: RecallCommand,
+        /// The config the `before` column runs — and the one whose `[storage]`
+        /// holds the store being audited.
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+        /// The config the `after` column runs. Its `[storage]` and
+        /// `[embeddings]` must match `--config`: the vectors in a store were
+        /// built by exactly one model, so a second column measured against a
+        /// different one would describe nothing. Refused rather than reported.
+        #[arg(long, global = true)]
+        compare_config: Option<PathBuf>,
+    },
     /// Rebuild derived indexes from the `memories` table.
     ///
     /// With no flags this is the vector reindex: re-embed every memory
@@ -212,6 +243,40 @@ enum Command {
         command: identity::infrastructure::cli::KeyCommand,
         #[arg(long, global = true)]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecallCommand {
+    /// Replay queries over one user's real memories under two configs and
+    /// report the two orderings side by side.
+    ///
+    /// Writes nothing — no access counters, no index writes — so the daemon may
+    /// stay running. A side whose `[rerank].mode` is `on` or `shadow` loads that
+    /// side's model; a side with `off` loads nothing, so comparing two stage-less
+    /// configs costs no gigabyte of weights.
+    Audit {
+        /// Query file: one query per line (`#` comments allowed), or TOML
+        /// `[[query]]` blocks with `text` and optional `expect` — a substring of
+        /// the memory that *should* come first.
+        #[arg(long)]
+        queries: PathBuf,
+        /// Whose memories to audit. Required when the store has more than one
+        /// user; never guessed.
+        #[arg(long)]
+        user: Option<String>,
+        /// Results per query to print and score. Also the `k` of complete@k.
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        /// Force `[rerank].depth` on both sides instead of each side's own.
+        /// Set it to compare two configs at one depth; leave it unset to compare
+        /// what each config would actually run.
+        #[arg(long)]
+        depth: Option<usize>,
+        /// The machine-readable report instead of the table: ids, ranks and
+        /// scores, no memory content, safe to commit or paste.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -322,6 +387,11 @@ async fn main() {
         Command::WarmModels { config } => run_warm_models(config.as_deref()),
         Command::Calibrate { cases, config } => run_calibrate(&cases, config.as_deref()),
         Command::Rerank { command, config } => run_rerank(command, config.as_deref()),
+        Command::Recall {
+            command,
+            config,
+            compare_config,
+        } => run_recall(command, config.as_deref(), compare_config.as_deref()),
         Command::Reindex {
             text,
             vectors,
@@ -738,23 +808,7 @@ fn run_rerank(command: RerankCommand, config_path: Option<&Path>) -> Result<(), 
             depth,
             json,
         } => {
-            let report = bootstrap::rerank_audit::run(
-                &config,
-                &bootstrap::rerank_audit::AuditOptions {
-                    queries: &queries,
-                    user: user.as_deref(),
-                    limit,
-                    depth,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-
-            if json {
-                let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
-                println!("{encoded}");
-            } else {
-                bootstrap::rerank_audit::print_human(&report);
-            }
+            print_audit(&config, None, &queries, user.as_deref(), limit, depth, json)?;
         }
         RerankCommand::Distribution { cases, json } => {
             // The human table is printed by the module; `--json` prints
@@ -766,6 +820,86 @@ fn run_rerank(command: RerankCommand, config_path: Option<&Path>) -> Result<(), 
                 println!("{encoded}");
             }
         }
+    }
+    Ok(())
+}
+
+/// `recall` subcommands: the report on stdout, and nothing else on stdout
+/// (same stream discipline as [`run_rerank`]).
+///
+/// Both columns always come from a loaded config here, `--compare-config`
+/// defaulting to `--config` itself: `recall audit` with no second file is a
+/// self-comparison, which is the measurement that must come back with zero
+/// changes (recall-quality-plan.md Task 0.9). The forced off/on pair belongs to
+/// `rerank audit`, which passes `compare: None` and gets the alias's behaviour.
+fn run_recall(
+    command: RecallCommand,
+    config_path: Option<&Path>,
+    compare_path: Option<&Path>,
+) -> Result<(), String> {
+    let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
+    // No second file means the same config on both sides — the same *loaded*
+    // value, not a second read of the file, so the two columns cannot disagree
+    // about anything, including what an unset key defaults to.
+    let compare = match compare_path {
+        Some(path) => {
+            Some(bootstrap::config::AppConfig::load(Some(path)).map_err(|e| e.to_string())?)
+        }
+        None => None,
+    };
+    let compare = compare.as_ref().unwrap_or(&config);
+
+    match command {
+        RecallCommand::Audit {
+            queries,
+            user,
+            limit,
+            depth,
+            json,
+        } => print_audit(
+            &config,
+            Some(compare),
+            &queries,
+            user.as_deref(),
+            limit,
+            depth,
+            json,
+        ),
+    }
+}
+
+/// Runs one audit and renders it.
+///
+/// Both commands come through here: the alias and the two-config comparison are
+/// the same measurement over different sides, and a second copy of the
+/// rendering — or of the refusal to compare two stores — would drift, and the
+/// drift would be read as a finding.
+fn print_audit(
+    config: &bootstrap::config::AppConfig,
+    compare: Option<&bootstrap::config::AppConfig>,
+    queries: &Path,
+    user: Option<&str>,
+    limit: usize,
+    depth: Option<usize>,
+    json: bool,
+) -> Result<(), String> {
+    let report = bootstrap::rerank_audit::run(
+        config,
+        &bootstrap::rerank_audit::AuditOptions {
+            queries,
+            user,
+            limit,
+            depth,
+            compare,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    if json {
+        let encoded = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        println!("{encoded}");
+    } else {
+        bootstrap::rerank_audit::print_human(&report);
     }
     Ok(())
 }

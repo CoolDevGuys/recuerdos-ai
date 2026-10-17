@@ -24,25 +24,20 @@
 # filler entries exist so a case has something to be wrong about.
 # ─────────────────────────────────────────────────────────────────────
 
-[[memory]]
-content = "User forbids barrel files and index.ts re-exports"
-category = "preference.coding"
-tags = ["typescript", "imports"]
-
-[[memory]]
-content = "User prefers pnpm over npm and yarn for package management"
-category = "preference.coding"
-tags = ["tooling", "node"]
-
-[[memory]]
-content = "User requires table-driven tests in Go, one table per behaviour"
-category = "preference.coding"
-tags = ["go", "testing"]
+# The four `preference.coding` memories that also demonstrate a sub-label
+# (barrel files, pnpm, table-driven Go tests, Vitest) are defined once, in
+# the subcategory section below — twice was V1 of recall-quality-plan.md:
+# two rows of identical content are not two memories, they are two slots in
+# every top-5 list the first one reaches. `validate()` refuses it now.
 
 [[memory]]
 content = "The backend deploys on Hetzner, migrated from Fly.io because of cost"
 category = "fact.project"
 tags = ["infrastructure"]
+# The `current-fact` kind's target: it has to be the newest thing the corpus
+# says about where the backend runs, or the recency multiplier decides that
+# case before the ranker is asked anything (Task 0.2).
+age_days = 12
 
 [[memory]]
 content = "The API is written in Rust with axum and tokio"
@@ -58,6 +53,10 @@ tags = ["storage"]
 content = "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem"
 category = "experience"
 tags = ["postgres", "migrations"]
+# The older half of its pair with "Product search runs on the pgvector
+# extension…" below: the near-miss case asks what search runs on *now*, and a
+# hash cannot know that this incident is the superseded one (Task 0.2).
+age_days = 320
 
 [[memory]]
 content = "Deployment runbook: tag the release, wait for CI, then run just deploy-prod"
@@ -94,15 +93,16 @@ content = "Never force-push to main; the branch is protected and it breaks every
 category = "preference.coding"
 tags = ["git"]
 
-[[memory]]
-content = "User prefers Vitest over Jest for anything new"
-category = "preference.coding"
-tags = ["testing", "typescript"]
-
 # ─────────────────────────────────────────────────────────────────────
 # Subcategory memories. Same category, different sub-labels.
 # A query that targets one sub-label should return its memories ahead
 # of siblings in the same category.
+#
+# The first four are also the corpus's only definition of themselves: the
+# plain copies that used to sit above were V1 (a duplicate wins a second
+# slot in every top-5 list its twin reaches), and `validate()` refuses a
+# repeated `content` now. Their `tags` are the ones the plain copies had,
+# so the `tag-filter` cases are unchanged by the merge.
 # ─────────────────────────────────────────────────────────────────────
 
 [[memory]]
@@ -287,6 +287,11 @@ relations = [
 content = "The analytics pipeline currently streams events through Kinesis"
 category = "fact.project"
 tags = ["analytics"]
+# The pair the `temporal` kind is built on: "currently" versus "before the
+# switch" below, three quarters of a year apart, so the graph's `valid_from`
+# (which is the memory's `created_at`) and the recency band both tell the
+# same story about which one is current (Task 0.2).
+age_days = 21
 entities = [
     { name = "analytics pipeline", kind = "component" },
     { name = "Kinesis", kind = "service" },
@@ -299,6 +304,7 @@ relations = [
 content = "Before the switch, the analytics pipeline was built on Kafka"
 category = "fact.project"
 tags = ["analytics"]
+age_days = 280
 entities = [
     { name = "analytics pipeline", kind = "component" },
     { name = "Kafka", kind = "service" },
@@ -801,6 +807,8 @@ tags = ["team", "review"]
 content = "Product search runs on the pgvector extension in Postgres since retiring Elasticsearch"
 category = "fact.project"
 tags = ["search"]
+# The newer half of the pair above: this is what search runs on now.
+age_days = 40
 
 # Statement-style targets — memories phrased as rules, queried as situations.
 [[memory]]
@@ -1139,6 +1147,66 @@ category = "preference.personal"
 tags = ["habits"]
 
 # ─────────────────────────────────────────────────────────────────────
+# Phase 0.7 corpus additions (recall-quality-plan.md).
+#
+# The memories the four new informational kinds need, plus the older half
+# of the pairs the `temporal` cases ask about. Ages are explicit wherever a
+# case depends on which of two memories is the older one — a content hash
+# cannot know that, and an age assigned the wrong way round turns a case
+# about time into a case about an accident (Task 0.2).
+# ─────────────────────────────────────────────────────────────────────
+
+[[memory]]
+content = "The backend ran on Fly.io until the egress bill tripled in a month"
+category = "experience"
+tags = ["infrastructure"]
+# Older than "The backend deploys on Hetzner…" above (12 days), which is
+# what makes the `temporal` case about the previous host measurable.
+age_days = 380
+
+[[memory]]
+content = "Product search was an Elasticsearch cluster until it outgrew its single node"
+category = "experience"
+tags = ["search"]
+# Older than "Product search runs on the pgvector extension…" (40 days).
+age_days = 400
+
+[[memory]]
+content = "Card payments cleared through Braintree before the Stripe integration"
+category = "fact.project"
+tags = ["payments"]
+# Older than the checkout memory's Stripe integration.
+age_days = 430
+
+[[memory]]
+content = "Nightly jobs ran at 04:00 UTC before the ops dashboard moved them earlier"
+category = "fact.project"
+tags = ["jobs"]
+# Older than "Nightly jobs run at 02:00 UTC…".
+age_days = 250
+
+[[memory]]
+content = "RabbitMQ carries jobs between the payment worker and the billing service"
+category = "fact.project"
+tags = ["messaging"]
+entities = [
+    { name = "RabbitMQ", kind = "technology" },
+    { name = "payment worker", kind = "service" },
+    { name = "billing service", kind = "service" },
+]
+relations = [
+    { subject = "payment worker", predicate = "publishes_to", object = "RabbitMQ" },
+    { subject = "RabbitMQ", predicate = "delivers_to", object = "billing service" },
+]
+
+[[memory]]
+content = "Catering for the Lisbon office excludes shellfish and gelatine"
+category = "fact.project"
+tags = ["office"]
+# The `vocab-gap` kind's target: the query asks about dietary requirements
+# without a single word in common with this line.
+
+# ─────────────────────────────────────────────────────────────────────
 # Phase 7.1 cases (reranking-plan.md).
 #
 # These measure what the second stage is for: heads where fusion puts a
@@ -1282,3 +1350,239 @@ name = "negative: world cup nineteen ninety eight"
 kind = "negative"
 expect_empty = true
 query = "who won the world cup final in nineteen ninety eight"
+
+# ─────────────────────────────────────────────────────────────────────
+# Phase 0.7 kinds (recall-quality-plan.md).
+#
+# Four defects Phase 0 is instrumenting rather than fixing, so every case
+# below is `informational = true`: printed on every run, absent from the
+# numbers `baseline.json` gates on. Each kind belongs to the phase named
+# beside it, and that phase is what promotes its cases into the gate — the
+# parse test refuses an informational flag on any other kind, so a
+# "temporarily" muted case cannot quietly outlive the phase that was
+# supposed to fix it.
+#
+# **These are frozen** (§0.9). No fixture for Phase 5 (ingest-time question
+# probes) or Phase 6 (entity resolution) may be written with these queries
+# on screen: a probe generated from the query it will be scored on measures
+# memorisation, not retrieval. That is why they are written now, before any
+# such fixture exists.
+#
+#   `chain` (Phase 3 — graph as expansion; the §4 gate reads
+#     relational+chain complete@5) — a two-hop question whose intermediate
+#     memory is part of the answer, so `expect` lists both. recall@5 scores
+#     a half answer as half a pass; complete@5 (Task 0.4) is the number
+#     these exist to move, and it is currently 0 for every case here.
+#
+#   `temporal` (Phase 7) — "before / previously / used to". The corpus says
+#     two contradictory things about one subject and only the *older* one is
+#     correct. Today the recency multiplier is the only component with an
+#     opinion about age, and it always votes for the newer fact.
+#
+#   `alias` (Phase 6 — entity resolution) — the query names the entity by a
+#     variant the answering memory never uses. Nothing maps one to the
+#     other: the keyword leg sees a word that is simply not in the document.
+#
+#   `vocab-gap` (Phase 5) — the answer shares no content word with the
+#     query, across categories. `validate()` refuses a case of this kind
+#     whose expectation does share one: a case that names its own answer is
+#     not testing a vocabulary gap, and it passes for one until someone
+#     checks.
+# ─────────────────────────────────────────────────────────────────────
+
+[[case]]
+name = "chain: what a checkout change needs before merge"
+kind = "chain"
+# checkout flow → Stripe → PCI review. The first expectation is the bridge:
+# the review rule names a vendor the query never says, and only the checkout
+# memory says which vendor that is.
+query = "a vendor wants to change how we take card details in checkout, what has to happen before this merges"
+expect = [
+    "The checkout flow processes card payments through Stripe",
+    "Any code path that touches Stripe must pass a PCI compliance review",
+]
+informational = true
+
+[[case]]
+name = "chain: tuning the database the invoices live in"
+kind = "chain"
+# billing service → ledger-db → "it is Postgres" → the Postgres tuning notes.
+# The notes are only findable once you know which engine to search for.
+query = "the database behind our invoices needs tuning, where are the notes for that engine"
+expect = [
+    "The billing service stores its data in a Postgres database called ledger-db",
+    "Postgres tuning notes live at https://example.com/notes/pg-tuning",
+]
+informational = true
+
+[[case]]
+name = "chain: who documents the funnel events"
+kind = "chain"
+# The pipeline memory names what it runs on now; Priya is the one who drew
+# its schema. A question about undocumented fields wants both: who, and what
+# the events travel on to get there.
+query = "who should write the data dictionary for our funnel events, and what do they stream over now"
+expect = [
+    "Priya designed the analytics pipeline and knows its schema best",
+    "The analytics pipeline currently streams events through Kinesis",
+]
+informational = true
+
+[[case]]
+name = "chain: the queue between payments and billing"
+kind = "chain"
+# payment worker → RabbitMQ → billing service → Meridian team. Three named
+# things, none of them in the answer, and the owner is two edges past the
+# symptom. `max_hops = 2` reaches the owning team but not its tech lead.
+query = "a payment job disappeared before billing saw it, what sits in between and which team owns the far end"
+expect = [
+    "RabbitMQ carries jobs between the payment worker and the billing service",
+    "The billing service is maintained by the Meridian team",
+]
+informational = true
+
+[[case]]
+name = "temporal: analytics before the switch"
+kind = "temporal"
+# The same question as the `relational` case without an entity to hop over:
+# pure time. Kafka is 280 days old, Kinesis 21, and recency favours the
+# wrong one of the two.
+query = "what did we run analytics on previously"
+expect = ["Before the switch, the analytics pipeline was built on Kafka"]
+informational = true
+
+[[case]]
+name = "temporal: the host before Hetzner"
+kind = "temporal"
+# The newer memory says the backend deploys on Hetzner and mentions the
+# migration in passing; the memory that actually describes the old host is
+# a year older, so the multiplier buries it.
+query = "which host was the backend on before Hetzner"
+expect = ["The backend ran on Fly.io until the egress bill tripled in a month"]
+informational = true
+
+[[case]]
+name = "temporal: search before the vector extension"
+kind = "temporal"
+query = "what did product search use before the vector extension"
+expect = ["Product search was an Elasticsearch cluster until it outgrew its single node"]
+informational = true
+
+[[case]]
+name = "temporal: the card processor we stopped using"
+kind = "temporal"
+query = "which card processor did we use before Stripe"
+expect = ["Card payments cleared through Braintree before the Stripe integration"]
+informational = true
+
+[[case]]
+name = "temporal: the old nightly schedule"
+kind = "temporal"
+# "used to" is the whole signal here; every word after it also describes the
+# *current* schedule, which is 230 days newer.
+query = "what time did the nightly jobs used to run"
+expect = ["Nightly jobs ran at 04:00 UTC before the ops dashboard moved them earlier"]
+informational = true
+
+[[case]]
+name = "alias: PostgreSQL by its long name"
+kind = "alias"
+# The corpus says "Postgres" everywhere. A user who types the eight-letter
+# name gets a keyword leg that matches nothing and a vector leg doing all
+# the work alone.
+query = "which PostgreSQL database holds the billing service's invoice rows"
+expect = ["The billing service stores its data in a Postgres database called ledger-db"]
+informational = true
+
+[[case]]
+name = "alias: k8s"
+kind = "alias"
+query = "why is k8s not running any of our services yet"
+expect = ["Kubernetes adoption waits until a third service exists"]
+informational = true
+
+[[case]]
+name = "alias: app versus client"
+kind = "alias"
+# Two memories describe the same product as "the mobile app" and "the mobile
+# client"; the question uses the first and the answer is the second.
+query = "what is the oldest Android the mobile app has to support"
+expect = ["The mobile client supports iOS 16 and Android 13 as minimums"]
+informational = true
+
+[[case]]
+name = "alias: the Lisbon team"
+kind = "alias"
+# The team is only ever named after its office in the query; the memory that
+# answers names it after Meridian. The city is in the corpus, but in a
+# different sentence.
+query = "who leads the Lisbon team"
+expect = ["Nadia is the tech lead of the Meridian team"]
+informational = true
+
+[[case]]
+name = "alias: AMQP broker"
+kind = "alias"
+query = "which AMQP broker sits between the payment worker and billing"
+expect = ["RabbitMQ carries jobs between the payment worker and the billing service"]
+informational = true
+
+[[case]]
+name = "vocab-gap: dietary requirements"
+kind = "vocab-gap"
+# Category fact.project, and not one content word shared with the line that
+# answers it. `validate()` enforces that, which is what makes this kind
+# mean something.
+query = "are there dietary requirements for a team lunch"
+expect = ["Catering for the Lisbon office excludes shellfish and gelatine"]
+informational = true
+
+[[case]]
+name = "vocab-gap: undisturbed focus time"
+kind = "vocab-gap"
+# preference.personal: "deep work" is the phrase in the memory; nobody asks
+# for it by that name when they mean the block before lunch.
+query = "when does the person focus on hard problems undisturbed"
+expect = ["User books deep work before noon and meetings after"]
+informational = true
+
+[[case]]
+name = "vocab-gap: the spring incident"
+kind = "vocab-gap"
+# experience. The memory says "March" and "outage"; the question says "last
+# spring" and "went down".
+query = "why did the site go down last spring"
+expect = ["The March outage came from a connection pool sized below the export concurrency"]
+informational = true
+
+[[case]]
+name = "vocab-gap: one tree versus many"
+kind = "vocab-gap"
+query = "why is everything in one git tree"
+expect = ["The repository stays a monorepo instead of splitting per package"]
+informational = true
+
+[[case]]
+name = "vocab-gap: a credential that got out"
+kind = "vocab-gap"
+# skill: the runbook says "rotating a key", the incident is described as a
+# leaked credential.
+query = "what is the procedure after leaking a credential"
+expect = ["Rotating an API key means issuing a replacement and deleting the old row"]
+informational = true
+
+[[case]]
+name = "vocab-gap: the logo files"
+kind = "vocab-gap"
+query = "where are the logos and the font files"
+expect = ["Brand assets live on the shared drive under brand/2026"]
+informational = true
+
+[[case]]
+name = "vocab-gap: welcoming a signup"
+kind = "vocab-gap"
+# The memory names the vendor and the class of message; the question names
+# the moment.
+query = "what delivers the welcome message to a new signup"
+expect = ["Transactional email goes through Postmark with receipts in the ops inbox"]
+informational = true

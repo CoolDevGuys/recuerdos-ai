@@ -27,12 +27,15 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, RerankTrace};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::Relation;
+use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
 use crate::memories::domain::recall_query::RecallQuery;
+use crate::shared::clock::FixedClock;
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -41,6 +44,33 @@ use std::sync::atomic::AtomicBool;
 /// the operator hears about it once rather than once per case. Process-wide by
 /// design: the eval is a CLI run, and "warn me the first time" is the ask.
 static RERANK_SKIP_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// The instant the eval calls "now", fixed: `2026-06-01T00:00:00Z`.
+///
+/// Two problems die here (recall-quality-plan.md Task 0.1).
+///
+/// **Cross-process drift.** With the wall clock, two runs of the same corpus
+/// on either side of a second boundary age every memory by a different
+/// fraction of a day, and the reranking plan measured that as MRR 74.3 vs
+/// 74.6 for identical code. Recency is a multiplier on the score, so a
+/// moving `now` is a moving measurement.
+///
+/// **Ties that are really coin flips.** `created_at` ages in whole seconds,
+/// so a corpus seeded in one pass is the same age for every memory: a
+/// symmetric disagreement between the vector and keyword legs is an *exact*
+/// score tie, and `sort_ranked` settles it by memory id. Ids are UUIDv7, so
+/// the "winner" changes when the corpus is re-seeded, and the number a phase
+/// is gated on was decided by a random value. Ages (Task 0.2) put real
+/// distance between memories; fixing `now` makes the distance mean the same
+/// thing in every run.
+///
+/// Latency is the one figure this cannot pin, which is why the gate reads it
+/// paired on/off and never absolute.
+pub(crate) fn eval_now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+        .expect("the eval's fixed instant is a valid RFC 3339 timestamp")
+        .with_timezone(&Utc)
+}
 
 /// The cut-off the gate is defined at.
 ///
@@ -99,6 +129,21 @@ pub(crate) struct SeedMemory {
     /// they were seeded into the file back when the graph was still inert.
     #[serde(default)]
     relations: Vec<SeedRelation>,
+    /// How old this memory is at [`eval_now`], in days.
+    ///
+    /// A real store is a pile of memories written months apart, and recency
+    /// is a multiplier on its rank score, so age decides results. Left unset
+    /// the memory gets a stable pseudo-random age derived from its content
+    /// (see [`seeded_age_days`]), which is what makes the eval behave like a
+    /// real store without anyone hand-ageing a hundred entries.
+    ///
+    /// **Set it explicitly wherever the corpus encodes an order** — a
+    /// superseded fact, a "current" fact, a distractor that is meant to be
+    /// the older of two lookalikes. A hash cannot know which of a pair is
+    /// supposed to be newer, and an age assigned the wrong way round turns a
+    /// case about relevance into a case about an accident (Task 0.2).
+    #[serde(default)]
+    age_days: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +209,21 @@ pub(crate) struct CaseResult {
     /// For an `expect_empty` case: whether the list was empty — the top
     /// result was "correct" exactly when there was no top result.
     top_hit: bool,
+    /// Whether *every* expectation landed in the top K, not merely the first
+    /// one (recall-quality-plan.md Task 0.4, V3).
+    ///
+    /// The distinction is the difference between "an agent got an answer" and
+    /// "an agent got the whole answer", and it is what a multi-hop question
+    /// turns on: for `who leads the team that maintains the billing service`,
+    /// the bridge fact and the name together are the answer, and finding only
+    /// one of them is not the success the case means. `recall` already counts
+    /// that as 50%; `complete` says it plainly instead of as a fraction a
+    /// per-kind mean rounds away.
+    ///
+    /// For an `expect_empty` case it carries the pass bit, like `recall` and
+    /// `top_hit`: nothing came back, so every expectation there was (namely
+    /// none) was met.
+    complete: bool,
     /// 1 / (rank of the first expected memory found in the top K), None
     /// when none of them was found. Averaged into `Report::mrr`. For an
     /// `expect_empty` case: Some(1.0) when nothing was returned (the
@@ -215,6 +275,17 @@ pub struct Report {
     /// against.
     #[serde(default)]
     pub mrr: f64,
+    /// Fraction of the *scored* cases whose every expected memory landed in
+    /// the top K, 0–100 (recall-quality-plan.md Task 0.4).
+    ///
+    /// This is the completeness half of the story the other three hide. A
+    /// multi-hop case wants both the bridge fact and the name: recall@5 calls
+    /// finding one of them 50%, p@1 calls it a miss, MRR never sees the second
+    /// one at all. A fix that stitches a two-hop answer together therefore
+    /// moves *only* this number — which is why Phase 0 measures it before any
+    /// phase claims a gain.
+    #[serde(default)]
+    pub complete_at_k: f64,
     /// Median / 95th-percentile wall-clock of a single recall, in
     /// milliseconds, across every case. Includes the embedder call (for
     /// a remote provider, mostly network), so it is only meaningful
@@ -230,6 +301,11 @@ pub struct Report {
     /// way `by_kind` localises a recall regression.
     #[serde(default)]
     pub precision_at_1_by_kind: BTreeMap<String, f64>,
+    /// complete@k per `kind`, for the same reason: the `relational` and `chain`
+    /// kinds are where completeness is the whole question, and an overall mean
+    /// lets one of them collapse while the other improves.
+    #[serde(default)]
+    pub complete_at_k_by_kind: BTreeMap<String, f64>,
     /// Fraction of `expect_empty` cases that returned nothing at the
     /// floor, 0–100; 0.0 when the run had no negatives. The negative
     /// cases' own number, kept off the ranking means above.
@@ -274,6 +350,14 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
         embedder,
         memories.embedder.dimensions()
     );
+    // And which legs are in the pipeline being measured: with the graph off
+    // there is no hop and no seeded edge, so the `relational` numbers describe
+    // a two-leg recall. A row that moved them had better say so out loud.
+    if memories.graph.is_none() {
+        println!(
+            "graph: off (`[graph].enabled = false` — relational cases read the two-leg pipeline)\n"
+        );
+    }
 
     // One untimed recall before timing any: the first call pays
     // connection setup (remote providers), index open and cache misses,
@@ -302,10 +386,25 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
     Ok(gated)
 }
 
-/// Reject cases that cannot be scored as written, at load time rather
-/// than only in the committed-file parse test: an `expect`-less
-/// non-negative case divides by zero and poisons every mean as NaN, and
-/// an `expect_empty` case with expectations has contradicted itself.
+/// Reject a corpus or case set that cannot measure what it claims to.
+///
+/// Runs at load time rather than only in the committed-file parse test, so a
+/// hand-edited set fails where the mistake was made. Four rules:
+///
+/// * an `expect`-less non-negative case divides by zero and poisons every
+///   mean as NaN, and an `expect_empty` case with expectations has
+///   contradicted itself;
+/// * two definitions of the same `content` (V1) are not two memories — the
+///   second takes a slot in every top-5 list the first reaches, so the eval
+///   scores the corpus's own repetition instead of retrieval;
+/// * a `current-fact` case whose expected memory is *older* than another
+///   memory about the same entity is not testing whether the current fact
+///   wins: the recency multiplier hands it the ranking on a plate, or
+///   takes it away, and the case measures an accident (Task 0.2);
+/// * a `vocab-gap` case whose expectation shares a content word with the
+///   query is not testing a vocabulary gap either — it is an ordinary case
+///   wearing a label that makes the phase-5 numbers mean something they do
+///   not (Task 0.7).
 pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     for case in &set.cases {
@@ -321,6 +420,48 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
             _ => {}
         }
     }
+
+    if let Some((content, first, second)) = find_duplicate_content(&set.memories) {
+        issues.push(format!(
+            "memory {content:?} is defined twice (entries {} and {}) — a duplicate takes a slot \
+             in every top-5 list its twin reaches, so the run scores the corpus's repetition \
+             rather than retrieval. Delete one definition",
+            first + 1,
+            second + 1
+        ));
+    }
+
+    for memory in &set.memories {
+        // `seeded_at` turns days into seconds and chrono will not carry a NaN,
+        // so a nonsense age here would be a panic or a bogus `created_at` in
+        // the middle of a seeding run that looks like a harness bug.
+        if let Some(age) = memory.age_days {
+            if !age.is_finite() || age < 0.0 || age > MAX_AGE_DAYS {
+                issues.push(format!(
+                    "memory {:?} has age_days {age} — the corpus ages memories in years, not \
+                     infinities: use a finite number in `0..={MAX_AGE_DAYS:.0}`",
+                    truncate(&memory.content, 48)
+                ));
+            }
+        }
+    }
+
+    for case in set
+        .cases
+        .iter()
+        .filter(|case| case.kind == CURRENT_FACT_KIND)
+    {
+        if let Some(issue) = superseded_current_fact(set, case) {
+            issues.push(issue);
+        }
+    }
+
+    for case in set.cases.iter().filter(|case| case.kind == VOCAB_GAP_KIND) {
+        if let Some(issue) = vocabulary_gap_named_in_query(set, case) {
+            issues.push(issue);
+        }
+    }
+
     if !issues.is_empty() {
         return Err(RaError::Validation(format!(
             "{} is invalid: {}",
@@ -329,6 +470,140 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The first content defined by two `[[memory]]` blocks, with their indices.
+fn find_duplicate_content(memories: &[SeedMemory]) -> Option<(&str, usize, usize)> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, memory) in memories.iter().enumerate() {
+        if let Some(first) = seen.insert(memory.content.as_str(), index) {
+            return Some((&memory.content, first, index));
+        }
+    }
+    None
+}
+
+/// Why a `current-fact` case does not actually measure "the current fact
+/// wins", if it does not.
+///
+/// The subject of a memory is whatever it declares as an entity — the graph
+/// joins on exactly that key, so "memories sharing its subject entity" is
+/// `EntityKey` identity here rather than a judgement about wording. An
+/// expected memory with no declared entities has no subject to compare
+/// against, and the rule has nothing to say about it.
+fn superseded_current_fact(set: &EvalSet, case: &Case) -> Option<String> {
+    let keys_of = |memory: &SeedMemory| -> Vec<String> {
+        memory
+            .entities
+            .iter()
+            .map(|entity| EntityKey::new(&entity.name).as_str().to_string())
+            .collect()
+    };
+
+    for wanted in &case.expect {
+        let expected = set
+            .memories
+            .iter()
+            .find(|memory| &memory.content == wanted)?;
+        let subjects = keys_of(expected);
+        if subjects.is_empty() {
+            continue;
+        }
+        let expected_age = seeded_age_days(expected);
+        for other in &set.memories {
+            if &other.content == wanted {
+                continue;
+            }
+            let newer = seeded_age_days(other) < expected_age;
+            let same_subject = keys_of(other).iter().any(|key| subjects.contains(key));
+            if newer && same_subject {
+                return Some(format!(
+                    "case {:?} (kind {CURRENT_FACT_KIND}) expects {:?} to be the current fact, \
+                     but {:?} speaks of the same entity and is seeded newer ({:.0} days old vs \
+                     {:.0}) — say which one is meant to be current by setting `age_days`",
+                    case.name,
+                    truncate(&expected.content, 48),
+                    truncate(&other.content, 48),
+                    seeded_age_days(other),
+                    expected_age
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The kind whose whole premise is that the query shares no content word
+/// with the memory that answers it (recall-quality-plan.md Task 0.7).
+const VOCAB_GAP_KIND: &str = "vocab-gap";
+
+/// Grammar, not topic: a `vocab-gap` case that overlaps with its answer on
+/// one of these still shares no vocabulary. Deliberately short — it holds the
+/// function words this corpus writes, because a longer list's only effect is
+/// to hide a shared word that was worth seeing.
+const FUNCTION_WORDS: &[&str] = &[
+    "a", "after", "and", "any", "are", "as", "at", "be", "before", "but", "by", "can", "did", "do",
+    "does", "for", "from", "had", "has", "have", "how", "if", "in", "into", "is", "it", "its",
+    "me", "my", "no", "not", "of", "on", "or", "our", "out", "so", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "to", "up", "us", "was", "we", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
+];
+
+/// The topical words of a piece of text: lowercased runs of alphanumerics,
+/// minus [`FUNCTION_WORDS`] and single letters.
+///
+/// Coarser on purpose than the index's analyzer (which tokenises per field and
+/// drops its own stopwords): the question here is "do these two sentences talk
+/// about the same thing using the same words", and being stricter than the
+/// analyzer means a case can only pass this check by sharing nothing at all.
+fn content_words(text: &str) -> BTreeSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.len() > 1 && !FUNCTION_WORDS.contains(word))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a `vocab-gap` case names its own answer.
+///
+/// The kind exists to measure the answer whose wording has nothing in common
+/// with the question — Phase 5's ingest-time probes are scored on exactly that,
+/// and §0.9 freezes these cases so it cannot be done from them. A case that
+/// shares a content word measures ordinary lexical matching while reporting as
+/// a vocabulary gap, so the claim gets checked the way the `current-fact`
+/// ages are: at load, where the mistake was made.
+fn vocabulary_gap_named_in_query(set: &EvalSet, case: &Case) -> Option<String> {
+    let asked = content_words(&case.query);
+    for wanted in &case.expect {
+        let Some(answer) = set.memories.iter().find(|memory| &memory.content == wanted) else {
+            continue; // an expectation with no memory is the parse test's to report
+        };
+        // Content, tags and category: the three fields the keyword leg's query
+        // parser is built over, so a shared word in any of them is one a real
+        // request can match on.
+        let visible = format!(
+            "{} {} {}",
+            answer.content,
+            answer.tags.join(" "),
+            answer.category
+        );
+        let seen = content_words(&visible);
+        let shared: Vec<&String> = seen.intersection(&asked).collect();
+        if !shared.is_empty() {
+            return Some(format!(
+                "case {:?} is kind {VOCAB_GAP_KIND}, which claims nothing in the query appears in \
+                 the memory that answers it, but they share {} — reword one side, or move the case \
+                 to the kind it actually measures",
+                case.name,
+                shared
+                    .iter()
+                    .map(|word| format!("{word:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    None
 }
 
 /// The subset a committed baseline gates against: everything not marked
@@ -342,16 +617,81 @@ fn gate(results: &[CaseResult]) -> Vec<CaseResult> {
         .collect()
 }
 
+/// The kind whose whole premise is that the memory it expects is the newest
+/// thing the corpus says about its subject.
+const CURRENT_FACT_KIND: &str = "current-fact";
+
+/// The oldest age the corpus accepts, in days: ten years.
+///
+/// Past the recency band's floor a year already says everything the multiplier
+/// will say, so an age measured in decades is a typo rather than a fact, and
+/// `seeded_at` would be moving `now` by an implausible span.
+const MAX_AGE_DAYS: f32 = 3_650.0;
+
+/// The age, in days at [`eval_now`], that this corpus entry is seeded with.
+///
+/// The explicit `age_days` wins; otherwise the age is derived from the
+/// content by [`hashed_age_days`], so an entry without an age is still not
+/// left to chance — it is just left to a rule instead of to a run.
+pub(crate) fn seeded_age_days(seed: &SeedMemory) -> f32 {
+    seed.age_days
+        .unwrap_or_else(|| hashed_age_days(&seed.content))
+}
+
+/// A stable pseudo-random age in `[0, 365)` days, derived from the bytes of
+/// the memory's content by FNV-1a.
+///
+/// The eval needs a corpus whose memories are not all the same age (Task
+/// 0.2), and it needs that *without* a seeded RNG: an `StdRng::seed_from_u64`
+/// is stable only while the iteration order and the number of draws are, so
+/// inserting one memory anywhere in the file re-ages every memory after it
+/// and the baseline moves for a reason nobody can read. A hash of the content
+/// has no global state at all: add, remove or reorder entries and every
+/// untouched entry keeps the age it had.
+///
+/// 365 days because that is a year of a personal store, and four times the
+/// configured 90-day recency half-life: the whole floored band gets exercised
+/// rather than just its fresh end. Folding into *seconds* rather than days
+/// keeps two different contents from landing on the same instant (a hundred
+/// entries over 365 buckets would collide constantly, and a collision is an exact
+/// score tie — the thing this task exists to remove).
+fn hashed_age_days(content: &str) -> f32 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    const SECONDS_IN_A_YEAR: u64 = 365 * 86_400;
+
+    let mut hash = FNV_OFFSET;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash % SECONDS_IN_A_YEAR) as f32 / 86_400.0
+}
+
+/// The instant a memory of `age_days` is stamped with: [`eval_now`] minus its
+/// age. Whole seconds, which is the resolution the ranker ages at anyway.
+fn seeded_at(age_days: f32) -> DateTime<Utc> {
+    let seconds = (f64::from(age_days) * 86_400.0).round() as i64;
+    eval_now() - chrono::Duration::try_seconds(seconds).expect("an eval age fits in a chrono span")
+}
+
 /// Builds a throwaway instance and fills it with the corpus.
 ///
 /// The `TempDir` comes back so the caller holds it: dropping it deletes
 /// the database and the tantivy indexes out from under the run.
 ///
 /// The instance is assembled from the caller's `config` — embedder,
-/// relevance floor, ranker tuning and all — with exactly two overrides:
-/// the storage path, so the run can never touch a real store, and the
-/// graph (see below). Shared with the Phase 7 grid, which measures every
-/// cell against one seeded corpus rather than reseeding per cell.
+/// relevance floor, ranker tuning, graph on or off, and all — with exactly
+/// one override: the storage path, so the run can never touch a real store.
+/// Shared with the Phase 7 grid, which measures every cell against one
+/// seeded corpus rather than reseeding per cell.
+///
+/// **Time.** The instance is wired to a [`FixedClock`] rather than the wall
+/// clock, and that clock is left at [`eval_now`] when this returns: every
+/// memory's `created_at` is [`eval_now`] minus its `age_days`, and every
+/// score is computed against [`eval_now`] (Tasks 0.1 and 0.2). The same
+/// corpus therefore produces the same recency multiplier in every run, on
+/// every machine.
 pub(crate) fn seed(
     set: &EvalSet,
     config: &AppConfig,
@@ -361,18 +701,24 @@ pub(crate) fn seed(
 
     let mut config = config.clone();
     config.storage.path = scratch.path().to_string_lossy().to_string();
-    // The eval measures the graph leg's contribution, so it runs with the
-    // graph on regardless of the shipped default — that is the whole point
-    // of the `relational` cases and the entities/relations the corpus
-    // carries. Whether `[graph].enabled` *ships* on is a separate decision,
-    // made from these numbers (Task 7.3.6), not read back from here.
-    config.graph.enabled = true;
+    // The graph is whatever the caller's config says — the harness does not
+    // override it. Since Task 7.3.6 the shipped default is on, so the
+    // `relational` cases and the edges the corpus carries measure the graph
+    // leg by default; and because the switch is not pinned here,
+    // `scripts/recall-grid.sh` can measure `[graph].enabled` as the knob it
+    // is (recall-quality-plan.md Task 0.6). A harness that decided a knob it
+    // is being asked to measure would report its own override as a result.
 
     let database = Arc::new(SqliteDatabase::open(
         &scratch.path().join(crate::bootstrap::wiring::DATABASE_FILE),
     )?);
     let identity = Identity::from_database(Arc::clone(&database))?;
-    let memories = Memories::build(&config, database)?;
+    // One clock for the whole instance. The saver stamps `created_at` from
+    // it, the ranker ages against it, and the graph's `valid_from` is the
+    // memory's `created_at`, so this handle is what makes "aged corpus,
+    // fixed now" true for every part of the pipeline at once.
+    let clock = FixedClock::at(eval_now());
+    let memories = Memories::build_with_clock(&config, database, Arc::new(clock.clone()))?;
 
     // A real key, authenticated for real: the eval must exercise the same
     // scoping every request does, or it could pass against a store no
@@ -384,14 +730,26 @@ pub(crate) fn seed(
             .execute("eval", vec![Scope::Read, Scope::Write], "eval")?;
     let context = identity.key_authenticator.execute(&issued.token.render())?;
 
-    // The graph is present because we turned it on above; a missing one
-    // here would be a wiring bug, not a config choice, so unwrap loudly.
-    let graph = memories
-        .graph
-        .as_ref()
-        .expect("the eval enables the graph, so Memories must have built one");
+    // With the graph on, a missing handle would be a wiring bug rather than a
+    // config choice, and stopping loudly is the cheap fix: a corpus seeded
+    // without edges scores every `relational` case as a silent zero, which is
+    // the worst kind of green. With it off, ingest records no edges — exactly
+    // what a deployment with `[graph].enabled = false` does — and the
+    // relational cases measure the two-leg pipeline, which is the point of
+    // measuring that knob at all.
+    let graph = match (config.graph.enabled, memories.graph.as_ref()) {
+        (true, graph) => {
+            Some(graph.expect("the config has the graph on, so Memories must have built one"))
+        }
+        (false, _) => None,
+    };
 
     for seed in &set.memories {
+        // Time-travel, then save: `created_at` comes off this clock, and the
+        // graph edge below inherits it as `valid_from`, so one move ages the
+        // memory and its relationships together (Task 0.2).
+        clock.set(seeded_at(seeded_age_days(seed)));
+
         let entities: Vec<Entity> = seed
             .entities
             .iter()
@@ -434,14 +792,24 @@ pub(crate) fn seed(
             })
             .collect();
 
-        graph.record(
-            &context,
-            stored.id(),
-            &entities,
-            &relations,
-            stored.created_at(),
-        )?;
+        // No graph configured, no edges recorded: exactly what a deployment
+        // with `[graph].enabled = false` stores, and the hole the
+        // `relational` cases then measure.
+        if let Some(graph) = graph {
+            graph.record(
+                &context,
+                stored.id(),
+                &entities,
+                &relations,
+                stored.created_at(),
+            )?;
+        }
     }
+
+    // Back to the instant every score is measured at. Leaving it on the last
+    // seed's age would make the whole run's recency depend on whichever entry
+    // happened to be last in the file.
+    clock.set(eval_now());
 
     Ok((memories, context, scratch))
 }
@@ -538,6 +906,7 @@ pub(crate) fn score(
             informational: case.informational,
             recall: if passed { 1.0 } else { 0.0 },
             top_hit: passed,
+            complete: passed,
             reciprocal_rank: None,
             latency_ms,
             expect_empty: true,
@@ -576,6 +945,11 @@ pub(crate) fn score(
         top_hit: returned
             .first()
             .is_some_and(|top| case.expect.iter().any(|wanted| wanted == top)),
+        // `missed` is computed against the returned top K, so "nothing missed"
+        // is exactly "every expectation was inside it". One expected memory
+        // makes this the same bit as recall == 1.0; two is where it earns its
+        // place (see the field doc).
+        complete: missed.is_empty(),
         reciprocal_rank,
         latency_ms,
         expect_empty: false,
@@ -608,6 +982,7 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
 
     let mut recall_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     let mut precision_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let mut complete_by_kind: BTreeMap<String, Vec<f64>> = BTreeMap::new();
     for result in results {
         recall_by_kind
             .entry(result.kind.clone())
@@ -617,6 +992,10 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
             .entry(result.kind.clone())
             .or_default()
             .push(if result.top_hit { 1.0 } else { 0.0 });
+        complete_by_kind
+            .entry(result.kind.clone())
+            .or_default()
+            .push(if result.complete { 1.0 } else { 0.0 });
     }
 
     let latencies: Vec<f64> = results.iter().map(|r| r.latency_ms).collect();
@@ -645,9 +1024,22 @@ pub(crate) fn summarise(results: &[CaseResult]) -> Report {
                 .map(|r| r.reciprocal_rank.unwrap_or(0.0))
                 .collect::<Vec<_>>(),
         ),
+        // Scored cases only, like the other three ranking means: a negative's
+        // `complete` bit is its abstain pass, and abstentions already have
+        // `abstention_rate` rather than a place in this average.
+        complete_at_k: mean(
+            &scored
+                .iter()
+                .map(|r| if r.complete { 1.0 } else { 0.0 })
+                .collect::<Vec<_>>(),
+        ),
         latency_ms_p50: percentile(&latencies, 50.0).unwrap_or(0.0),
         latency_ms_p95: percentile(&latencies, 95.0).unwrap_or(0.0),
         precision_at_1_by_kind: precision_by_kind
+            .into_iter()
+            .map(|(kind, values)| (kind, mean(&values)))
+            .collect(),
+        complete_at_k_by_kind: complete_by_kind
             .into_iter()
             .map(|(kind, values)| (kind, mean(&values)))
             .collect(),
@@ -698,10 +1090,11 @@ fn print_report(results: &[CaseResult]) {
     println!("{}", "─".repeat(76));
     let scored_cases = results.iter().filter(|r| !r.expect_empty).count();
     println!(
-        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} scored cases, {} negative)",
+        "recall@{K}: {:.1}%   precision@1: {:.1}%   MRR: {:.1}%   complete@{K}: {:.1}%   latency p50: {:.1} ms p95: {:.1} ms   ({} scored cases, {} negative)",
         report.recall_at_k,
         report.precision_at_1,
         report.mrr,
+        report.complete_at_k,
         report.latency_ms_p50,
         report.latency_ms_p95,
         scored_cases,
@@ -724,7 +1117,10 @@ fn print_report(results: &[CaseResult]) {
     }
     for (kind, score) in &report.by_kind {
         let precision = report.precision_at_1_by_kind.get(kind).unwrap_or(&0.0);
-        println!("  {kind:>16}: recall {score:.1}%   p@1 {precision:.1}%");
+        let complete = report.complete_at_k_by_kind.get(kind).unwrap_or(&0.0);
+        println!(
+            "  {kind:>16}: recall {score:.1}%   p@1 {precision:.1}%   complete@{K} {complete:.1}%"
+        );
     }
 }
 
@@ -778,6 +1174,29 @@ pub(crate) fn test_memory(content: &str, category: &str) -> SeedMemory {
         tags: Vec::new(),
         entities: Vec::new(),
         relations: Vec::new(),
+        age_days: None,
+    }
+}
+
+/// [`test_memory`] with the two things the age rules read: declared entities
+/// (the subject a `current-fact` case is compared on) and an explicit age.
+#[cfg(test)]
+pub(crate) fn test_memory_about(
+    content: &str,
+    category: &str,
+    entities: &[&str],
+    age_days: f32,
+) -> SeedMemory {
+    SeedMemory {
+        entities: entities
+            .iter()
+            .map(|name| SeedEntity {
+                name: name.to_string(),
+                kind: String::new(),
+            })
+            .collect(),
+        age_days: Some(age_days),
+        ..test_memory(content, category)
     }
 }
 
@@ -839,15 +1258,27 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
         ));
     }
 
-    for (metric, before, after) in [
+    let gated: Vec<(String, f64, f64)> = vec![
         (
-            "precision@1",
+            "precision@1".to_string(),
             baseline.precision_at_1,
             report.precision_at_1,
         ),
-        ("MRR", baseline.mrr, report.mrr),
-    ] {
-        if before == 0.0 {
+        ("MRR".to_string(), baseline.mrr, report.mrr),
+        // Task 0.4's completeness metric, gated like the others so a change
+        // that stops answering multi-hop questions in full cannot pass on a
+        // flat p@1. `K` is interpolated rather than spelled out: the metric
+        // means "every expectation inside the top K", and a future K change
+        // must move the label with it.
+        (
+            format!("complete@{K}"),
+            baseline.complete_at_k,
+            report.complete_at_k,
+        ),
+    ];
+
+    for (metric, before, after) in &gated {
+        if *before == 0.0 {
             // An old baseline never recorded MRR; treating the deserialised
             // zero as a score would either skip a real gate forever or fail
             // an honest zero, so the skip is explicit and printed.
@@ -876,6 +1307,19 @@ pub fn compare(report: &Report, baseline_path: &Path, max_drop: f64) -> Result<(
             let kind_drop = before - after;
             if kind_drop > max_drop {
                 println!("  {kind}: {before:.1}% → {after:.1}% ({kind_drop:.1} points worse)");
+            }
+        }
+    }
+    // Completeness too, and printed only on a drop like the recall line: a
+    // `chain` kind that stops completing two-hop answers while its p@1 holds
+    // steady is the regression this metric exists to catch.
+    for (kind, before) in &baseline.complete_at_k_by_kind {
+        if let Some(after) = report.complete_at_k_by_kind.get(kind) {
+            let kind_drop = before - after;
+            if kind_drop > max_drop {
+                println!(
+                    "  {kind}: complete@{K} {before:.1}% → {after:.1}% ({kind_drop:.1} points worse)"
+                );
             }
         }
     }
@@ -915,6 +1359,11 @@ mod tests {
             informational: false,
             recall,
             top_hit,
+            // The helper has no expectation list to check against, so it can
+            // only say what the recall number implies: every expectation found
+            // is recall 1.0. A test that needs the two to disagree — a
+            // two-expectation case that found one — overrides this bit.
+            complete: recall >= 1.0,
             // A case with a top hit has its expected memory at rank 1.
             reciprocal_rank: if top_hit { Some(1.0) } else { None },
             latency_ms: 10.0,
@@ -924,12 +1373,14 @@ mod tests {
     }
 
     /// A negative case's scored stand-in: pass/fail lives entirely in the
-    /// recall bit, as `score` writes it.
+    /// recall bit, as `score` writes it — including `complete`, which for
+    /// these carries the same abstain-pass bit (see `score`'s `expect_empty` arm).
     fn negative(passed: bool) -> CaseResult {
         CaseResult {
             expect_empty: true,
             recall: if passed { 1.0 } else { 0.0 },
             top_hit: passed,
+            complete: passed,
             ..result("negative", 0.0, false)
         }
     }
@@ -982,6 +1433,74 @@ mod tests {
         let report = summarise(&[first, third, missing]);
         let expected = (1.0 + 1.0 / 3.0 + 0.0) / 3.0 * 100.0;
         assert!((report.mrr - expected).abs() < 1e-9, "{}", report.mrr);
+    }
+
+    #[test]
+    fn complete_at_k_counts_a_two_part_answer_whole_or_not_at_all() {
+        // Task 0.4's whole point in three cases: a two-hop question that found
+        // one of its two memories is a *failed* answer here, where recall@5
+        // books it as a half and MRR never looks at the second half at all.
+        let half_a_chain = CaseResult {
+            complete: false,
+            ..result("chain", 0.5, true)
+        };
+        let whole_chain = CaseResult {
+            complete: true,
+            ..result("chain", 1.0, true)
+        };
+        let no_answer = CaseResult {
+            complete: false,
+            ..result("chain", 0.0, false)
+        };
+
+        let report = summarise(&[half_a_chain, whole_chain, no_answer]);
+        assert_eq!(report.recall_at_k, 50.0, "recall still credits the half");
+        // Tolerance rather than `assert_eq!`: the mean is `1.0/3.0*100.0`, and
+        // writing the same number as `100.0/3.0` rounds differently in the last
+        // bit. The point is one-of-three, not the ULPs.
+        let one_of_three = 100.0 / 3.0;
+        assert!(
+            (report.complete_at_k - one_of_three).abs() < 1e-9,
+            "{}",
+            report.complete_at_k
+        );
+        assert!(
+            (report.complete_at_k_by_kind["chain"] - one_of_three).abs() < 1e-9,
+            "{:?}",
+            report.complete_at_k_by_kind
+        );
+    }
+
+    #[test]
+    fn a_single_expectation_completes_wherever_recall_reads_one() {
+        // The degenerate case, pinned because it is most of the eval: with one
+        // expected memory, complete and recall agree even when the answer is
+        // buried at rank 5 — p@1 is the metric that disagrees there.
+        let buried = CaseResult {
+            complete: true,
+            reciprocal_rank: Some(0.2),
+            ..result("needle", 1.0, false)
+        };
+        let report = summarise(&[buried]);
+        assert_eq!(report.complete_at_k, 100.0);
+        assert_eq!(report.precision_at_1, 0.0);
+    }
+
+    #[test]
+    fn negatives_keep_complete_out_of_the_ranking_mean() {
+        // Same rule as recall/p@1/MRR (see `negatives_move_abstention_never_the_ranking_means`):
+        // a flipping negative must not move the scored mean, or every phase's
+        // headroom number becomes partly a function of the abstention set. It
+        // does keep its own bit in the per-kind line, where `by_kind` and
+        // `precision_at_1_by_kind` already read negatives the same way.
+        let report = summarise(&[
+            result("paraphrase", 1.0, true),
+            negative(true),
+            negative(false),
+        ]);
+        assert_eq!(report.complete_at_k, 100.0, "one scored case, complete");
+        assert_eq!(report.abstention_rate, 50.0);
+        assert_eq!(report.complete_at_k_by_kind["negative"], 50.0);
     }
 
     #[test]
@@ -1207,6 +1726,8 @@ mod tests {
         assert_eq!(baseline.mrr, 0.0, "absent in an old baseline");
         assert_eq!(baseline.latency_ms_p50, 0.0);
         assert!(baseline.precision_at_1_by_kind.is_empty());
+        assert_eq!(baseline.complete_at_k, 0.0, "absent in an old baseline");
+        assert!(baseline.complete_at_k_by_kind.is_empty());
         assert!(
             baseline.embedder.is_empty(),
             "the field postdates old baselines"
@@ -1261,6 +1782,61 @@ mod tests {
             compare(&measured, baseline.path(), 5.0).is_ok(),
             "an unrecorded metric must not fail the gate"
         );
+    }
+
+    #[test]
+    fn complete_at_k_gates_once_recorded_and_is_skipped_before_that() {
+        // Task 0.4's DoD both ways. `eval/baseline.json` predates the field, so
+        // the first run after it must not be failed by a metric it never
+        // recorded; the run after re-recording must be.
+        let unrecorded = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                recall_at_k: 80.0,
+                precision_at_1: 70.0,
+                mrr: 60.0,
+                ..Report::default()
+            },
+            unrecorded.path(),
+        )
+        .unwrap();
+        let collapsed = Report {
+            complete_at_k: 10.0,
+            ..measured_with_ranking_means()
+        };
+        assert!(
+            compare(&collapsed, unrecorded.path(), 5.0).is_ok(),
+            "a baseline that never measured completeness cannot gate on it"
+        );
+
+        let recorded = tempfile::NamedTempFile::new().unwrap();
+        write_baseline(
+            &Report {
+                complete_at_k: 80.0,
+                ..measured_with_ranking_means()
+            },
+            recorded.path(),
+        )
+        .unwrap();
+        let err = compare(&collapsed, recorded.path(), 5.0)
+            .expect_err("a 70-point completeness collapse must fail the gate");
+        assert!(
+            err.to_string().contains("complete@5"),
+            "the failure should name the metric: {err}"
+        );
+    }
+
+    /// A report whose three pre-existing ranking means are all set, for tests
+    /// that gate on a *newer* metric and must not trip the older ones on the
+    /// way (a default `Report` has 0.0 p@1 and MRR, which read as "unrecorded"
+    /// and make such a test pass for the wrong reason).
+    fn measured_with_ranking_means() -> Report {
+        Report {
+            recall_at_k: 80.0,
+            precision_at_1: 70.0,
+            mrr: 60.0,
+            ..Report::default()
+        }
     }
 
     #[test]
@@ -1354,6 +1930,391 @@ mod tests {
         assert!(compare(&better, baseline.path(), 5.0).is_ok());
     }
 
+    // --- ages: Task 0.1's clock and Task 0.2's corpus ---------------------
+
+    #[test]
+    fn an_unaged_memory_gets_the_same_age_in_every_run() {
+        // The default has to look like a real store (ages spread over the
+        // year) and behave like a constant (identical across runs, machines,
+        // and edits to *other* entries). An RNG gives the first and loses the
+        // last two, which is why this is a hash of the content.
+        let pnpm = test_memory("User prefers pnpm over npm and yarn", "preference.coding");
+        let standups = test_memory("Standups are at 09:30 UTC on Tuesdays", "fact.project");
+
+        assert_eq!(
+            seeded_age_days(&pnpm),
+            seeded_age_days(&pnpm),
+            "the age must not depend on how many times it is asked"
+        );
+        assert!(
+            (0.0..365.0).contains(&seeded_age_days(&pnpm)),
+            "an unaged memory must land inside one year, got {}",
+            seeded_age_days(&pnpm)
+        );
+        assert_ne!(
+            seeded_age_days(&pnpm),
+            seeded_age_days(&standups),
+            "two different memories must not share an instant — that is a score tie again"
+        );
+
+        // Order-independence, spelled as the property that matters: an entry's
+        // age is a function of its own content, so a corpus that gains or
+        // reorders entries leaves every unchanged entry where it was. Under an
+        // RNG seeded once per run, inserting one memory re-ages the whole file
+        // and the baseline moves for a reason nobody can read.
+        let corpus = |extra: bool| -> Vec<f32> {
+            let mut memories = vec![
+                test_memory("User prefers pnpm over npm and yarn", "preference.coding"),
+                test_memory("Standups are at 09:30 UTC on Tuesdays", "fact.project"),
+            ];
+            if extra {
+                memories.insert(0, test_memory("Nadia is the tech lead", "fact.person"));
+            }
+            memories
+                .iter()
+                .skip(memories.len() - 2)
+                .map(seeded_age_days)
+                .collect()
+        };
+        assert_eq!(
+            corpus(false),
+            corpus(true),
+            "the age of an entry moved when an *unrelated* \
+                                                 entry joined the corpus"
+        );
+    }
+
+    #[test]
+    fn an_explicit_age_beats_the_hash_and_seeds_at_eval_now_minus_itself() {
+        let aged = SeedMemory {
+            age_days: Some(30.0),
+            ..test_memory("The analytics pipeline was built on Kafka", "fact.project")
+        };
+        assert_eq!(
+            seeded_age_days(&aged),
+            30.0,
+            "the corpus must win over the hash"
+        );
+        assert_eq!(
+            seeded_at(30.0),
+            eval_now() - chrono::Duration::days(30),
+            "30 days old means created 30 days before the eval's now"
+        );
+        // Half days survive: the ranker ages in seconds, so 0.5 d is not
+        // rounded away into a tie with a memory aged 0.
+        assert_eq!(
+            seeded_at(0.5),
+            eval_now() - chrono::Duration::try_seconds(43_200).unwrap()
+        );
+        assert_eq!(seeded_at(0.0), eval_now());
+    }
+
+    #[test]
+    fn the_committed_corpus_is_aged_like_a_real_store() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/cases.toml"),
+        )
+        .expect("eval/cases.toml should exist");
+        let set: EvalSet = toml::from_str(&raw).expect("eval/cases.toml should parse");
+
+        let ages: Vec<f32> = set.memories.iter().map(seeded_age_days).collect();
+        let youngest = ages.iter().copied().fold(f32::MAX, f32::min);
+        let oldest = ages.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            youngest < 30.0 && oldest > 300.0,
+            "the corpus spans {youngest:.0}–{oldest:.0} days: the recency band is not exercised"
+        );
+        let distinct: std::collections::BTreeSet<i64> =
+            ages.iter().map(|age| (age * 86_400.0) as i64).collect();
+        assert!(
+            distinct.len() >= set.memories.len() - 4,
+            "{} of {} memories share a seeded instant — exact score ties are back",
+            set.memories.len() - distinct.len(),
+            set.memories.len()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_memory_defined_twice() {
+        // V1: the duplicate does not add a memory, it adds a second slot in
+        // every top-5 list its twin reaches.
+        let set = EvalSet {
+            memories: vec![
+                test_memory(
+                    "User prefers Vitest over Jest for anything new",
+                    "preference.coding",
+                ),
+                test_memory("Standups are at 09:30 UTC", "fact.project"),
+                test_memory(
+                    "User prefers Vitest over Jest for anything new",
+                    "preference.coding",
+                ),
+            ],
+            cases: vec![case("scored", vec!["Standups are at 09:30 UTC"], false)],
+        };
+
+        let error = validate(&set, Path::new("x.toml")).unwrap_err().to_string();
+        assert!(error.contains("defined twice"), "{error}");
+        assert!(error.contains("Vitest"), "{error}");
+        assert!(error.contains("entries 1 and 3"), "{error}");
+    }
+
+    #[test]
+    fn validate_rejects_a_vocab_gap_case_that_names_its_own_answer() {
+        // The kind's whole claim is that the question cannot lean on a shared
+        // word. Let one through and every Phase 5 number measured on it means
+        // something other than what it says.
+        let set = EvalSet {
+            memories: vec![test_memory(
+                "Catering for the Lisbon office excludes shellfish",
+                "fact.project",
+            )],
+            cases: vec![Case {
+                kind: "vocab-gap".to_string(),
+                query: "what about shellfish at the team lunch".to_string(),
+                informational: true,
+                ..case(
+                    "dietary",
+                    vec!["Catering for the Lisbon office excludes shellfish"],
+                    false,
+                )
+            }],
+        };
+
+        let error = validate(&set, Path::new("x.toml")).unwrap_err().to_string();
+        assert!(error.contains("vocab-gap"), "{error}");
+        assert!(error.contains("\"shellfish\""), "{error}");
+    }
+
+    #[test]
+    fn a_vocab_gap_case_sharing_only_grammar_still_validates() {
+        // "for" and "a" appear on both sides and mean nothing: the topical
+        // vocabulary is still disjoint, which is what the kind is about.
+        let set = EvalSet {
+            memories: vec![test_memory(
+                "Catering for the Lisbon office excludes shellfish",
+                "fact.project",
+            )],
+            cases: vec![Case {
+                kind: "vocab-gap".to_string(),
+                query: "are there dietary requirements for a team lunch".to_string(),
+                informational: true,
+                ..case(
+                    "dietary",
+                    vec!["Catering for the Lisbon office excludes shellfish"],
+                    false,
+                )
+            }],
+        };
+
+        validate(&set, Path::new("x.toml")).expect("sharing only function words keeps the gap");
+    }
+
+    #[test]
+    fn validate_rejects_a_current_fact_the_corpus_has_already_superseded() {
+        // The `current-fact` kind asks "does the current fact win?". If the
+        // corpus seeds the expected memory as the older of two about the same
+        // subject, the answer is decided by the recency multiplier before the
+        // ranker is asked anything, and a pass measures nothing.
+        let set = |expected_age: f32| EvalSet {
+            memories: vec![
+                test_memory_about(
+                    "The backend deploys on Hetzner",
+                    "fact.project",
+                    &["backend"],
+                    expected_age,
+                ),
+                test_memory_about(
+                    "The backend runs on Fly.io",
+                    "fact.project",
+                    &["backend"],
+                    // Unconditionally newer than any age this test accepts.
+                    1.0,
+                ),
+            ],
+            cases: vec![test_case(
+                "current fact: deployment target",
+                "current-fact",
+                "where does the backend deploy",
+                &["The backend deploys on Hetzner"],
+                false,
+            )],
+        };
+
+        let stale = validate(&set(200.0), Path::new("x.toml"))
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("current-fact"), "{stale}");
+        assert!(stale.contains("seeded newer"), "{stale}");
+
+        // The same corpus with the intended order is fine, and so is a pair
+        // that never speaks of the same entity.
+        validate(&set(0.5), Path::new("x.toml")).expect("the current fact is the newest");
+    }
+
+    #[test]
+    fn validate_rejects_an_age_that_cannot_be_seeded() {
+        for age in [-1.0, f32::NAN, f32::INFINITY, 40_000.0] {
+            let set = EvalSet {
+                memories: vec![SeedMemory {
+                    age_days: Some(age),
+                    ..test_memory("Standups are at 09:30 UTC", "fact.project")
+                }],
+                cases: vec![case("scored", vec!["Standups are at 09:30 UTC"], false)],
+            };
+            let error = validate(&set, Path::new("x.toml"))
+                .expect_err("{age} must not reach the seeding run");
+            assert!(error.to_string().contains("age_days"), "{error}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ONNX model; run with --ignored"]
+    fn seeding_stamps_each_memory_with_the_age_the_corpus_gives_it() {
+        // The end-to-end half of Task 0.1+0.2: `seed` moves a clock the saver
+        // and the recaller both read, so the age in the file is the age in the
+        // row. Model-dependent, so ignored like the other real-model tests.
+        let cache = std::env::var("RECUERDOS_AI_MODEL_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/models"));
+        let config = AppConfig {
+            embeddings: crate::bootstrap::config::EmbeddingsConfig {
+                cache_dir: cache.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let set = EvalSet {
+            memories: vec![
+                test_memory("The analytics pipeline was built on Kafka", "fact.project"),
+                test_memory("The analytics pipeline runs on Kinesis", "fact.project"),
+            ],
+            cases: vec![],
+        };
+
+        let (memories, context, _scratch) = seed(&set, &config).expect("seed with ages");
+        let stored = memories.repository.list(&context, true).unwrap();
+        assert_eq!(stored.len(), 2);
+        for memory in &stored {
+            let seed = set
+                .memories
+                .iter()
+                .find(|seed| seed.content == memory.content())
+                .expect("the stored memory came from the corpus");
+            assert_eq!(
+                memory.created_at(),
+                seeded_at(seeded_age_days(seed)),
+                "{:?} was not stamped with its corpus age",
+                memory.content()
+            );
+        }
+
+        // And the clock is left at `eval_now`, so a memory saved after seeding
+        // is brand new rather than as old as the file's last entry.
+        let after = memories
+            .saver
+            .execute(&context, test_new_memory("written after seeding"), "test")
+            .unwrap();
+        assert_eq!(after.created_at(), eval_now());
+    }
+
+    /// Task 0.6, and the reason the harness no longer forces the graph on:
+    /// `[graph].enabled` is a knob `scripts/recall-grid.sh` measures, so
+    /// pinning it here would have the harness report its own override as a
+    /// result. On, the corpus's relations become edges a hop can walk; off,
+    /// seeding records none — exactly what a deployment with the graph off
+    /// stores — and the memories are still there for the two legs that remain.
+    #[test]
+    #[ignore = "requires the ONNX model; run with --ignored"]
+    fn a_graph_the_config_disables_seeds_no_edges() {
+        let cache = std::env::var("RECUERDOS_AI_MODEL_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/models"));
+        let config = |enabled| AppConfig {
+            embeddings: crate::bootstrap::config::EmbeddingsConfig {
+                cache_dir: cache.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            graph: crate::bootstrap::config::GraphConfig {
+                enabled,
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let set = EvalSet {
+            memories: vec![
+                SeedMemory {
+                    entities: ["Kinesis", "Kafka"]
+                        .iter()
+                        .map(|name| SeedEntity {
+                            name: name.to_string(),
+                            kind: String::new(),
+                        })
+                        .collect(),
+                    relations: vec![SeedRelation {
+                        subject: "Kinesis".to_string(),
+                        predicate: "replaced".to_string(),
+                        object: "Kafka".to_string(),
+                    }],
+                    ..test_memory("The analytics pipeline runs on Kinesis", "fact.project")
+                },
+                test_memory("Kafka is the broker we retired", "fact.project"),
+            ],
+            cases: vec![],
+        };
+
+        let (on, on_context, _scratch) = seed(&set, &config(true)).expect("seed with the graph on");
+        let graph = on
+            .graph
+            .as_ref()
+            .expect("the config has the graph on, so seed must have built one");
+        let seeds = graph
+            .seeds(&on_context, &[EntityKey::new("Kinesis")])
+            .expect("seed lookup");
+        assert!(
+            !seeds.is_empty(),
+            "a declared entity must be there to hop from"
+        );
+        assert!(
+            !graph
+                .neighbours(&on_context, &seeds, 1, None, 10)
+                .expect("hop")
+                .is_empty(),
+            "the corpus's relation must have been recorded as an edge"
+        );
+
+        let (off, off_context, _scratch) =
+            seed(&set, &config(false)).expect("seed with the graph off");
+        assert!(
+            off.graph.is_none(),
+            "the harness must not wire a graph the config turned off"
+        );
+        assert_eq!(
+            off.repository.list(&off_context, true).unwrap().len(),
+            2,
+            "turning the graph off must not cost the corpus its memories"
+        );
+    }
+
+    /// A [`NewMemory`] for the ignored seeding test, matching
+    /// `test_doubles::new_memory` without importing it into a `#[ignore]`d
+    /// path that also needs the real embedder.
+    fn test_new_memory(content: &str) -> NewMemory {
+        NewMemory {
+            content: content.to_string(),
+            category: Category::parse("fact.project").unwrap(),
+            subcategory: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            confidence: 1.0,
+            source: crate::memories::domain::memory::MemorySource {
+                client: Some("test".to_string()),
+                session_id: None,
+            },
+            expires_at: None,
+        }
+    }
+
     #[test]
     fn the_committed_eval_set_parses_and_has_cases() {
         // Cheap, and it means a typo in cases.toml surfaces in `cargo
@@ -1428,10 +2389,45 @@ mod tests {
                  informational flag needs the defect it hides to be recorded in §12 first"
             );
         }
-        assert!(
-            set.cases.iter().all(|c| !c.informational),
-            "no case in the committed set is informational after Phase 2.5"
-        );
+
+        // Task 0.7 (recall-quality-plan.md) added four kinds that document
+        // defects its own phases have not fixed — `chain` (Phase 3), `alias`
+        // (Phase 6), `temporal` (Phase 7) and `vocab-gap` (Phase 5) — and they
+        // are the *only* muted cases in the file. That keeps the promise
+        // Phase 2.5 made in the shape it still means: nothing is informational
+        // because someone found the red inconvenient. Each promotion therefore
+        // means deleting the flag from its kind and re-recording the baseline,
+        // not editing this list.
+        const PHASE_ZERO_SEVEN: [(&str, usize); 4] = [
+            ("chain", 4),
+            ("temporal", 4),
+            ("alias", 4),
+            ("vocab-gap", 6),
+        ];
+        for (kind, minimum) in PHASE_ZERO_SEVEN {
+            let cases: Vec<&Case> = set.cases.iter().filter(|c| c.kind == kind).collect();
+            assert!(
+                cases.len() >= minimum,
+                "the {kind} kind from recall-quality-plan.md Task 0.7 needs {minimum} cases, \
+                 found {}",
+                cases.len()
+            );
+            assert!(
+                cases.iter().all(|case| case.informational),
+                "{kind} measures a defect its phase has not fixed yet; gating on it would redden \
+                 CI for a known gap, and the phase would arrive with nothing to move"
+            );
+        }
+        for case in set.cases.iter().filter(|case| case.informational) {
+            assert!(
+                PHASE_ZERO_SEVEN.iter().any(|(kind, _)| *kind == case.kind),
+                "case {:?} (kind {:?}) is informational without a phase that owns its defect — \
+                 record the defect in the plan before muting it",
+                case.name,
+                case.kind
+            );
+        }
+
         assert!(
             set.cases
                 .iter()

@@ -57,6 +57,12 @@ eval-record-native:
 rerank-grid *args:
     docker compose run --rm -T dev cargo run -q --bin recuerdos-ai -- eval --grid {{args}}
 
+# Phase 0.6 recall tuning grid: the first-stage knobs (graph, recency), one
+# process per cell so each row is a config a deployment could boot. See
+# scripts/recall-grid.sh for the cells and why it is not an in-process grid.
+recall-grid *args:
+    bash scripts/recall-grid.sh {{args}}
+
 check-native:
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings

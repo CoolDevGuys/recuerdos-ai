@@ -75,8 +75,29 @@ pub struct Memories {
 
 impl Memories {
     pub fn build(config: &AppConfig, database: Arc<SqliteDatabase>) -> Result<Self> {
+        // The wall clock: what the daemon, `reindex` and every other
+        // production entry point get.
+        Self::build_with_clock(config, database, Arc::new(SystemClock))
+    }
+
+    /// [`build`](Self::build) with the clock handed in, so a harness can own
+    /// "now" instead of racing it.
+    ///
+    /// This is the only seam between the context and time: the saver stamps
+    /// `created_at` from this clock, the ranker ages results against it, and
+    /// the graph's `valid_from` is the memory's `created_at`, so one clock
+    /// decides all three. `eval` uses it to seed a corpus with *ages*
+    /// (recall-quality-plan.md Task 0.1) — without it every eval memory is
+    /// milliseconds old, the recency band is identical for all of them, and
+    /// what looks like a relevance decision is a UUID tie-break. Production
+    /// callers keep [`build`](Self::build) and [`SystemClock`].
+    pub(crate) fn build_with_clock(
+        config: &AppConfig,
+        database: Arc<SqliteDatabase>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
         let embedder = build_embedder(config)?;
-        Self::assemble(config, database, embedder)
+        Self::assemble_with_clock(config, database, embedder, build_reranker(config)?, clock)
     }
 
     /// Wires the context over a caller-supplied embedder.
@@ -125,6 +146,20 @@ impl Memories {
         embedder: Arc<dyn Embedder>,
         reranker: Option<WiredReranker>,
     ) -> Result<Self> {
+        Self::assemble_with_clock(config, database, embedder, reranker, Arc::new(SystemClock))
+    }
+
+    /// [`assemble_with_reranker`](Self::assemble_with_reranker) with the
+    /// clock handed in — see [`build_with_clock`](Self::build_with_clock).
+    /// Everything else is the same wiring, so what the eval measures is what
+    /// the daemon serves down to the component that tells time.
+    fn assemble_with_clock(
+        config: &AppConfig,
+        database: Arc<SqliteDatabase>,
+        embedder: Arc<dyn Embedder>,
+        reranker: Option<WiredReranker>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
         // Indexes, repository, graph, clock and the tuned ranker come from
         // one place, shared with the audit's read-only pair
         // (`assemble_audit_recall`): the audit compares two pipelines and
@@ -135,9 +170,11 @@ impl Memories {
             vectors,
             text,
             graph,
+            // The same `Arc` that went in: `RecallCore` holds the clock so the
+            // audit can read it, and every writer below stamps from it.
             clock,
             ranker,
-        } = RecallCore::open(config, &database, &embedder, false)?;
+        } = RecallCore::open(config, &database, &embedder, false, clock)?;
 
         // The rerank knobs travel the whole way here — the reranker itself
         // plus mode/depth/timeout onto the recaller, the strategy and weight
@@ -231,12 +268,15 @@ impl RecallCore {
     /// Opens the retrieval stack. `read_only_text` decides how the keyword
     /// index is opened: `false` for the daemon (it writes), `true` for
     /// [`assemble_audit_recall`], which must neither write nor take the
-    /// writer lock a running daemon is holding.
+    /// writer lock a running daemon is holding. `clock` is the instant every
+    /// `created_at` stamp and every recency multiplier is measured against —
+    /// [`SystemClock`] in production, a settable one in the eval.
     fn open(
         config: &AppConfig,
         database: &Arc<SqliteDatabase>,
         embedder: &Arc<dyn Embedder>,
         read_only_text: bool,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self> {
         let concrete_repository = SqliteMemoryRepository::new(
             Arc::clone(database),
@@ -276,7 +316,7 @@ impl RecallCore {
             vectors,
             text,
             graph,
-            clock: Arc::new(SystemClock),
+            clock,
             ranker: RecallRanker::new(config.retrieval.recency_half_life_days)
                 .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
                 .with_relevance_calibration(RelevanceCalibration::new(resolve_similarity_baseline(
@@ -288,39 +328,25 @@ impl RecallCore {
     }
 }
 
-/// One recall pipeline per side of the audit's comparison
-/// (`reranking-plan.md` Phase 6.2).
-pub(crate) struct AuditRecall {
-    /// No second stage: the ordering a client sees today in a deployment
-    /// with `[rerank].mode = "off"`, and the ordering the operator is
-    /// comparing against in any other.
-    pub plain: MemoryRecaller,
-    /// The same pipeline with the reranker attached and `mode = On`, so
-    /// what it prints is what enabling the stage would serve.
-    pub reranked: MemoryRecaller,
-}
-
-/// Builds the audit's two pipelines over a store opened for reading
-/// (`reranking-plan.md` Phase 6.2).
+/// The indexes, the ranker and the system of record, wired into a recall
+/// pipeline with **no** second stage — the part every audit side shares.
+///
+/// Every column of `rerank audit` / `recall audit` is built from here, so the
+/// wiring rules (read-only keyword index, one similarity baseline, one clock,
+/// the keyword leg must be populated) cannot drift between two sides of a
+/// comparison — an audit whose "before" pipeline had drifted from the served
+/// one would report a difference that was only the drift.
 ///
 /// Deliberately not a `Memories`: that context carries the saver, updater
-/// and forgetter, and a command whose entire promise is that it cannot
-/// change a store should not be handed the objects that would.
-///
-/// `depth` is the audit's own (`--depth`, defaulting to `[rerank].depth`)
-/// and the timeout is *none*: this is an offline tool, so measuring what
-/// the model actually costs matters more than bounding a request nobody is
-/// waiting for. The configured `timeout_ms` is still what a live
-/// deployment would enforce, which is why the report prints both.
-pub(crate) fn assemble_audit_recall(
+/// and forgetter, and a command whose entire promise is that it cannot change
+/// a store should not be handed the objects that would.
+fn assemble_recall_base(
     config: &AppConfig,
     database: &Arc<SqliteDatabase>,
-    embedder: Arc<dyn Embedder>,
-    reranker: Arc<dyn Reranker>,
+    embedder: &Arc<dyn Embedder>,
     context: &UserContext,
-    depth: usize,
-) -> Result<AuditRecall> {
-    let core = RecallCore::open(config, database, &embedder, true)?;
+) -> Result<MemoryRecaller> {
+    let core = RecallCore::open(config, database, embedder, true, Arc::new(SystemClock))?;
     // Refuse a store whose keyword leg is dead rather than audit it. The
     // recaller treats a failing keyword search as degradation — right for a
     // request, wrong for a measurement: the "before" column would be a
@@ -333,23 +359,52 @@ pub(crate) fn assemble_audit_recall(
             context.handle()
         )));
     }
-    let base = MemoryRecaller::new(
+    Ok(MemoryRecaller::new(
         Arc::clone(&core.repository),
         Arc::clone(&core.vectors),
         Arc::clone(&core.text),
-        Arc::clone(&embedder),
+        Arc::clone(embedder),
         core.ranker,
         Arc::clone(&core.clock),
         core.graph,
         config.graph.max_hops,
         config.graph.hop_limit,
-    );
-    // One handle without the stage, one with — from the same clone, so the
-    // only difference between the two orderings is the thing being judged.
-    Ok(AuditRecall {
-        plain: base.with_second_stage(None, RerankMode::Off, depth, Duration::ZERO),
-        reranked: base.with_second_stage(Some(reranker), RerankMode::On, depth, Duration::ZERO),
-    })
+    ))
+}
+
+/// One side of a comparison, built from that side's own config over a store
+/// opened for reading (recall-quality-plan.md Task 0.5).
+///
+/// The `rerank audit` alias calls this twice with the *same* config, forcing
+/// the mode `Off` then `On`; `recall audit --compare-config` calls it once per
+/// config, so the whole config is what differs — graph weights, recency,
+/// hybrid on/off, the ranker's strategy. The guarantees are unchanged from the
+/// rerank audit: the keyword index is read-only, nothing on this path writes,
+/// and the daemon may stay running.
+///
+/// `reranker` is the model to attach and `mode` this side's effective mode:
+/// `[rerank].mode` as configured for a `--compare-config` side, or the forced
+/// `On` / `Off` of the `rerank audit` alias. Asking for a stage with no model
+/// is a wiring bug and says so, rather than quietly serving one side a
+/// different pipeline than it claimed to run.
+pub(crate) fn assemble_recall_side(
+    config: &AppConfig,
+    database: &Arc<SqliteDatabase>,
+    embedder: Arc<dyn Embedder>,
+    reranker: Option<Arc<dyn Reranker>>,
+    mode: RerankMode,
+    context: &UserContext,
+    depth: usize,
+) -> Result<MemoryRecaller> {
+    if mode != RerankMode::Off && reranker.is_none() {
+        return Err(RaError::Internal(format!(
+            "an audit side asked for rerank mode {mode:?} with no model attached"
+        )));
+    }
+    let base = assemble_recall_base(config, database, &embedder, context)?;
+    // No deadline, exactly as the rerank audit: an offline tool measuring what
+    // a stage costs must not be cut off in the middle of it.
+    Ok(base.with_second_stage(reranker, mode, depth, Duration::ZERO))
 }
 
 /// Resolve the vector-leg relevance baseline for one instance (task 2.2).
@@ -806,6 +861,67 @@ mod tests {
             shallow,
             vec![before[1].clone(), before[0].clone(), before[2].clone()],
             "[rerank].depth did not bound the reranked head"
+        );
+    }
+
+    /// Task 0.1's seam, asserted at the wiring rather than in the eval: the
+    /// clock handed to the assembly is the clock the *saver* stamps from and
+    /// the *recaller* ages against. If either quietly kept `SystemClock`, the
+    /// eval's aged corpus would score as if every memory were new, and the
+    /// numbers would still look plausible.
+    #[test]
+    fn an_injected_clock_reaches_the_saver_and_the_recaller() {
+        use crate::shared::clock::FixedClock;
+
+        let instant = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&chrono::Utc);
+        let clock = FixedClock::at(instant);
+
+        let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let config = AppConfig {
+            storage: crate::bootstrap::config::StorageConfig {
+                path: dir.path().to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let memories = Memories::assemble_with_clock(
+            &config,
+            Arc::clone(&database),
+            Arc::new(crate::memories::application::fake_embedder::FakeEmbedder::default()),
+            None,
+            Arc::new(clock.clone()),
+        )
+        .unwrap();
+        let context = authenticate_for_test(&database);
+
+        let stored = memories
+            .saver
+            .execute(
+                &context,
+                crate::memories::application::test_doubles::new_memory("User prefers pnpm"),
+                "test",
+            )
+            .unwrap();
+        assert_eq!(
+            stored.created_at(),
+            instant,
+            "the saver used the wall clock, not the one it was wired with"
+        );
+
+        // The recaller reads the same handle. Two half-lives of travel takes
+        // the recency band to its floor, and only a recall that asked *this*
+        // clock what time it is can notice.
+        let query = RecallQuery::new("pnpm", 5).unwrap();
+        let fresh = memories.recaller.execute(&context, &query).unwrap()[0].score;
+        clock.set(instant + chrono::Duration::days(400));
+        let aged = memories.recaller.execute(&context, &query).unwrap()[0].score;
+        assert!(
+            aged < fresh,
+            "the recaller scored {aged} after 400 days and {fresh} before: the injected clock \
+             did not reach it"
         );
     }
 
