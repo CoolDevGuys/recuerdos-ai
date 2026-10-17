@@ -24,21 +24,11 @@
 # filler entries exist so a case has something to be wrong about.
 # ─────────────────────────────────────────────────────────────────────
 
-[[memory]]
-content = "User forbids barrel files and index.ts re-exports"
-category = "preference.coding"
-tags = ["typescript", "imports"]
-
-[[memory]]
-content = "User prefers pnpm over npm and yarn for package management"
-category = "preference.coding"
-tags = ["tooling", "node"]
-
-[[memory]]
-content = "User requires table-driven tests in Go, one table per behaviour"
-category = "preference.coding"
-tags = ["go", "testing"]
-
+# The four `preference.coding` memories that also demonstrate a sub-label
+# (barrel files, pnpm, table-driven Go tests, Vitest) are defined once, in
+# the subcategory section below — twice was V1 of recall-quality-plan.md:
+# two rows of identical content are not two memories, they are two slots in
+# every top-5 list the first one reaches. `validate()` refuses it now.
 
 [[memory]]
 content = "The backend deploys on Hetzner, migrated from Fly.io because of cost"
@@ -103,15 +93,16 @@ content = "Never force-push to main; the branch is protected and it breaks every
 category = "preference.coding"
 tags = ["git"]
 
-[[memory]]
-content = "User prefers Vitest over Jest for anything new"
-category = "preference.coding"
-tags = ["testing", "typescript"]
-
 # ─────────────────────────────────────────────────────────────────────
 # Subcategory memories. Same category, different sub-labels.
 # A query that targets one sub-label should return its memories ahead
 # of siblings in the same category.
+#
+# The first four are also the corpus's only definition of themselves: the
+# plain copies that used to sit above were V1 (a duplicate wins a second
+# slot in every top-5 list its twin reaches), and `validate()` refuses a
+# repeated `content` now. Their `tags` are the ones the plain copies had,
+# so the `tag-filter` cases are unchanged by the merge.
 # ─────────────────────────────────────────────────────────────────────
 
 [[memory]]

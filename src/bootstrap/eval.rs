@@ -378,6 +378,16 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
         }
     }
 
+    if let Some((content, first, second)) = find_duplicate_content(&set.memories) {
+        issues.push(format!(
+            "memory {content:?} is defined twice (entries {} and {}) — a duplicate takes a slot \
+             in every top-5 list its twin reaches, so the run scores the corpus's repetition \
+             rather than retrieval. Delete one definition",
+            first + 1,
+            second + 1
+        ));
+    }
+
     for memory in &set.memories {
         // `seeded_at` turns days into seconds and chrono will not carry a NaN,
         // so a nonsense age here would be a panic or a bogus `created_at` in
@@ -411,6 +421,17 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The first content defined by two `[[memory]]` blocks, with their indices.
+fn find_duplicate_content(memories: &[SeedMemory]) -> Option<(&str, usize, usize)> {
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, memory) in memories.iter().enumerate() {
+        if let Some(first) = seen.insert(memory.content.as_str(), index) {
+            return Some((&memory.content, first, index));
+        }
+    }
+    None
 }
 
 /// Why a `current-fact` case does not actually measure "the current fact
@@ -1691,6 +1712,31 @@ mod tests {
             set.memories.len() - distinct.len(),
             set.memories.len()
         );
+    }
+
+    #[test]
+    fn validate_rejects_a_memory_defined_twice() {
+        // V1: the duplicate does not add a memory, it adds a second slot in
+        // every top-5 list its twin reaches.
+        let set = EvalSet {
+            memories: vec![
+                test_memory(
+                    "User prefers Vitest over Jest for anything new",
+                    "preference.coding",
+                ),
+                test_memory("Standups are at 09:30 UTC", "fact.project"),
+                test_memory(
+                    "User prefers Vitest over Jest for anything new",
+                    "preference.coding",
+                ),
+            ],
+            cases: vec![case("scored", vec!["Standups are at 09:30 UTC"], false)],
+        };
+
+        let error = validate(&set, Path::new("x.toml")).unwrap_err().to_string();
+        assert!(error.contains("defined twice"), "{error}");
+        assert!(error.contains("Vitest"), "{error}");
+        assert!(error.contains("entries 1 and 3"), "{error}");
     }
 
     #[test]
