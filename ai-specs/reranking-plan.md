@@ -2655,6 +2655,36 @@ No code change: the trace is accurate, `skipped` cannot carry a partial count
 because a batched call has no partial result to count, and what was missing was
 procedure rather than telemetry.
 
+Closed the same day, on the option the corrected procedure produces. The host is
+now on `v0.4.3` — reporting the version it is tagged with — with `depth = 5` and
+`timeout_ms = 1200`:
+
+```
+"what are my programming preferences?"     applied  judged=5  leg= 386 ms  took_ms= 415
+"which languages and frameworks…"          applied  judged=4  leg= 151 ms  took_ms= 157
+"what does the Make My Trade backend use?" applied  judged=5  leg= 557 ms  took_ms= 568
+"how do I like my tests written?"          applied  judged=5  leg= 143 ms  took_ms= 154
+"what branch names do I use?"              applied  judged=5  leg=  95 ms  took_ms= 105
+```
+
+Five real queries, five `applied` legs, and `rerank_rank` plus `rerank_score` on
+every row of the head and on nothing beyond it — the stamps this host had never
+once produced. Cost per pair ranged 19–111 ms with the box doing its usual work,
+so the worst 5-pair head cost 557 ms against a 1200 ms bound: ~2.1×, which is the
+margin the procedure asks for. Recall totals went from ~830 ms — 800 of it spent
+waiting for work that was then discarded — to 105–568 ms. Turning the stage *on*
+made retrieval faster, because the configuration it replaced was paying a deadline
+it never met.
+
+The distinction those numbers force, and the reason the trace says `judged` rather
+than `changed`: **`applied` means the opinion was counted, not that the list
+moved.** On the preferences query the blended order came out identical to the
+pre-rerank one. On the backend query the reranker put the served #2 last of five
+at `0.0023` while putting the served #3 second at `0.9905` — a damped fourth leg
+absorbing disagreement rather than following it, which is what fusion is for.
+Whether the blend helps in aggregate is still the open shadow-period question,
+and `rerank audit` against the real store is the instrument for it.
+
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
       used); fixed in Phase 0 so it does. Details in the Phase 0 log above.
