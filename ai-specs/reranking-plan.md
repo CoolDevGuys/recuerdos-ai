@@ -2569,6 +2569,38 @@ Follow-ups, with what happened to each:
 3. Unchanged from Phase 8: the real-traffic shadow period that gates flipping the
    default, and the `gemini-embedding-2` production-parity re-check.
 
+#### `v0.4.3` — the tag that published the SDK
+
+The SDK's `search_report()` reached `main` after `v0.4.2`, and `release.yml`
+publishes the client only on a tag: the code existed, the artifact did not. So
+`v0.4.3` is a release with no server change in it, cut to put `0.4.0` of the SDK
+on PyPI, and the crate was bumped along with it for one reason — the tag builds
+the binaries, and a tag that ships a binary printing a different number than its
+own name is the same drift this release fixes in the SDK.
+
+Verified from what was published:
+
+* the PyPI job **uploaded** rather than skipped — `recuerdos_ai-0.4.0` wheel and
+  sdist accepted by `upload.pypi.org`; `pypi.org/pypi/recuerdos-ai/json` lists
+  `0.1.0 … 0.4.0` with `0.4.0` as latest;
+* the published wheel, installed into a clean venv (not the repo): `__version__`
+  reads `0.4.0`, `search_report` exists, a `skipped`/`deadline` payload parses to
+  `RerankSkipped`, an `applied` one to `RerankApplied` while tolerating an unknown
+  extra field, a response without the key gives `None`, and an invented reason is
+  rejected with a `ValidationError` — discriminated where it should be, open where
+  the compatibility rule says it must be;
+* `v0.4.3` binaries: three tarballs `shasum -a 256 -c` clean, darwin/arm64
+  reports `recuerdos-ai 0.4.3` — the version string matching the tag, which was
+  the point of the bump;
+* the image pulled anonymously (empty `DOCKER_CONFIG`) at `0.4.3`, where
+  `docker run --rm --entrypoint recuerdos-ai … --version` prints
+  `recuerdos-ai 0.4.3`, and `latest` resolves to a `linux/amd64` +
+  `linux/arm64` index.
+
+Worth stating in the notes, because a release with no server change invites the
+wrong reaction: anyone running `v0.4.2` gains nothing from updating the
+container, and the notes say so in the first line rather than three sections down.
+
 ### `VERIFY` items resolved
 - [x] eval embedder follows `--config` (0.1) — **it did not** (defaults were always
       used); fixed in Phase 0 so it does. Details in the Phase 0 log above.
