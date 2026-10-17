@@ -151,7 +151,19 @@ for spec in "${CELLS[@]}"; do
 
     assignments=()
     if [[ "$spec" == *,* ]]; then
-        IFS=',' read -r -a assignments <<<"${spec#*,}"
+        # A comma only starts a new assignment when a `NAME=` follows it: the
+        # §1.3 embedding-prompt variants carry commas inside their value
+        # ("Instruct: Given a web search query, retrieve…"), and splitting
+        # those into a second assignment would hand `env` a command name.
+        raw=()
+        IFS=',' read -r -a raw <<<"${spec#*,}"
+        for token in "${raw[@]}"; do
+            if [[ ${#assignments[@]} -gt 0 && "$token" != *=* ]]; then
+                assignments[${#assignments[@]} - 1]="${assignments[${#assignments[@]} - 1]},$token"
+            else
+                assignments+=("$token")
+            fi
+        done
     fi
 
     out="$OUT/$index-$label.out"
