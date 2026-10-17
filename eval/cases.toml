@@ -39,10 +39,15 @@ content = "User requires table-driven tests in Go, one table per behaviour"
 category = "preference.coding"
 tags = ["go", "testing"]
 
+
 [[memory]]
 content = "The backend deploys on Hetzner, migrated from Fly.io because of cost"
 category = "fact.project"
 tags = ["infrastructure"]
+# The `current-fact` kind's target: it has to be the newest thing the corpus
+# says about where the backend runs, or the recency multiplier decides that
+# case before the ranker is asked anything (Task 0.2).
+age_days = 12
 
 [[memory]]
 content = "The API is written in Rust with axum and tokio"
@@ -58,6 +63,10 @@ tags = ["storage"]
 content = "The pgvector migration failed because the HNSW index exceeded maintenance_work_mem"
 category = "experience"
 tags = ["postgres", "migrations"]
+# The older half of its pair with "Product search runs on the pgvector
+# extension…" below: the near-miss case asks what search runs on *now*, and a
+# hash cannot know that this incident is the superseded one (Task 0.2).
+age_days = 320
 
 [[memory]]
 content = "Deployment runbook: tag the release, wait for CI, then run just deploy-prod"
@@ -287,6 +296,11 @@ relations = [
 content = "The analytics pipeline currently streams events through Kinesis"
 category = "fact.project"
 tags = ["analytics"]
+# The pair the `temporal` kind is built on: "currently" versus "before the
+# switch" below, three quarters of a year apart, so the graph's `valid_from`
+# (which is the memory's `created_at`) and the recency band both tell the
+# same story about which one is current (Task 0.2).
+age_days = 21
 entities = [
     { name = "analytics pipeline", kind = "component" },
     { name = "Kinesis", kind = "service" },
@@ -299,6 +313,7 @@ relations = [
 content = "Before the switch, the analytics pipeline was built on Kafka"
 category = "fact.project"
 tags = ["analytics"]
+age_days = 280
 entities = [
     { name = "analytics pipeline", kind = "component" },
     { name = "Kafka", kind = "service" },
@@ -801,6 +816,8 @@ tags = ["team", "review"]
 content = "Product search runs on the pgvector extension in Postgres since retiring Elasticsearch"
 category = "fact.project"
 tags = ["search"]
+# The newer half of the pair above: this is what search runs on now.
+age_days = 40
 
 # Statement-style targets — memories phrased as rules, queried as situations.
 [[memory]]

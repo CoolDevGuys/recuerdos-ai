@@ -42,6 +42,20 @@ impl FixedClock {
         let mut now = self.now.lock().expect("clock mutex poisoned");
         *now += delta;
     }
+
+    /// Moves the clock to an absolute instant.
+    ///
+    /// [`advance`](Self::advance) answers "what time is it after the test
+    /// waits"; this answers "what time was it when this happened", which is
+    /// what a harness needs when it stamps a corpus with ages rather than
+    /// running it forward (recall-quality-plan.md Task 0.1: the eval seeds
+    /// each memory at `EVAL_NOW − age_days` and scores at `EVAL_NOW`).
+    ///
+    /// Clones share one instant, so the holder that sets it does not have to
+    /// be the object that was handed to the code reading the clock.
+    pub fn set(&self, instant: DateTime<Utc>) {
+        *self.now.lock().expect("clock mutex poisoned") = instant;
+    }
 }
 
 impl Clock for FixedClock {
@@ -61,6 +75,27 @@ mod tests {
         assert_eq!(clock.now(), epoch);
         clock.advance(chrono::Duration::days(1));
         assert_eq!(clock.now(), epoch + chrono::Duration::days(1));
+    }
+
+    #[test]
+    fn a_set_clock_moves_to_an_absolute_instant_and_clones_see_it() {
+        // Task 0.1's mechanism: the eval holds one handle and stamps memories
+        // by moving "now" backwards, while the saver and the recaller read the
+        // same clock through the pipeline they were wired with.
+        let epoch = DateTime::from_timestamp(0, 0).unwrap();
+        let clock = FixedClock::at(epoch);
+        let shared = clock.clone();
+
+        clock.set(epoch - chrono::Duration::days(30));
+        assert_eq!(clock.now(), epoch - chrono::Duration::days(30));
+        assert_eq!(
+            shared.now(),
+            epoch - chrono::Duration::days(30),
+            "a clone must share the instant, not copy it"
+        );
+
+        clock.set(epoch);
+        assert_eq!(shared.now(), epoch, "moving back is as legal as moving on");
     }
 
     #[test]

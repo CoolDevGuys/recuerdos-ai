@@ -27,10 +27,13 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, RerankTrace};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::Relation;
+use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
 use crate::memories::domain::recall_query::RecallQuery;
+use crate::shared::clock::FixedClock;
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,6 +44,33 @@ use std::sync::atomic::AtomicBool;
 /// the operator hears about it once rather than once per case. Process-wide by
 /// design: the eval is a CLI run, and "warn me the first time" is the ask.
 static RERANK_SKIP_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// The instant the eval calls "now", fixed: `2026-06-01T00:00:00Z`.
+///
+/// Two problems die here (recall-quality-plan.md Task 0.1).
+///
+/// **Cross-process drift.** With the wall clock, two runs of the same corpus
+/// on either side of a second boundary age every memory by a different
+/// fraction of a day, and the reranking plan measured that as MRR 74.3 vs
+/// 74.6 for identical code. Recency is a multiplier on the score, so a
+/// moving `now` is a moving measurement.
+///
+/// **Ties that are really coin flips.** `created_at` ages in whole seconds,
+/// so a corpus seeded in one pass is the same age for every memory: a
+/// symmetric disagreement between the vector and keyword legs is an *exact*
+/// score tie, and `sort_ranked` settles it by memory id. Ids are UUIDv7, so
+/// the "winner" changes when the corpus is re-seeded, and the number a phase
+/// is gated on was decided by a random value. Ages (Task 0.2) put real
+/// distance between memories; fixing `now` makes the distance mean the same
+/// thing in every run.
+///
+/// Latency is the one figure this cannot pin, which is why the gate reads it
+/// paired on/off and never absolute.
+pub(crate) fn eval_now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+        .expect("the eval's fixed instant is a valid RFC 3339 timestamp")
+        .with_timezone(&Utc)
+}
 
 /// The cut-off the gate is defined at.
 ///
@@ -99,6 +129,21 @@ pub(crate) struct SeedMemory {
     /// they were seeded into the file back when the graph was still inert.
     #[serde(default)]
     relations: Vec<SeedRelation>,
+    /// How old this memory is at [`eval_now`], in days.
+    ///
+    /// A real store is a pile of memories written months apart, and recency
+    /// is a multiplier on its rank score, so age decides results. Left unset
+    /// the memory gets a stable pseudo-random age derived from its content
+    /// (see [`seeded_age_days`]), which is what makes the eval behave like a
+    /// real store without anyone hand-ageing 104 entries.
+    ///
+    /// **Set it explicitly wherever the corpus encodes an order** — a
+    /// superseded fact, a "current" fact, a distractor that is meant to be
+    /// the older of two lookalikes. A hash cannot know which of a pair is
+    /// supposed to be newer, and an age assigned the wrong way round turns a
+    /// case about relevance into a case about an accident (Task 0.2).
+    #[serde(default)]
+    age_days: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,10 +347,21 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
     Ok(gated)
 }
 
-/// Reject cases that cannot be scored as written, at load time rather
-/// than only in the committed-file parse test: an `expect`-less
-/// non-negative case divides by zero and poisons every mean as NaN, and
-/// an `expect_empty` case with expectations has contradicted itself.
+/// Reject a corpus or case set that cannot measure what it claims to.
+///
+/// Runs at load time rather than only in the committed-file parse test, so a
+/// hand-edited set fails where the mistake was made. Four rules:
+///
+/// * an `expect`-less non-negative case divides by zero and poisons every
+///   mean as NaN, and an `expect_empty` case with expectations has
+///   contradicted itself;
+/// * two definitions of the same `content` (V1) are not two memories — the
+///   second takes a slot in every top-5 list the first reaches, so the eval
+///   scores the corpus's own repetition instead of retrieval;
+/// * a `current-fact` case whose expected memory is *older* than another
+///   memory about the same entity is not testing whether the current fact
+///   wins: the recency multiplier hands it the ranking on a plate, or
+///   takes it away, and the case measures an accident (Task 0.2).
 pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
     let mut issues: Vec<String> = Vec::new();
     for case in &set.cases {
@@ -321,6 +377,32 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
             _ => {}
         }
     }
+
+    for memory in &set.memories {
+        // `seeded_at` turns days into seconds and chrono will not carry a NaN,
+        // so a nonsense age here would be a panic or a bogus `created_at` in
+        // the middle of a seeding run that looks like a harness bug.
+        if let Some(age) = memory.age_days {
+            if !age.is_finite() || age < 0.0 || age > MAX_AGE_DAYS {
+                issues.push(format!(
+                    "memory {:?} has age_days {age} — the corpus ages memories in years, not \
+                     infinities: use a finite number in `0..={MAX_AGE_DAYS:.0}`",
+                    truncate(&memory.content, 48)
+                ));
+            }
+        }
+    }
+
+    for case in set
+        .cases
+        .iter()
+        .filter(|case| case.kind == CURRENT_FACT_KIND)
+    {
+        if let Some(issue) = superseded_current_fact(set, case) {
+            issues.push(issue);
+        }
+    }
+
     if !issues.is_empty() {
         return Err(RaError::Validation(format!(
             "{} is invalid: {}",
@@ -329,6 +411,56 @@ pub(crate) fn validate(set: &EvalSet, path: &Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Why a `current-fact` case does not actually measure "the current fact
+/// wins", if it does not.
+///
+/// The subject of a memory is whatever it declares as an entity — the graph
+/// joins on exactly that key, so "memories sharing its subject entity" is
+/// `EntityKey` identity here rather than a judgement about wording. An
+/// expected memory with no declared entities has no subject to compare
+/// against, and the rule has nothing to say about it.
+fn superseded_current_fact(set: &EvalSet, case: &Case) -> Option<String> {
+    let keys_of = |memory: &SeedMemory| -> Vec<String> {
+        memory
+            .entities
+            .iter()
+            .map(|entity| EntityKey::new(&entity.name).as_str().to_string())
+            .collect()
+    };
+
+    for wanted in &case.expect {
+        let expected = set
+            .memories
+            .iter()
+            .find(|memory| &memory.content == wanted)?;
+        let subjects = keys_of(expected);
+        if subjects.is_empty() {
+            continue;
+        }
+        let expected_age = seeded_age_days(expected);
+        for other in &set.memories {
+            if &other.content == wanted {
+                continue;
+            }
+            let newer = seeded_age_days(other) < expected_age;
+            let same_subject = keys_of(other).iter().any(|key| subjects.contains(key));
+            if newer && same_subject {
+                return Some(format!(
+                    "case {:?} (kind {CURRENT_FACT_KIND}) expects {:?} to be the current fact, \
+                     but {:?} speaks of the same entity and is seeded newer ({:.0} days old vs \
+                     {:.0}) — say which one is meant to be current by setting `age_days`",
+                    case.name,
+                    truncate(&expected.content, 48),
+                    truncate(&other.content, 48),
+                    seeded_age_days(other),
+                    expected_age
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// The subset a committed baseline gates against: everything not marked
@@ -342,6 +474,64 @@ fn gate(results: &[CaseResult]) -> Vec<CaseResult> {
         .collect()
 }
 
+/// The kind whose whole premise is that the memory it expects is the newest
+/// thing the corpus says about its subject.
+const CURRENT_FACT_KIND: &str = "current-fact";
+
+/// The oldest age the corpus accepts, in days: ten years.
+///
+/// Past the recency band's floor a year already says everything the multiplier
+/// will say, so an age measured in decades is a typo rather than a fact, and
+/// `seeded_at` would be moving `now` by an implausible span.
+const MAX_AGE_DAYS: f32 = 3_650.0;
+
+/// The age, in days at [`eval_now`], that this corpus entry is seeded with.
+///
+/// The explicit `age_days` wins; otherwise the age is derived from the
+/// content by [`hashed_age_days`], so an entry without an age is still not
+/// left to chance — it is just left to a rule instead of to a run.
+pub(crate) fn seeded_age_days(seed: &SeedMemory) -> f32 {
+    seed.age_days
+        .unwrap_or_else(|| hashed_age_days(&seed.content))
+}
+
+/// A stable pseudo-random age in `[0, 365)` days, derived from the bytes of
+/// the memory's content by FNV-1a.
+///
+/// The eval needs a corpus whose memories are not all the same age (Task
+/// 0.2), and it needs that *without* a seeded RNG: an `StdRng::seed_from_u64`
+/// is stable only while the iteration order and the number of draws are, so
+/// inserting one memory anywhere in the file re-ages every memory after it
+/// and the baseline moves for a reason nobody can read. A hash of the content
+/// has no global state at all: add, remove or reorder entries and every
+/// untouched entry keeps the age it had.
+///
+/// 365 days because that is a year of a personal store, and four times the
+/// configured 90-day recency half-life: the whole floored band gets exercised
+/// rather than just its fresh end. Folding into *seconds* rather than days
+/// keeps two different contents from landing on the same instant (104 entries
+/// over 365 buckets would collide constantly, and a collision is an exact
+/// score tie — the thing this task exists to remove).
+fn hashed_age_days(content: &str) -> f32 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    const SECONDS_IN_A_YEAR: u64 = 365 * 86_400;
+
+    let mut hash = FNV_OFFSET;
+    for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash % SECONDS_IN_A_YEAR) as f32 / 86_400.0
+}
+
+/// The instant a memory of `age_days` is stamped with: [`eval_now`] minus its
+/// age. Whole seconds, which is the resolution the ranker ages at anyway.
+fn seeded_at(age_days: f32) -> DateTime<Utc> {
+    let seconds = (f64::from(age_days) * 86_400.0).round() as i64;
+    eval_now() - chrono::Duration::try_seconds(seconds).expect("an eval age fits in a chrono span")
+}
+
 /// Builds a throwaway instance and fills it with the corpus.
 ///
 /// The `TempDir` comes back so the caller holds it: dropping it deletes
@@ -352,6 +542,13 @@ fn gate(results: &[CaseResult]) -> Vec<CaseResult> {
 /// the storage path, so the run can never touch a real store, and the
 /// graph (see below). Shared with the Phase 7 grid, which measures every
 /// cell against one seeded corpus rather than reseeding per cell.
+///
+/// **Time.** The instance is wired to a [`FixedClock`] rather than the wall
+/// clock, and that clock is left at [`eval_now`] when this returns: every
+/// memory's `created_at` is [`eval_now`] minus its `age_days`, and every
+/// score is computed against [`eval_now`] (Tasks 0.1 and 0.2). The same
+/// corpus therefore produces the same recency multiplier in every run, on
+/// every machine.
 pub(crate) fn seed(
     set: &EvalSet,
     config: &AppConfig,
@@ -372,7 +569,12 @@ pub(crate) fn seed(
         &scratch.path().join(crate::bootstrap::wiring::DATABASE_FILE),
     )?);
     let identity = Identity::from_database(Arc::clone(&database))?;
-    let memories = Memories::build(&config, database)?;
+    // One clock for the whole instance. The saver stamps `created_at` from
+    // it, the ranker ages against it, and the graph's `valid_from` is the
+    // memory's `created_at`, so this handle is what makes "aged corpus,
+    // fixed now" true for every part of the pipeline at once.
+    let clock = FixedClock::at(eval_now());
+    let memories = Memories::build_with_clock(&config, database, Arc::new(clock.clone()))?;
 
     // A real key, authenticated for real: the eval must exercise the same
     // scoping every request does, or it could pass against a store no
@@ -392,6 +594,11 @@ pub(crate) fn seed(
         .expect("the eval enables the graph, so Memories must have built one");
 
     for seed in &set.memories {
+        // Time-travel, then save: `created_at` comes off this clock, and the
+        // graph edge below inherits it as `valid_from`, so one move ages the
+        // memory and its relationships together (Task 0.2).
+        clock.set(seeded_at(seeded_age_days(seed)));
+
         let entities: Vec<Entity> = seed
             .entities
             .iter()
@@ -442,6 +649,11 @@ pub(crate) fn seed(
             stored.created_at(),
         )?;
     }
+
+    // Back to the instant every score is measured at. Leaving it on the last
+    // seed's age would make the whole run's recency depend on whichever entry
+    // happened to be last in the file.
+    clock.set(eval_now());
 
     Ok((memories, context, scratch))
 }
@@ -778,6 +990,29 @@ pub(crate) fn test_memory(content: &str, category: &str) -> SeedMemory {
         tags: Vec::new(),
         entities: Vec::new(),
         relations: Vec::new(),
+        age_days: None,
+    }
+}
+
+/// [`test_memory`] with the two things the age rules read: declared entities
+/// (the subject a `current-fact` case is compared on) and an explicit age.
+#[cfg(test)]
+pub(crate) fn test_memory_about(
+    content: &str,
+    category: &str,
+    entities: &[&str],
+    age_days: f32,
+) -> SeedMemory {
+    SeedMemory {
+        entities: entities
+            .iter()
+            .map(|name| SeedEntity {
+                name: name.to_string(),
+                kind: String::new(),
+            })
+            .collect(),
+        age_days: Some(age_days),
+        ..test_memory(content, category)
     }
 }
 
@@ -1352,6 +1587,237 @@ mod tests {
             ..Report::default()
         };
         assert!(compare(&better, baseline.path(), 5.0).is_ok());
+    }
+
+    // --- ages: Task 0.1's clock and Task 0.2's corpus ---------------------
+
+    #[test]
+    fn an_unaged_memory_gets_the_same_age_in_every_run() {
+        // The default has to look like a real store (ages spread over the
+        // year) and behave like a constant (identical across runs, machines,
+        // and edits to *other* entries). An RNG gives the first and loses the
+        // last two, which is why this is a hash of the content.
+        let pnpm = test_memory("User prefers pnpm over npm and yarn", "preference.coding");
+        let standups = test_memory("Standups are at 09:30 UTC on Tuesdays", "fact.project");
+
+        assert_eq!(
+            seeded_age_days(&pnpm),
+            seeded_age_days(&pnpm),
+            "the age must not depend on how many times it is asked"
+        );
+        assert!(
+            (0.0..365.0).contains(&seeded_age_days(&pnpm)),
+            "an unaged memory must land inside one year, got {}",
+            seeded_age_days(&pnpm)
+        );
+        assert_ne!(
+            seeded_age_days(&pnpm),
+            seeded_age_days(&standups),
+            "two different memories must not share an instant — that is a score tie again"
+        );
+
+        // Order-independence, spelled as the property that matters: an entry's
+        // age is a function of its own content, so a corpus that gains or
+        // reorders entries leaves every unchanged entry where it was. Under an
+        // RNG seeded once per run, inserting one memory re-ages the whole file
+        // and the baseline moves for a reason nobody can read.
+        let corpus = |extra: bool| -> Vec<f32> {
+            let mut memories = vec![
+                test_memory("User prefers pnpm over npm and yarn", "preference.coding"),
+                test_memory("Standups are at 09:30 UTC on Tuesdays", "fact.project"),
+            ];
+            if extra {
+                memories.insert(0, test_memory("Nadia is the tech lead", "fact.person"));
+            }
+            memories
+                .iter()
+                .skip(memories.len() - 2)
+                .map(seeded_age_days)
+                .collect()
+        };
+        assert_eq!(
+            corpus(false),
+            corpus(true),
+            "the age of an entry moved when an *unrelated* \
+                                                 entry joined the corpus"
+        );
+    }
+
+    #[test]
+    fn an_explicit_age_beats_the_hash_and_seeds_at_eval_now_minus_itself() {
+        let aged = SeedMemory {
+            age_days: Some(30.0),
+            ..test_memory("The analytics pipeline was built on Kafka", "fact.project")
+        };
+        assert_eq!(
+            seeded_age_days(&aged),
+            30.0,
+            "the corpus must win over the hash"
+        );
+        assert_eq!(
+            seeded_at(30.0),
+            eval_now() - chrono::Duration::days(30),
+            "30 days old means created 30 days before the eval's now"
+        );
+        // Half days survive: the ranker ages in seconds, so 0.5 d is not
+        // rounded away into a tie with a memory aged 0.
+        assert_eq!(
+            seeded_at(0.5),
+            eval_now() - chrono::Duration::try_seconds(43_200).unwrap()
+        );
+        assert_eq!(seeded_at(0.0), eval_now());
+    }
+
+    #[test]
+    fn the_committed_corpus_is_aged_like_a_real_store() {
+        let raw = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/cases.toml"),
+        )
+        .expect("eval/cases.toml should exist");
+        let set: EvalSet = toml::from_str(&raw).expect("eval/cases.toml should parse");
+
+        let ages: Vec<f32> = set.memories.iter().map(seeded_age_days).collect();
+        let youngest = ages.iter().copied().fold(f32::MAX, f32::min);
+        let oldest = ages.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            youngest < 30.0 && oldest > 300.0,
+            "the corpus spans {youngest:.0}–{oldest:.0} days: the recency band is not exercised"
+        );
+        let distinct: std::collections::BTreeSet<i64> =
+            ages.iter().map(|age| (age * 86_400.0) as i64).collect();
+        assert!(
+            distinct.len() >= set.memories.len() - 4,
+            "{} of {} memories share a seeded instant — exact score ties are back",
+            set.memories.len() - distinct.len(),
+            set.memories.len()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_current_fact_the_corpus_has_already_superseded() {
+        // The `current-fact` kind asks "does the current fact win?". If the
+        // corpus seeds the expected memory as the older of two about the same
+        // subject, the answer is decided by the recency multiplier before the
+        // ranker is asked anything, and a pass measures nothing.
+        let set = |expected_age: f32| EvalSet {
+            memories: vec![
+                test_memory_about(
+                    "The backend deploys on Hetzner",
+                    "fact.project",
+                    &["backend"],
+                    expected_age,
+                ),
+                test_memory_about(
+                    "The backend runs on Fly.io",
+                    "fact.project",
+                    &["backend"],
+                    // Unconditionally newer than any age this test accepts.
+                    1.0,
+                ),
+            ],
+            cases: vec![test_case(
+                "current fact: deployment target",
+                "current-fact",
+                "where does the backend deploy",
+                &["The backend deploys on Hetzner"],
+                false,
+            )],
+        };
+
+        let stale = validate(&set(200.0), Path::new("x.toml"))
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("current-fact"), "{stale}");
+        assert!(stale.contains("seeded newer"), "{stale}");
+
+        // The same corpus with the intended order is fine, and so is a pair
+        // that never speaks of the same entity.
+        validate(&set(0.5), Path::new("x.toml")).expect("the current fact is the newest");
+    }
+
+    #[test]
+    fn validate_rejects_an_age_that_cannot_be_seeded() {
+        for age in [-1.0, f32::NAN, f32::INFINITY, 40_000.0] {
+            let set = EvalSet {
+                memories: vec![SeedMemory {
+                    age_days: Some(age),
+                    ..test_memory("Standups are at 09:30 UTC", "fact.project")
+                }],
+                cases: vec![case("scored", vec!["Standups are at 09:30 UTC"], false)],
+            };
+            let error = validate(&set, Path::new("x.toml"))
+                .expect_err("{age} must not reach the seeding run");
+            assert!(error.to_string().contains("age_days"), "{error}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the ONNX model; run with --ignored"]
+    fn seeding_stamps_each_memory_with_the_age_the_corpus_gives_it() {
+        // The end-to-end half of Task 0.1+0.2: `seed` moves a clock the saver
+        // and the recaller both read, so the age in the file is the age in the
+        // row. Model-dependent, so ignored like the other real-model tests.
+        let cache = std::env::var("RECUERDOS_AI_MODEL_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/models"));
+        let config = AppConfig {
+            embeddings: crate::bootstrap::config::EmbeddingsConfig {
+                cache_dir: cache.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        };
+        let set = EvalSet {
+            memories: vec![
+                test_memory("The analytics pipeline was built on Kafka", "fact.project"),
+                test_memory("The analytics pipeline runs on Kinesis", "fact.project"),
+            ],
+            cases: vec![],
+        };
+
+        let (memories, context, _scratch) = seed(&set, &config).expect("seed with ages");
+        let stored = memories.repository.list(&context, true).unwrap();
+        assert_eq!(stored.len(), 2);
+        for memory in &stored {
+            let seed = set
+                .memories
+                .iter()
+                .find(|seed| seed.content == memory.content())
+                .expect("the stored memory came from the corpus");
+            assert_eq!(
+                memory.created_at(),
+                seeded_at(seeded_age_days(seed)),
+                "{:?} was not stamped with its corpus age",
+                memory.content()
+            );
+        }
+
+        // And the clock is left at `eval_now`, so a memory saved after seeding
+        // is brand new rather than as old as the file's last entry.
+        let after = memories
+            .saver
+            .execute(&context, test_new_memory("written after seeding"), "test")
+            .unwrap();
+        assert_eq!(after.created_at(), eval_now());
+    }
+
+    /// A [`NewMemory`] for the ignored seeding test, matching
+    /// `test_doubles::new_memory` without importing it into a `#[ignore]`d
+    /// path that also needs the real embedder.
+    fn test_new_memory(content: &str) -> NewMemory {
+        NewMemory {
+            content: content.to_string(),
+            category: Category::parse("fact.project").unwrap(),
+            subcategory: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            confidence: 1.0,
+            source: crate::memories::domain::memory::MemorySource {
+                client: Some("test".to_string()),
+                session_id: None,
+            },
+            expires_at: None,
+        }
     }
 
     #[test]
