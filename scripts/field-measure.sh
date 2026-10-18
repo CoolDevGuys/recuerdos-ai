@@ -136,6 +136,36 @@ echo "   config   $CONFIG"
 cp "$CONFIG" "$OUT/base.toml"
 
 # ── the guard against the bug that bit v0.4.1 ────────────────────────────────
+# `recuerdos-ai config` prints bare section names at column zero with their keys
+# indented, and key names are NOT unique across sections: [graph].weight is 0.3 and
+# [rerank].weight is 1, two different numbers that answer to the same spelling. A
+# read-back that scans the whole report can therefore answer the wrong question —
+# which is the v0.4.1 failure (a key read from the wrong place) reproduced inside
+# the check built to catch it. So scope every read to the section that owns the key.
+report_line() { # report_line <dest-name> <section> <key>
+  ra "$1" config 2>/dev/null | awk -v sec="$2" -v k="$3" '
+    /^[a-z]/ && $0 !~ /=/ { insec = ($1 == sec); next }   # bare word at column 0 = section
+    insec && $1 == k { print $2; exit }'
+}
+
+report_value() { # report_value <dest-name> <section> <key>
+  case "$3" in
+    # `[rerank].weight` has no line of its own: the report folds it into
+    # "strategy   rrf (weight 1)", and prints neither while the stage is off. Try the
+    # folded number first, then a plain `weight` line inside [rerank], so the guard
+    # keeps working the day the report is untangled — a guard that cries wolf is a
+    # guard people delete.
+    weight)
+      local folded
+      folded=$(ra "$1" config 2>/dev/null \
+        | sed -n 's/^  *strategy .*(weight \([^)]*\)).*/\1/p' | head -1)
+      if [ -n "$folded" ]; then printf '%s\n' "$folded"; return; fi
+      report_line "$1" "$2" weight ;;
+    *)
+      report_line "$1" "$2" "$3" ;;
+  esac
+}
+
 # A key appended under the wrong section is silently orphaned, and the audit then
 # compares one config with itself and reports a difference that is nothing. So:
 # build the variant, then ask the binary what it thinks the value is, and refuse
@@ -174,15 +204,7 @@ set_key() { # set_key <src-name> <section> <key> <value> <dest-name>
   [ "$n" -eq 1 ] || { echo "!! $dest: [$sec] ends up with $n assignments of '$key'. Edit $CONFIG by hand."; exit 1; }
   local got want
   want=$(printf '%s' "$val" | tr -d '"')
-  got=$(ra "$dest" config 2>/dev/null | awk -v k="$key" '$1==k{print $2; exit}')
-  # `[rerank].weight` has no line of its own: the report folds it into the strategy
-  # line as "strategy   rrf (weight 1)", and prints neither unless the stage is on.
-  # Read the folded number first, then fall back to a plain `weight` line so the guard
-  # survives the day the report is untangled — a guard that cries wolf is a guard
-  # people delete, and this one exists to catch the v0.4.1 orphaned-key bug.
-  if [ "$key" = "weight" ] && [ -z "$got" ]; then
-    got=$(ra "$dest" config 2>/dev/null | sed -n 's/^  *strategy .*(weight \([^)]*\)).*/\1/p' | head -1)
-  fi
+  got=$(report_value "$dest" "$sec" "$key")
   if [ "$got" != "$want" ]; then
     echo "!! $dest: asked for $key=$want, the binary reads '${got:-<absent>}'."
     echo "   Absent usually means the section that owns the key is switched off (a graph"
