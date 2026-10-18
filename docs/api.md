@@ -312,7 +312,7 @@ gets back exactly the response it has always got:
 
 | `state` | Meaning |
 |---|---|
-| `applied` | Judged `judged` candidates in `took_ms`, and its order is folded into the list above |
+| `applied` | Judged `judged` candidates in `took_ms`, and its order is folded into the list above. `judged` can be below `[rerank].depth`: the deadline arrived part way through the head, so those candidates are reordered and the rest keep the order fusion gave them |
 | `shadow` | Judged them and logged what it *would* have served; `changed` says whether the top result would have moved |
 | `not_needed` | Fewer than two candidates cleared `min_relevance`, so there was nothing to reorder |
 | `skipped` | Asked, and it did not contribute — `reason` is `deadline` (past `[rerank].timeout_ms`) or `model`. The results above are the pre-rerank order |
@@ -324,6 +324,13 @@ and that looks exactly like `mode = "off"` from the client's side. On a machine
 that is not idle it is the ordinary outcome for a deep head, not a rare one;
 [size it against your own recalls](configuration.md#sizing-timeout_ms-for-your-machine)
 rather than trusting the default, which was measured on a quiet benchmark box.
+
+One thing `deadline` cannot say, deliberately: whether the stage ran out of time
+*judging* or never got a session to judge with. Both are `deadline` here because
+clients and SDKs parse two reason values and a third breaks them, and the
+remedies are opposite — a slow model wants a larger `timeout_ms`, a contended one
+wants `[rerank].max_concurrency` and a *smaller* timeout. The daemon's log carries
+both halves (`queued_ms`, `inference_ms`) for every leg like that.
 
 | Field | Notes |
 |---|---|

@@ -173,10 +173,16 @@ small union keyed on `state`:
 
 | `rerank.state` | Means |
 |---|---|
-| `applied` | Judged `judged` candidates in `took_ms`, and its order is the list above |
+| `applied` | Judged `judged` candidates in `took_ms`, and its order is the list above. `judged` may be fewer than the server's `[rerank].depth`: the deadline arrived part way through the head, so the judged part is reordered and the tail keeps fusion's order |
 | `shadow` | Judged them and logged what it *would* have served; `changed` says whether the top result would have moved |
 | `not_needed` | Fewer than two candidates cleared the floor, so there was nothing to reorder |
 | `skipped` | Configured, and did not contribute: `reason` is `deadline` (raise `timeout_ms`, or lower `[rerank].depth`) or `model` |
+
+`deadline` covers two faults on purpose: a stage that ran out of time judging,
+and one that never got a session on a busy host, both say `deadline`, because the
+union has two reason values and a third would break every client written against
+it. The server's log says which, and only the server can: the fix for one is a
+bigger `timeout_ms`, for the other a smaller one.
 
 A server older than 0.4.2 never sends the key, which reads as `None` — the
 same as `mode = "off"`, and correct, because to those servers the stage really

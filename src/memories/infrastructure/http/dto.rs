@@ -264,6 +264,14 @@ impl From<RerankTrace> for RerankResponse {
                 reason,
                 candidates,
                 took_ms,
+                // Dropped, on purpose and by invariant: the wire has two reason
+                // values because that is what every shipped SDK can parse. The
+                // busy/partial split lives in the daemon's log and in
+                // `recall audit`, which is where the operator who can act on it
+                // looks. `a_busy_skip_says_exactly_what_a_slow_one_says` pins
+                // that this stays true rather than drifting into "we'll just add
+                // a field".
+                busy: _,
             } => Self::Skipped {
                 reason: match reason {
                     RerankSkip::Deadline => RerankSkipReason::Deadline,
@@ -500,6 +508,7 @@ mod tests {
             reason: RerankSkip::Deadline,
             candidates: 10,
             took_ms: 251,
+            busy: false,
         }));
         assert_eq!(json["rerank"]["state"], "skipped");
         assert_eq!(json["rerank"]["reason"], "deadline");
@@ -509,8 +518,48 @@ mod tests {
             reason: RerankSkip::Model,
             candidates: 10,
             took_ms: 4,
+            busy: false,
         }));
         assert_eq!(model["rerank"]["reason"], "model");
+    }
+
+    #[test]
+    fn a_busy_skip_says_exactly_what_a_slow_one_says() {
+        // Invariant 3.5 read from this side. The SDK types `reason` as
+        // Literal["deadline", "model"], so a host that never got a session has
+        // to report the same JSON as one that ran out of inference time. The
+        // domain does carry the difference (`RerankTrace::Skipped::busy`); the
+        // transport is where it is dropped, and this is the test that notices if
+        // someone starts forwarding it.
+        let refused = response_with(Some(RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            candidates: 10,
+            took_ms: 250,
+            busy: true,
+        }));
+        let slow = response_with(Some(RerankTrace::Skipped {
+            reason: RerankSkip::Deadline,
+            candidates: 10,
+            took_ms: 250,
+            busy: false,
+        }));
+        assert_eq!(
+            refused, slow,
+            "a busy stage added, removed or renamed a client-visible key"
+        );
+
+        let mut keys: Vec<&str> = refused["rerank"]
+            .as_object()
+            .expect("a rerank object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["candidates", "reason", "state", "took_ms"],
+            "the keys of the skipped object are the client's contract"
+        );
     }
 
     #[test]

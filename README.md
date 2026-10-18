@@ -33,7 +33,7 @@ LangChain ──SDK───▶ │               │  nightly: merge, decay, ex
 - 🧩 **Any agent, any LLM** — REST + MCP, provider-agnostic, one shared memory.
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
 - 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. On by default.
-- 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model; off by default, and `rerank audit` judges it on your store before you turn it on.
+- 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model — and 0 of 13 queries changed their top result on the first real store it was audited against, so it is off by default and the honest advice is to leave it off until your own audit says otherwise. `rerank audit` judges it on your store before you turn it on.
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
 ---
@@ -332,7 +332,7 @@ It recalls the preference without being told. ✨
 |---|---|
 | **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25) + a graph hop, fused by reciprocal rank. Paraphrases, exact identifiers, *and* connections. |
 | **Relational recall** | A third leg walks an entity/relation graph, so "who owns the billing service's data?" reaches the memory naming the database — no shared words needed. Bi-temporal, so you can ask what was true *before* a change. On by default; the eval put relational recall@5 at 85.7% (vs 71.4% without it). |
-| **Optional rerank** | A local cross-encoder re-scores the head of the fused list, reading query and memory jointly — the only stage that ever looks at both at once. Opt-in (`[rerank]`): the eval measured +5.8 precision@1 and +2.7 MRR, at 1.1 GB of weights and ~70 ms. Judge it on your own data first: `recuerdos-ai rerank audit`. |
+| **Optional rerank** | A local cross-encoder re-scores the head of the fused list, reading query and memory jointly — the only stage that ever looks at both at once. Opt-in (`[rerank]`): the eval measured +5.8 precision@1 and +2.7 MRR, at 1.1 GB of weights and ~70 ms. On the first real store it was audited against, none of the 13 queries changed its top result and precision@1 was identical, so the default is off and the recommendation is to stay there until `rerank audit` on your own memories shows a gain. |
 | **Understands what it stores** | Raw text in, atomic labelled memories out. One sentence with two unrelated facts becomes two separately recallable memories. |
 | **Resolves contradictions** | "We moved to Hetzner" supersedes "we deploy on Fly.io" — the old one is retained for audit, gone from recall. |
 | **Session distillation** | Hand over a finished session; keep the two or three things that outlive it. |
@@ -361,9 +361,9 @@ pipeline runs off the request path. Cold start is ~300 ms; idle RSS is
 These are the numbers for the recall that ships on by default. The
 optional second stage adds its own: with a cross-encoder on, budget
 ~+59 ms p50 / +71 ms p95 per recall and ~1.5 GiB more RAM (its
-`timeout_ms` drops the stage and serves the fused order, so a slow
-reranker costs latency, never a failed request). See
-[docs/configuration.md](docs/configuration.md).
+`timeout_ms` bounds the leg — what it judged by then is kept, the rest of the
+head is left as fusion ordered it, and a slow reranker costs latency, never a
+failed request). See [docs/configuration.md](docs/configuration.md).
 
 Recall is flat from 2k to 20k, so at the scale anyone actually reaches it
 is effectively instant. It rises to 83 ms at 100k, which **misses the

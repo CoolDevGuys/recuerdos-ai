@@ -274,17 +274,26 @@ strategy = "rrf"
 # nearly always right, so the gain plateau is 0.5-1 and 2+ actively
 # loses points (2 costs the needle kind a third of its precision).
 weight = 1.0
-# Beyond this the rerank leg is dropped and the pre-rerank order served
-# with a warning — the request never fails because of the second stage.
-# 250 ms is ~3.5x the chosen model's measured p95 at the default depth
-# (71 ms, p50 59 ms): a tail bound, not a cost.
+# The budget for waiting *and* judging. Past it the leg stops, whatever it
+# judged is applied, the rest of the head keeps fusion's order, and a warning is
+# logged — the request never fails because of the second stage. 250 ms is ~3.5x
+# the chosen model's measured p95 at the default depth (71 ms, p50 59 ms): a tail
+# bound measured on an idle box, not a cost. How to size it on yours, including
+# telling a slow model from a host with no session free: docs/configuration.md.
 timeout_ms = 250
 # Concurrent rerank inferences. Each one is another copy of the model in
 # RAM — ~1.5 GiB for the default model, so the default keeps the second
-# stage under one budget. Raise only if recalls queue and the box fits.
+# stage under one budget. A recall that finds them all busy gives up at its own
+# deadline rather than queueing behind a head nobody is waiting for any more: the
+# client sees `skipped`/`deadline`, the log says the stage was refused a session.
+# So this is the knob when recalls are being refused, and raising `timeout_ms`
+# for that fault buys nothing but a slower recall. Raise only if the box fits.
 max_concurrency = 1
 # Candidates per forward pass (the forward pass pads to the longest
-# pair in the batch, so smaller batches keep the padding short).
+# pair in the batch, so smaller batches keep the padding short). It is also the
+# grain a deadline cuts at: inference cannot be interrupted mid-pass, so a missed
+# deadline abandons one batch of these rather than the whole head. Fewer per
+# batch gives a deadline more places to stop, at the cost of more passes.
 batch_size = 16
 # Judging this before trusting it, on your own data:
 #   recuerdos-ai rerank audit --queries <file>

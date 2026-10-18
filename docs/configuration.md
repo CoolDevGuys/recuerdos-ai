@@ -364,24 +364,24 @@ language. If you would rather spend no latency on an unproven second opinion,
 ### Sizing `timeout_ms` for your machine
 
 `[rerank].timeout_ms` (default `250`) is a tail bound, not a cost target. Past
-it the stage is dropped, the pre-rerank order is served, and the request goes
+it the stage stops judging, whatever it has ordered is kept, and the request goes
 on its way — a second opinion is never worth a failed recall. The default is
 about 3.5× the p95 measured during tuning (71 ms at `depth = 10`), and that
 tuning box was **idle**, which is the part that does not travel.
 
 The cost is per candidate pair, so what matters is your machine's number:
 
-| Machine | Cost per judged candidate | What `depth = 10` needs | Against 250 ms |
+| Machine | Cost per judged candidate | What `depth = 10` needs | Against a 250 ms bound |
 |---|---|---|---|
 | the tuning box (nothing else running) | ~7 ms | ~71 ms | comfortable |
-| a home server also serving a 9B LLM and a local embedding server | ~34 ms | ~350 ms | **dropped every time** |
-| that same server, after its embedding model was changed | ~120 ms | ~1.2 s | **dropped — and at 800 ms too** |
+| a home server also serving a 9B LLM and a local embedding server | ~34 ms | ~350 ms | ~7 of 10 judged, the tail left as fusion ordered it |
+| that same server, after its embedding model was changed | ~120 ms | ~1.2 s | 2 of 10 — reordering two is not a second opinion |
 
-The second row is a real deployment, not a worst case invented for a warning:
-its `mode = "on"` never contributed once, because every query worth asking had
-more than about seven candidates above the floor and the stage missed its
-deadline each time. Nothing in the response said so — until `v0.4.2` added the
-`rerank` field. Check yours in one request:
+The second row is a real deployment, not a worst case invented for a warning.
+Before the head was scored in runs, its `mode = "on"` never contributed once: a
+missed deadline abandoned the whole head, every query worth asking had more than
+about seven candidates above the floor, and nothing in the response said so until
+`v0.4.2` added the `rerank` field. Check yours in one request:
 
 ```bash
 curl -s $BASE/v1/memories/search \
@@ -393,35 +393,68 @@ curl -s $BASE/v1/memories/search \
 {"state": "skipped", "reason": "deadline", "candidates": 10, "took_ms": 251}
 ```
 
-Then size by measuring — which comes with a catch that bites on exactly the
-slow machines this section exists for. The stage scores the whole head in
-**one** call, so the deadline is all-or-nothing and there is no partial result
-to take a rate from: a leg reported `skipped`/`deadline` carries a `took_ms`
+Sizing by measurement used to come with a catch that bit on exactly the slow
+machines this section exists for. The stage used to score the whole head in
+**one** call, so the deadline was all-or-nothing and there was no partial result
+to take a rate from: a leg reported `skipped`/`deadline` carried a `took_ms`
 **equal to the bound you set**, not the cost of the work it did not finish.
-Doubling the number in that line therefore produces a larger bound that is
-also exceeded, at twice the cost. Read the rate where the stage completes:
+Doubling the number in that line produced a larger bound that was also exceeded,
+at twice the cost — which is how that deployment ended up at `800` and still
+skipping.
 
-1. Give it a head it can finish — set `depth = 3`, or raise `timeout_ms` well
-   past what you suspect. One of the two has to move.
-2. Run one query and read the leg: `{"state": "applied", "judged": 3,
-   "took_ms": 358}` is ~120 ms a pair.
-3. Multiply that by the `depth` you actually want and double it. A busy moment
-   should not be able to quietly delete the stage.
+Now the head is scored in runs of `[rerank].batch_size` candidates (default 16),
+and what a deadline abandons is one run. What finished is applied, and that makes
+the measurement one request instead of a search for a query short enough to
+complete:
 
-For the ~34 ms machine above that lands on `800`, which turns a ~260 ms recall
-into ~360 ms — the honest price of reranking on a box that is also doing
-something else. If that price is too high, `depth = 5` (~180 ms there) is the
-alternative rather than a free lunch: the +5.8 precision@1 was measured at depth
-10, so shortening the head trades away part of the gain.
+```json
+{"state": "applied", "judged": 4, "took_ms": 190}
+```
+
+`judged` below `[rerank].depth` is the stage saying it ran out of time part way
+through the head — and it is a rate you can use. Four pairs in 190 ms is ~48 ms
+a pair, so `depth = 10` on that machine wants ~480 ms, not 250.
+
+Take the rate from the *inference*, and the log splits it for you. Both halves
+appear on every leg worth reading:
+
+```
+WARN rerank leg failed; falling back to the pre-rerank order … busy=true queued_ms=250 inference_ms=0
+WARN rerank leg applied the part of the head it finished before its deadline judged=4 depth=10 rerank_ms=190 queued_ms=120 inference_ms=70
+```
+
+The first is a leg that never held a session: the queue ate the budget and the
+model was asked for nothing. The second waited 120 ms, then judged four. That
+distinction is the whole difference between two settings, and it is one the
+client cannot make — the response says `deadline` for both, because the shipped
+SDKs parse two reason values and a third would break them:
+
+| The line says | The machine is | Change |
+|---|---|---|
+| `queued_ms` ≈ the budget, `inference_ms` 0 | contended: no session free | `[rerank].max_concurrency` (each one is another ~1.5 GiB), or a quieter host. `timeout_ms` only makes the recall slower |
+| `queued_ms` small, `inference_ms` ≈ the budget | slow at inference | `timeout_ms`, or a shorter `depth` |
+
+Read it with `journalctl -u recuerdos-ai | grep 'rerank leg'`; `rerank audit`
+prints the same two numbers as percentiles when a run has them, and says plainly
+when it does not (its own replay runs with no deadline, so nothing there ever
+waits). A healthy leg logs nothing at all — nothing is wrong — so
+`RUST_LOG=debug` is what answers "am I queueing?" on a host that is serving
+results: every leg then logs one `rerank_leg` line with both halves.
+
+For the ~34 ms machine above that arithmetic lands on `800`, which turns a
+~260 ms recall into ~360 ms — the honest price of reranking on a box that is also
+doing something else. If that price is too high, `depth = 5` (~180 ms there) is
+the alternative rather than a free lunch: the +5.8 precision@1 was measured at
+depth 10, so shortening the head trades away part of the gain.
 
 Two things about that number worth saying out loud. It is a property of the
 machine, so re-measure whenever the machine changes: the third row above is the
 second row's host measured again after an unrelated model change, and the `800`
-this page had recommended for it was dropping every query once more, with a
-`took_ms` that could only ever report `800`. And while the stage misses its
-deadline on every recall, you are paying the deadline for nothing — ~800 ms of
-waiting to serve the fused order anyway. In that state `mode = "off"` is not
-merely the neutral setting, it is the faster one.
+this page had recommended for it was, at the time, throwing every head away once
+more. And while the stage is spending its bound waiting for a session it will not
+get, you are paying the deadline for nothing at all — ~800 ms of waiting to serve
+the fused order. In that state `mode = "off"` is not merely the neutral setting,
+it is the faster one.
 
 `timeout_ms = 0` is rejected at startup, not treated as "no deadline": a
 deadline-free stage on a contended machine is a recall with no bound, and the

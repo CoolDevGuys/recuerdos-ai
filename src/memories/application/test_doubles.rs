@@ -16,7 +16,7 @@ use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
 use crate::memories::domain::recall_ranker::RecallRanker;
-use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, RerankScored, Reranker};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::{Clock, FixedClock};
@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::fake_embedder::FakeEmbedder;
@@ -786,5 +786,193 @@ impl Reranker for SleepingReranker {
     fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
         std::thread::sleep(self.0);
         Ok(vec![0.0; candidates.len()])
+    }
+}
+
+/// Scores the head in runs of `chunk`, sleeping `per_chunk` for each run, and
+/// counts the runs it actually judged.
+///
+/// What the cancellation and partial-application tests need and the other
+/// doubles cannot give: a model that *yields*, one whose score for a candidate
+/// depends only on that candidate (so a chunked leg and a whole-head leg must
+/// agree exactly, which is the property chunking is allowed to rest on), and a
+/// trace of how far it got before the caller stopped wanting the answer.
+///
+/// Scores are the first digit in the candidate's content, so a fixture of
+/// "note number 0…4" produces a leg that does not depend on batch boundaries.
+pub struct ChunkedReranker {
+    chunk: usize,
+    per_chunk: Duration,
+    runs: Arc<AtomicUsize>,
+}
+
+impl ChunkedReranker {
+    pub fn new(chunk: usize, per_chunk: Duration) -> Self {
+        Self {
+            chunk: chunk.max(1),
+            per_chunk,
+            runs: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Runs of candidates judged so far — the count the cancellation tests
+    /// bound, since a run cannot be interrupted once it has started.
+    pub fn runs(&self) -> usize {
+        self.runs.load(Ordering::SeqCst)
+    }
+
+    fn judge(&self, candidates: &[RerankCandidate<'_>]) -> Vec<f32> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.per_chunk);
+        candidates
+            .iter()
+            .map(|candidate| {
+                // Offset past the fused scores on purpose: a judged candidate's
+                // replaced score must beat an unjudged one's, or a partial-leg
+                // test would be asserting which band each score landed in rather
+                // than which candidates were reordered.
+                10.0 + candidate
+                    .text
+                    .chars()
+                    .find_map(|ch| ch.to_digit(10))
+                    .unwrap_or(0) as f32
+            })
+            .collect()
+    }
+}
+
+impl Reranker for ChunkedReranker {
+    fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        Ok(self.judge(candidates))
+    }
+
+    // `score_before` is left to the trait's default on purpose: this double has
+    // no session to wait for, so "score it, and whatever it took was inference"
+    // is the true answer, and the default is the thing being tested by the legs
+    // that use it.
+    fn preferred_chunk(&self) -> Option<usize> {
+        Some(self.chunk)
+    }
+}
+
+/// One busy session, in the shape the fastembed adapter's pool has: a caller
+/// that gets it holds it for `inference`, and a caller that cannot get it
+/// before its deadline is refused with [`RaError::RerankBusy`] **without
+/// scoring anything**.
+///
+/// `SleepingReranker` cannot express this — with no session to wait for, its
+/// deadline path looks identical from either side — so the two properties
+/// Phase 1.2 actually promises, "busy comes back as `skipped`/`deadline`" and
+/// "a caller that was refused did no work", need a double that owns a session
+/// the way the real pool does.
+pub struct BusyReranker {
+    inference: Duration,
+    session: Arc<Mutex<()>>,
+    refusals: AtomicUsize,
+    judged: AtomicUsize,
+    acquired: AtomicUsize,
+}
+
+impl BusyReranker {
+    /// `inference` is how long a session is held for one head. Make it longer
+    /// than the recaller's `timeout_ms` and every caller that gets a session
+    /// misses its deadline too, which is the saturated-host case.
+    pub fn new(inference: Duration) -> Self {
+        Self {
+            inference,
+            session: Arc::new(Mutex::new(())),
+            refusals: AtomicUsize::new(0),
+            judged: AtomicUsize::new(0),
+            acquired: AtomicUsize::new(0),
+        }
+    }
+
+    /// Blocks until some caller is *inside* the session, so a test that needs
+    /// "the session is busy" does not have to guess how long scheduling takes.
+    /// Every version of this test that slept a fixed interval flaked the first
+    /// time the suite ran under load.
+    pub fn wait_until_acquired(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        loop {
+            if self.acquired.load(Ordering::SeqCst) > 0 {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// How many callers were told "no session" and scored nothing.
+    pub fn refusals(&self) -> usize {
+        self.refusals.load(Ordering::SeqCst)
+    }
+
+    /// How many heads were actually judged, whenever they finished.
+    pub fn judged(&self) -> usize {
+        self.judged.load(Ordering::SeqCst)
+    }
+
+    /// How many times the session was handed out. This is the exact form of
+    /// "nobody queued for it": a caller that waited instead of refusing would
+    /// have to take a second one to do its work.
+    pub fn acquired(&self) -> usize {
+        self.acquired.load(Ordering::SeqCst)
+    }
+
+    /// Takes the session from outside the trait, so a test can arrange "the
+    /// session is busy" without a second caller racing a timer.
+    pub fn hold_session(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Reranker for BusyReranker {
+    fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+        let _held = self
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.acquired.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.inference);
+        self.judged.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![0.0; candidates.len()])
+    }
+
+    fn score_before(
+        &self,
+        _query: &str,
+        candidates: &[RerankCandidate<'_>],
+        deadline: Instant,
+    ) -> Result<RerankScored> {
+        // Spelled out rather than reused from `score`, because the whole
+        // point is the path that does *not* wait: this must never block on
+        // the mutex indefinitely. The timings mirror the adapter's, since a
+        // double that reported the shape of the fault without its cost would
+        // let a test pass that the real pool's numbers would not support.
+        let asked_at = Instant::now();
+        loop {
+            if let Ok(_held) = self.session.try_lock() {
+                self.acquired.fetch_add(1, Ordering::SeqCst);
+                let queued = asked_at.elapsed();
+                let judging = Instant::now();
+                std::thread::sleep(self.inference);
+                self.judged.fetch_add(1, Ordering::SeqCst);
+                return Ok(RerankScored {
+                    scores: vec![0.0; candidates.len()],
+                    queued,
+                    inferred: judging.elapsed(),
+                });
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                self.refusals.fetch_add(1, Ordering::SeqCst);
+                return Err(RaError::RerankBusy(asked_at.elapsed()));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        }
     }
 }

@@ -472,22 +472,30 @@ curl -s $BASE/v1/memories/search \
 ```
 
 If instead it reads `{"state": "skipped", "reason": "deadline", …}`, the stage is
-loaded, judging, and being thrown away — and that is not a neutral
+loaded and being thrown away — and that is not a neutral
 misconfiguration, because the wait is real: every recall pays the full deadline
 to serve the order the stage never got to change, so a `mode = "on"` that always
-skips is *slower* than `mode = "off"`.
+skips is *slower* than `mode = "off"`. The response cannot say whether the stage
+ran out of time judging or never got a session to judge with; the journal can,
+and the two have opposite fixes.
 
-Do not fix it by doubling the `took_ms` in that line. The head is scored in
-one call, so a skipped leg reports the bound you already set, not what the
-work costs; the number worth sizing against only appears once a leg reports
-`applied`. Lower `[rerank].depth` or raise `timeout_ms` until one query comes
-back `applied`, take `took_ms / judged` from *that*, and set the bound at
-twice `depth ×` that rate. The journal says the same thing as a `WARN` on
-each affected recall, so `journalctl -u recuerdos-ai | grep 'rerank leg
-failed'` is the other way to see it — and note that `rerank audit` will *not*
-show it, because the audit measures with no deadline on purpose. Sizing the
-deadline against your own machine:
-[configuration.md](configuration.md#sizing-timeout_ms-for-your-machine).
+```bash
+journalctl -u recuerdos-ai | grep 'rerank leg'
+```
+
+Do not fix it by doubling the `took_ms` in that line: a leg that never held a
+session reports the bound you already set, not what the work costs. Size against
+the two halves the journal logs instead — `queued_ms` is waiting for a session,
+`inference_ms` is the model. `busy=true` with `inference_ms=0` means the host had
+no session free and `timeout_ms` is the wrong knob: that box wants more
+`[rerank].max_concurrency` (another ~1.5 GiB per session) or less else-running.
+Where `inference_ms` is the bulk of the leg, take `inference_ms / judged` as the
+rate and set the bound at twice `depth ×` that. A leg that judged *part* of the
+head answers the same question without needing a query short enough to finish: it
+comes back `applied` with `judged` below `[rerank].depth`. Note that `rerank
+audit` will *not* show any of this, because the audit measures with no deadline on
+purpose, so nothing in it ever waits. Sizing the deadline against your own
+machine: [configuration.md](configuration.md#sizing-timeout_ms-for-your-machine).
 
 ---
 
