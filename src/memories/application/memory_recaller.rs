@@ -2070,6 +2070,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_hop_starts_only_from_names_the_graph_confirms_and_a_slot_follows_it() {
+        // The G2 guard (plan Task 3.4), pinned rather than assumed. The recaller
+        // proposes entity mentions it found in the query text; the *store* decides
+        // which ones exist, and `neighbours` is asked about that subset and nothing
+        // else. It matters at full volume now that a confirmed hop buys a seat: a
+        // fuzzy seed source would hand a reserved slot, and `GRAPH_HOP_RELEVANCE`,
+        // to whatever a near match reached — the shape that measured abstention 0.0
+        // in §17. A typo is the fuzzy source a real query would supply.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (bridge, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+        let known = bridge.id();
+
+        // Every mention of a query that spells the team wrong, plus one that
+        // spells the service right: the store's `seeds` is the only thing that
+        // turns a mention into a starting point.
+        let typo = RecallQuery::new("who runs the Merdian team", 5).unwrap();
+        let with_typo = fixture
+            .recaller_with_graph_slots(graph.clone() as Arc<dyn EntityGraph>, 2)
+            .execute_untracked(&fixture.alex, &typo)
+            .unwrap();
+        assert!(
+            with_typo
+                .iter()
+                .all(|s| s.match_detail.graph_rank.is_none() || s.memory.id() == known),
+            "a misspelt entity seeded a hop it should not have: {:?}",
+            contents(&with_typo)
+        );
+        assert!(
+            with_typo.iter().all(|s| s.memory.id() != answer.id()),
+            "the far end of a chain nobody named correctly was promoted into a slot"
+        );
+
+        // And the same query with the name spelled as stored does reach it, so the
+        // assertion above is about the typo and not about a dead leg.
+        let spelled = RecallQuery::new("who runs the Meridian team", 5).unwrap();
+        let with_name = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 1)
+            .execute_untracked(&fixture.alex, &spelled)
+            .unwrap();
+        assert!(
+            with_name
+                .iter()
+                .any(|s| s.memory.id() == answer.id() && s.match_detail.graph_rank.is_some()),
+            "the leg went silent on a name the store does know: {:?}",
+            contents(&with_name)
+        );
+    }
+
     // --- the rerank stage (reranking-plan.md Phase 4) -------------------
 
     use crate::memories::application::test_doubles::{

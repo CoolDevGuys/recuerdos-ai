@@ -907,6 +907,19 @@ pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.05;
 /// the strength of that indirect evidence. It has to sit above whatever
 /// floor is configured, or the floor would silently delete relational
 /// recall, which is the one thing the graph leg exists to add.
+///
+/// **The constraint that keeps this number honest.** It is a flat credit, so it
+/// is only safe for a hop that started from a name the *store* confirmed:
+/// `MemoryRecaller::hop` asks [`EntityGraph::seeds`] which of the query's
+/// candidate mentions some memory of this user actually declared, and hops only
+/// from the answer. A seed source that is not exact — embedding similarity
+/// against relation text, say, which is what the §1.3 experiment tried — would
+/// hand this same 0.35 to whatever a fuzzy match reached, and the eval measured
+/// what that does: abstention 100.0 → **0.0**, every negative answering with
+/// something (plan §17, Phase 0). So: any seed source that is not an exact
+/// canonical match must carry its own similarity threshold, or relevance for a
+/// graph-only hit must be derived from the path it came along rather than from
+/// this constant.
 pub const GRAPH_HOP_RELEVANCE: f32 = 0.35;
 
 /// Turns the two legs' raw signals into an absolute relevance in `0.0..=1.0`.
