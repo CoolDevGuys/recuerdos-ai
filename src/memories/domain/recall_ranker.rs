@@ -97,12 +97,18 @@
 //! gap nearer than about 60 ranks** — nearly a whole result list, not a large
 //! gap. So "bounded by 0.5" is not what keeps relevance from becoming the
 //! primary sort key, and any doc comment that claimed it was is wrong arithmetic
-//! rather than a wide band. What keeps it honest is the grid: the shipped value
-//! is the largest relevance effect the eval and the audit actually pay for,
-//! which lands where relevance decides *near-ties* — the same-rank and
-//! near-adjacent calls recency and quality decide alone today — and leaves a gap
-//! the legs genuinely disagree about alone. [`DEFAULT_RELEVANCE_WEIGHT`] carries
-//! that number and the measurement that chose it.
+//! rather than a wide band. What keeps it honest is the grid, and the grid chose
+//! [`DEFAULT_RELEVANCE_WEIGHT`] = 0.05 on the age-aware eval: precision@1
+//! 50.0 → 53.8, MRR 63.9 → 66.6, everything else unmoved, no case losing its top
+//! hit. That is a near-tie-sized influence — enough to beat several days of age
+//! and an adjacent-rank difference, not enough to leapfrog four ranks or more.
+//! The curve rose all the way to the ceiling (+9.6 p@1 at 0.2, +17.3 at 0.5) with
+//! nothing regressing, and the larger values were left unshipped because this
+//! corpus rewards relevance partly by construction — its expected memories are
+//! the topically nearest ones — so a monotone line says little about δ once it is
+//! large enough to move ranks rather than ties. §17 of the plan carries the
+//! table; the instrument that could change the answer is `recall audit` over a
+//! real store.
 //!
 //! Because affinity is already multiplied into `score` when the rerank stage
 //! recovers each candidate's band, the rerank leg lands *inside* it: a second
@@ -795,13 +801,26 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.25;
 ///
 /// `0.0` is not "a very small weight": [`RecallRanker::apply_relevance`]
 /// returns before touching the list at zero, so relevance cannot move a result
-/// by any amount — which is how ranking behaved before Phase 2, and the value
-/// every eval baseline since has been recorded with.
+/// by any amount. That is what every eval baseline before Phase 2 was recorded
+/// with, and what a deployment that wants the pre-Phase-2 order should set.
 ///
-/// The grid (Task 2.6) decides whether something above zero earns the default.
-/// Until it reports, this stays 0.0, and the doc comment is where the chosen
-/// number and the measurement behind it land.
-pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.0;
+/// **`0.05`** is the grid's choice (plan §17). On the age-aware eval it puts
+/// precision@1 at 50.0 → 53.8 and MRR at 63.9 → 66.6 with recall@5,
+/// complete@5 and abstention unmoved, and no case losing its top hit; two cases
+/// gained one, both of them exactly the call this phase exists for — a newer,
+/// weaker match sitting above a memory that answered better.
+///
+/// The curve kept climbing past here (+9.6 p@1 at δ = 0.2, +17.3 at 0.5) with
+/// nothing regressing, and the higher values were *not* shipped, for two reasons
+/// that belong next to the number. First, the eval favours relevance somewhat by
+/// construction — its expected memories are the topically nearest ones — so a
+/// monotone curve is weak evidence about large δ; the instrument that could
+/// falsify it, `recall audit` over a real store with the operator's own `expect`
+/// file, is still outstanding. Second, at 0.2 relevance can overrule a ten-rank
+/// gap (the table above), which is a different pipeline from the one this project
+/// ranks with. Raising the default is a measurement away, not a re-reading of
+/// this curve.
+pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.05;
 
 /// The relevance credited to a memory that entered recall *only* through a
 /// graph hop.
@@ -1717,15 +1736,18 @@ mod tests {
         let fingerprinted = fingerprint(&attached());
         assert_eq!(fingerprinted[0].0, first.id(), "the fixture itself moved");
 
-        for rank in [ranker(), ranker().with_relevance_weight(0.0)] {
-            let mut ranked = attached();
-            rank.apply_relevance(&mut ranked);
-            assert_eq!(
-                fingerprint(&ranked),
-                fingerprinted,
-                "δ = 0 touched the list"
-            );
-        }
+        // `0.0` spelled out rather than taken from `ranker()`: the shipped
+        // default is no longer zero, so a default-constructed ranker is not the
+        // identity case any more — it is the case that moves the list.
+        let mut ranked = attached();
+        ranker()
+            .with_relevance_weight(0.0)
+            .apply_relevance(&mut ranked);
+        assert_eq!(
+            fingerprint(&ranked),
+            fingerprinted,
+            "δ = 0 touched the list"
+        );
     }
 
     #[test]

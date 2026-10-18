@@ -1,6 +1,6 @@
 {
   "recall_at_k": 83.33333333333334,
-  "precision_at_1": 50.0,
+  "precision_at_1": 53.84615384615385,
   "cases": 59,
   "by_kind": {
     "category-filter": 100.0,
@@ -17,18 +17,18 @@
     "subcategory-filter": 100.0,
     "tag-filter": 100.0
   },
-  "mrr": 63.910256410256395,
+  "mrr": 66.63461538461539,
   "complete_at_k": 80.76923076923077,
-  "latency_ms_p50": 7.92383,
-  "latency_ms_p95": 9.030752,
+  "latency_ms_p50": 8.554122000000001,
+  "latency_ms_p95": 10.364048,
   "precision_at_1_by_kind": {
     "category-filter": 100.0,
     "current-fact": 0.0,
     "exact-token": 100.0,
-    "near-miss": 42.857142857142854,
+    "near-miss": 57.14285714285714,
     "needle": 33.33333333333333,
     "negative": 100.0,
-    "nl-category": 37.5,
+    "nl-category": 50.0,
     "nl-question": 57.14285714285714,
     "paraphrase": 100.0,
     "relational": 0.0,

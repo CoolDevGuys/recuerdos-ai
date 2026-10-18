@@ -320,9 +320,11 @@ pub struct RetrievalConfig {
     /// fused score (recall-quality-plan.md Phase 2).
     ///
     /// `score ×= 1 − δ·(1 − relevance)`, so δ is the spread relevance is allowed
-    /// across: `0.2` lets a better match win a tie between two memories the legs
-    /// ranked alike, and is also enough to overrule a nine-rank gap. `0.0` — the
-    /// default — leaves the fused order exactly as fusion decided it.
+    /// across. `0.05` — the shipped default, the grid's choice — lets a better
+    /// match win the calls the legs tie and the calls that turn on a few days of
+    /// age, and cannot overrule a rank gap of four or more. `0.0` switches the
+    /// stage off (a different code path, not a small weight) and restores the
+    /// order recall shipped before this knob existed.
     ///
     /// Not the floor, and not a knob on it: `min_relevance` still decides what is
     /// returned at all. The range `0.0..=0.5` is deliberately generous at the top
@@ -355,9 +357,9 @@ impl Default for RetrievalConfig {
             default_limit: 8,
             recency_half_life_days: 90,
             min_relevance: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_FLOOR,
-            // Zero means affinity is not applied at all — see the field docs and
-            // `DEFAULT_RELEVANCE_WEIGHT`. The grid (Phase 2.6) is what decides
-            // whether a non-zero value earns the default.
+            // The grid's choice (plan §17). This default and the ranker's come
+            // from one constant, so the report, the field docs and the ranker
+            // cannot drift apart.
             relevance_weight: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT,
             // Unset means "look the baseline up per embedding model" — see
             // the field docs and `SIMILARITY_BASELINES`.
@@ -1362,13 +1364,21 @@ mod tests {
     }
 
     #[test]
-    fn relevance_weight_is_zero_by_default_so_the_fused_order_is_untouched() {
-        // The anchor, on the config side: nothing shipped hands recall a new
-        // sort key. 0.0 is also a different code path in the ranker, so this
-        // default is what keeps every baseline recorded since comparable.
+    fn relevance_weight_defaults_to_the_value_the_ranker_shares() {
+        // Two things, both worth pinning. The default is a measurement rather
+        // than a taste (plan §17: +3.8 precision@1, +2.7 MRR, nothing else
+        // moved), so the literal below is what turns a quiet edit of
+        // `DEFAULT_RELEVANCE_WEIGHT` into a reviewable change of behaviour. And
+        // both layers read that one constant, which is the no-drift property:
+        // `recuerdos-ai config`, the field docs and the ranker cannot disagree
+        // about what is running.
         Jail::expect_with(|_jail| {
             let config = AppConfig::load(None).expect("defaults must be valid");
-            assert_eq!(config.retrieval.relevance_weight, 0.0);
+            assert_eq!(
+                config.retrieval.relevance_weight,
+                crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT
+            );
+            assert_eq!(config.retrieval.relevance_weight, 0.05);
             Ok(())
         });
     }
