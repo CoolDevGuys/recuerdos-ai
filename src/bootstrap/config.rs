@@ -420,15 +420,21 @@ pub struct GraphConfig {
     /// an agent gets the whole chain (the bridge fact *and* the answer at the end
     /// of it) rather than the bridge alone.
     ///
-    /// `0` — the default until the grid in Task 3.5 chooses — is no slot at all:
-    /// the stage returns before reading the list, which is the pipeline as it
-    /// shipped before Phase 3. Anything above `0` costs one visible memory per
-    /// slot, the row that was last in the window; that is the trade, and `complete@5`
-    /// for the `relational` and `chain` case kinds is what measures it.
+    /// **`1`** is the grid's choice (plan §17). It buys the whole measured gain —
+    /// `complete@5` 57.1 → 85.7 on `relational` and 0 → 100 on the one `chain` case
+    /// whose query names a stored entity — with precision@1 unmoved (it cannot move:
+    /// slot 0 is not on offer) and no other case kind losing anything. A second slot
+    /// bought nothing further on the eval corpus, which has one promotable hop per
+    /// affected query, while costing a second visible row on every recall that does
+    /// promote; `0` is the pipeline as it shipped before Phase 3 and remains the
+    /// setting for a deployment that would rather keep the last result the indexes
+    /// chose.
     ///
     /// Validated `0..=3`. Above three the head of every list is chosen by the hop
     /// rather than by the indexes, which is a different retrieval system rather
-    /// than a stronger version of this one. Inert while `[graph].enabled` is false.
+    /// than a stronger version of this one. Inert while `[graph].enabled` is false,
+    /// and while a query names no entity the store knows — which, measured, is every
+    /// `chain` case but one in this project's own eval corpus.
     pub expansion_slots: usize,
     /// Bounds one `graph backfill --relations` pass (Task 7.3.5), reusing
     /// the same budget shape as consolidation: an existing corpus gains
@@ -465,9 +471,10 @@ impl Default for GraphConfig {
             // this eval, where such hits do not happen to take #1.
             rank_weight: 0.3,
             unanchored_floor: 3,
-            // Zero until Task 3.5's grid says otherwise: the hop is on by default,
-            // its reserved slots are not.
-            expansion_slots: 0,
+            // One reserved seat: the hop is on by default, and since Phase 3 so is
+            // the slot that lets a reached memory be *seen* (see the field docs for
+            // what the grid measured).
+            expansion_slots: 1,
             backfill_budget: ConsolidationBudgetConfig::default(),
         }
     }
@@ -1411,13 +1418,14 @@ mod tests {
     }
 
     #[test]
-    fn expansion_slots_defaults_to_zero_and_is_read_from_file_and_env() {
-        // Zero is a decision, not a default that fell out: the hop is on by
-        // default and its reserved slots are not, until Task 3.5's grid says
-        // otherwise. The env form is what that grid drives its cells through.
+    fn expansion_slots_defaults_to_the_slot_the_grid_chose_and_is_read_from_env() {
+        // One, not zero: what the slot earns is in the field docs and §17, and the
+        // literal here is what turns a quiet edit of that decision into a reviewable
+        // change of behaviour. The env form is what the grid drives its cells
+        // through, so the knob a measurement runs on must be the knob that ships.
         Jail::expect_with(|_jail| {
             let config = AppConfig::load(None).expect("defaults must be valid");
-            assert_eq!(config.graph.expansion_slots, 0);
+            assert_eq!(config.graph.expansion_slots, 1);
             Ok(())
         });
 
