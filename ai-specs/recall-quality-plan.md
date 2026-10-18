@@ -412,8 +412,10 @@ deadline costs only the remainder of one chunk, never the next request's latency
 - [x] Field host on `mode = "off"`; p50/p95 before/after recorded in §17.
       **Met 2026-10-18** on the operator's host: p50 6.7 → 306.2 ms, p95 9.6 → 603.9 ms for the
       stage (same-config noise floor 299 → 302 ms), ~1.6 GiB held with the model loaded against
-      a 1.5 GiB prediction. Table in §17 · Field host. The warm-daemon-with-stage-off RSS is
-      still owed as a refinement; the direction and the magnitude are not in doubt.
+      a 1.5 GiB prediction. Table in §17 · Field host, where a second reading closed the
+      refinement as well: a warm daemon with the stage off holds **198,996 kB** against
+      1,668,708 kB with the model loaded, so the stage is ~1.4 GiB resident and ~300 ms of a
+      recall that otherwise takes 6 ms.
 - [ ] Concurrency measurement (1.5) recorded, with the R1 hypothesis marked
       confirmed or refuted. **Not met**, same reason — but it is a measurement now
       rather than an inference: three concurrent searches with `RUST_LOG=debug`
@@ -1014,31 +1016,39 @@ one top-1 the Phase 2 change can lose).
 | Phase 3's default is measured on a kind that could not see it | The eval's four inherited `chain` cases produce no seeds, so `chain`'s +20.0 is one case the mechanism could reach, not the kind working. §17 states it, `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which cases are reachable, and the DoD's `chain` tick carries the asterisk. The hand review on a real store is the half that could still refute it, and it is owed. |
 | `just check-native` in the dev container can be green against a stale build | Measured in Phase 3: a green run clippy'd `recuerdos-ai v0.3.1` while the manifest said `0.4.3`, `cargo fmt --check` said nothing about an unformatted file, and `cargo test` ran a unit-test binary 117 tests behind the tree. Until the recipe is fixed, touch the sources first and check the run against `cargo test -- --list` (1 027 declared = 1 016 passed + 11 ignored on this branch); confirm the log names the tests you just wrote. `test result: ok` alone is not evidence. |
 
-| The remaining phases target recall failures this store may not have | The field host is 16/18 complete inside five before Phase 3's mechanism runs, and its two failures are not mis-ranking: no memory above relevance 0.24 came back at all for either. If the memories are absent, the plan's remaining machinery solves a problem that does not exist here and the right move is calibration plus a release; if they are present under different words ("Strix Halo" asked, "Radeon 8060S Graphics" stored), that is the first field-observed case for Phase 4's prompts or Phase 6's aliases — and one `grep` over the export says which. Recorded before choosing, so the choice is not made on the synthetic corpus's evidence alone. |
+| The remaining phases target recall failures this store may not have | **Checked, and the store has none.** The field host is 16 of 18 complete inside five before Phase 3's mechanism runs, and its two failures are not mis-ranking: quoting both expectations back at the store returns top hits at relevance 0.09 and 0.10, which is what an empty region looks like — the memories were never stored. So on this store the recall job is finished (16 of 16 answerable complete inside five), abstention on the other two is correct behaviour, and Phases 4, 6 and 7 address a failure with no field-observed instance. What remains is ordering: δ, and one fusion that declines a correct judgement. |
+| The field host is not a fixed instrument | The same shipped config read 38.9 p@1 where it had read 50.0, because six memories about this measurement work had been stored in the meantime and now outrank the older ones the `expect` substrings name. The system behaved; the ground truth went stale. Any repeated field measurement must carry a store digest, and Task 0.9's copy must be frozen rather than synced — otherwise the drift arrives looking like a regression. |
 | The eval corpus's agreement rate is not the field's | The shipped rerank fusion assumes vector+BM25 agreement is nearly always right, which the eval corpus supports and query 5 of the field files does not. Any future grid must run against a real store copy, not only `eval/cases.toml`. |
 
 **Follow-ups (not in this plan):**
-- **Raise `[retrieval].relevance_weight` above 0.05.** Both instruments point the same way and
-  neither shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 / +17.3 at δ 0.2 / 0.3 / 0.5 with
-  abstention unmoved and no `by_kind` regression at any cell (§17, Phase 2), and the field host reads
-  +27.8 / +19.9 at 0.5 over the shipped value (§17 · Field host). Phase 2 said this is a release note
-  rather than a config edit if the falsifier held, and it held — read per query, five rank-1 gains at
-  0.5 and one at 0.05 with **nothing losing first place at either value**. Three things are still open
-  and each is small: the *value* (0.5 is what this store measures best, 0.3 is what the corpus rates
-  a safe plateau — no instrument has found a turning point, so the choice is a risk preference rather
-  than a measurement); `grep -c superseded` over the export, which is the only failure class a large
-  δ can lose and which may not exist on a store that consolidates well; and the cell nobody has run,
-  **δ 0.5 with the stage off** — every δ comparison so far had the reranker on both sides, so the
-  absolute at the shipped `mode = "off"` is unknown even though every *difference* is valid. Raising
-  it re-records `eval/baseline.json`, as Phases 2 and 3 did.
+- **Raise `[retrieval].relevance_weight` above 0.05.** Both instruments point the same way and neither
+  shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 / +17.3 at δ 0.2 / 0.3 / 0.5 with abstention
+  unmoved and no `by_kind` regression at any cell (§17, Phase 2), and the field host reads +11.1 p@1 /
+  +7.7 MRR at 0.5 over the shipped value **with the stage off** — the configuration that actually serves
+  there — after +27.8 / +19.9 with it on (§17 · Field host). Phase 2 said this is a release note rather
+  than a config edit if the falsifier held, and it held: at 0.05, 0.2 and 0.5 on the field host and at
+  every value on the corpus, with **no query losing first place in any run**. What is left is the
+  *value*, and it is a preference rather than a measurement — 0.5 is what this store measures best, 0.3
+  is what the corpus rates a safe plateau, and no instrument has found a turning point. The one failure
+  class a large δ can lose is a superseded fact that consolidation failed to retire; worth one look at
+  the export before shipping, though a store that absorbed six memories about this work in a day makes
+  supersession a live shape there rather than a hypothetical. Raising it re-records `eval/baseline.json`,
+  as Phases 2 and 3 did.
 - **Is the rerank stage muted rather than useless?** Query 5 of the field files is the exhibit: the
   model scored the right memory 0.999 and the served first 0.056, and rank 4 stood, because
   `strategy = "rrf"` at `weight = 1` may break a tie against one leg but never overrule vector+BM25
   agreement — and on a store that repeats project names, that agreement is a lexical artifact more
-  often than the eval corpus's paraphrased cases made it. One config line and the same query file
-  answers it: rerank `on` with `strategy = "replace"`, then again with `weight = 2`, each against the
-  shipped fusion at the same δ. If either lifts p@1 past what off buys, the 300 ms has a purpose and
-  the default deserves a second look; if neither does, off is confirmed for the right reason.
+  often than the eval corpus's paraphrased cases made it. This is scripted as **M5** of
+  `scripts/field-measure.sh` (rerank `on`, `strategy = "replace"`, then `weight = 2`, each against the
+  shipped fusion at the same δ), which is also where it died: the read-back matched `[graph].weight`
+  when asked for `[rerank].weight` and refused to measure. Fixed by scoping every read to its section;
+  the run has still to happen. It carries a prediction now, so it cannot be read either way afterwards:
+  scored on its own the model's top pick was the expected memory in 15 of 18 field queries and it was
+  never confidently wrong, which would serve 83.3 p@1 where the fusion serves 77.8 (§17 · Field host).
+  `replace` near 83 means the fusion is the weakest link and 1.4 GiB buys something; `replace` at or
+  below what off buys means the eval grid was right that these scores mean less than their ordering
+  does. Read its per-query lines rather than its aggregate: the store drifted since the query file was
+  written, so part of any absolute is stale expectations, not the fusion.
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
 - Query-embedding LRU cache for repeated agent queries.
 - An approximate-NN index beyond ~100k memories (`docs/performance.md`).
@@ -2394,13 +2404,17 @@ for a store of this shape, and it is one config line.
 | recall latency | **p50 6.7 / p95 9.6 ms** | **p50 306.2 / p95 603.9 ms** |
 | p@1 / MRR / complete@5 | 50.0 / 61.3 / 88.9 | 50.0 / 61.1 / 88.9 |
 | daemon RSS | 31,756 kB (fresh start, nothing served yet) | 1,668,708 kB (after a real search) |
+| re-run, stage off (the live config now) | recall p50 6.3 / p95 9.1 ms, self-comparison 6.3 vs 7.5 | — |
+| re-run, warm daemon | **198,996 kB** | — |
 
 Eighteen calls, five candidates judged each, `split: not measured` because the replay runs with no
 deadline — Phase 1's own reporting, behaving as specified. The stage costs **45× the p50 and about
 1.6 GiB resident** and bought −0.2 MRR and nothing else across 18 real queries. The plan's predicted
-"~1.5 GiB freed" is confirmed by the process holding 1.59 GiB; the strictly like-for-like
-comparison (a *warm* daemon with the stage off) is still owed, since 31 MiB is a process that has
-not loaded anything yet.
+"~1.5 GiB freed" is confirmed by the process holding 1.59 GiB, and the strictly like-for-like
+comparison the first pass could not make is now made: a **warm** daemon with the stage off holds
+198,996 kB, so the second stage is roughly 1.4 GiB of resident memory on this box. (The re-run's
+quality figures are deliberately not added to the p@1 row above: the store grew between the two runs,
+so its absolutes are not comparable — see *The instrument drifted while it was being used*.)
 
 The operator set `mode = "off"` after this reading. That is a config decision about their own
 traffic, and it has a consequence for this plan: **Task 1.5's queue cannot be observed on this host
@@ -2419,17 +2433,120 @@ single-knob comparisons at n=18 means one flipped query is 5.6 points of p@1, so
 about two queries in either direction should be read as nothing, exactly as the eval's 1.7-per-case
 noise floor says here.
 
-Still owed on this host, in the order that would change a decision: the key-free existence probe for
-q10/q11 (no listing was ever fetched — the digest step ran without a key, so there is no
-`memories.md` to grep; quoting the phrase back at the store with `recall audit` answers it without
-one, and the script now prints that command); the δ sweep with the stage **off**, which the host has
-re-run and not yet reported — it is the configuration that ships there now, so the absolute p@1 at
-the shipped `mode = "off"` depends on those summaries even though every *difference* measured earlier
-is valid; the fusion test M5 (`replace`, then `weight = 2`) that
-decides whether the stage is muted or merely expensive, against the 83.3 predicted above; the M1
-hand review of the seat's moved rows; the warm-RSS-with-stage-off number; Task 1.5 if the stage goes
-back on; and Task 0.9's store copy, which is what turns these eighteen questions into something a
-later phase can gate on instead of an anecdote about one machine.
+#### A second reading, with the stage off — the cell that was missing
+
+The host now runs `mode = "off"`, and every δ comparison above had the reranker on *both* sides, so
+the absolute at the shipped configuration was unknown even though the differences were valid. Re-running
+the sweep closed that, on a store that has in the meantime grown (see the drift section below):
+
+| δ | p@1 | MRR | complete@5 | rank-1 gains | rank-1 losses |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 27.8 | 47.7 | 83.3 | — | — |
+| **0.05 (shipped)** | 38.9 | 55.7 | 88.9 | — | — |
+| 0.2 | 44.4 | 59.7 | 88.9 | 1 (q3) | 0 |
+| 0.5 | 50.0 | 63.4 | 88.9 | 2 (q3, q17) | 0 |
+
+**The improvement is not an interaction with the reranker**: with the stage off, 0.05 → 0.5 still reads
++11.1 p@1 and +7.7 MRR, monotone in δ, and once again nothing lost first place (the third `⚑` row in
+the 0.5 run is q15 changing between two memories that were both wrong). That is the third consecutive
+field run where §4's last row held, at four different values of δ.
+
+The ladder also says something new. Between δ 0 and 0.05, `complete@5` itself rose 83.3 → 88.9 — q15's
+answer entered the window at all. Because truncation happens *after* the reweighting, δ is not only a
+re-ordering knob: a larger δ changes which five memories exist to be seen. That is worth knowing before
+anyone reads it purely as a precision dial.
+
+**Task 1.1 is now closed in both directions.** With the stage off the recall p50 is 6.3 ms (p95 9.1,
+self-comparison 6.3 vs 7.5), so the ~300 ms measured earlier was the stage entire, and the warm daemon
+reports **198,996 kB where with the stage loaded it reported 1,668,708 kB** — the second stage costs
+roughly 1.4 GiB of resident memory on this box, for a judgement the shipped fusion declines to use.
+
+#### The seat, measured a second time, and what the floor has to do with it
+
+M1 reproduced itself: **0 of 18 top-1 results changed** (G1 held twice), p@1 flat, MRR −2.2 against the
+earlier −2.8 — same sign, same size, independent run. What the second pass adds is a limit on how far
+that can be pushed. The audit is deliberately floorless (`floor: clients drop below 0.25, this audit
+shows everything`), and `apply_expansion` can only promote a memory that is *already in the list* — its
+own contract is "filters and the floor hold". So the striking rank-2 arrivals this run displays
+(relevance 0.16, 0.21, 0.22, 0.24) are rows a client would never have been shown: they are dropped
+before the slot ever runs, and it is the audit's floorless view that puts them on screen. Two conclusions
+survive that and two do not:
+
+- Survives: the slot moves a below-window memory into second place, and in this store that costs
+  reciprocal rank without ever touching first — measured twice.
+- Survives: enabling the seat and the stage together means the model never judges what the seat places.
+- Does not survive: "the seat serves junk". On a client the promoted row has passed the floor, so the
+  complaint is that it displaces a better one, not that it is nonsense.
+- Does not survive: reading the exact −2.2/−2.8 as a client-facing loss. It is a floorless-audit number.
+
+#### The two GPU failures: the memories are not in the store
+
+Quoting the expectations back at the store, key-free, answers it — and the answer is unambiguous:
+
+```
+1. Radeon 8060S Graphics   → 1. Code coverage minimums… rel 0.09   2. MINIO_API_PORT… rel 0.06
+2. RTX 3090 24GB           → 1. recall-quality-plan Phase 3 shipped… rel 0.10
+```
+
+A stored memory quoted to itself returns near 0.9. These return 0.09 and 0.10, which is what an empty
+region of the store looks like. So the vocabulary-mismatch hypothesis is dead: there is nothing to
+match. The consequences are load-bearing for the rest of this plan:
+
+- Those two `expect` rows are impossible, abstention is *correct* behaviour for them, and the honest
+  denominator is 16 answerable queries — on which the store is **16 of 16 complete inside five**.
+- **Phases 4 (embedding prompts), 6 (aliases) and 7 (temporal cues) address recall, and this store has
+  no recall failure left.** There is now no field-observed instance of the problem any of them was
+  written for, which is a much stronger statement than "the eval corpus did not show improvement".
+- What remains is ordering, which is δ's domain, and one ordering failure that is neither: the shipped
+  fusion declining to use a cross-encoder judgement that was right.
+
+#### The instrument drifted while it was being used
+
+The same shipped configuration reads 38.9 p@1 today where it read 50.0 last night, and the cause is
+visible in the listings: six new memories about this work are now in the store (`fc009ca5`, `ecdb7423`,
+`ac027aee`, `f483a47f`, `58887eb2`, `40d9bf52` — the field measurements, the operator server, the
+decision to stop the phase sequence). Queries 1, 2 and 3 of this file ask about this project's own
+configuration, and the memories written *while doing the work* now outrank the older ones the `expect`
+substrings point at. On q1 the new top result is "On 2026-10-18 the field host measured relevance_we…"
+where the expectation points at "Phase 2 shipped relevance_weight = 0.0…" one row below.
+
+That is not a retrieval failure; the newer memory is arguably the better answer. It is the ground truth
+going stale, and it invalidates three assumptions at once:
+
+- **A live store cannot be re-measured as a fixed instrument.** Every run of this file is a different
+  measurement, and nothing in the output said so until the aggregate moved.
+- **Task 0.9's copy has to be frozen, and the query file pinned to the store it was written against.**
+  A copy that keeps syncing, or expectations written against a store that keeps absorbing the work,
+  reproduces exactly this drift — silently, on the way to looking like a regression.
+- **Queries 1–3 need widening or retiring.** Their `expect` substrings encode last week's answer.
+
+It is also the second time this week that a missing digest cost time: the script records a store digest
+exactly so drift is a changed hash rather than a mystery, and that step never ran because no API key
+was entered.
+
+#### M5 did not run: the guard caught a bug of its own
+
+```
+!! weight2.toml: asked for weight=2, the binary reads '0.3'.
+```
+
+The read-back asked the report for `weight` and got `[graph].weight`, because the report prints key
+names unscoped and `weight` exists in two sections — the v0.4.1 failure (a value read from the wrong
+section) reproduced inside the check built to catch it. Fixed by scoping every read to the section that
+owns the key and reading `[rerank].weight` off the line the report actually folds it into. Worth stating
+plainly: the guard refused to measure rather than reporting a difference that was nothing, which is the
+right direction for it to fail, but it cost a run, and the fusion question below is still unanswered
+because of my code rather than the system's behaviour.
+
+Closed by that run: the existence probe (the memories are absent, above), the δ sweep with the stage
+off (above), and the warm RSS with the stage off (above). Still owed, in the order that would change a
+decision: **M5**, which needs nothing but a re-run now that the read-back is section-scoped — it is the
+only live test of whether the stage is muted or merely expensive, and it is the last measurement that
+could justify turning the stage back on; the M1 hand review of the seat's moved rows, which the
+floorless-audit caveat above narrows but does not settle; Task 1.5 if the stage ever goes back on;
+re-anchoring queries 1–3 of the field file so they do not encode last week's answer; and Task 0.9's
+**frozen** store copy with its digest recorded, which is what turns these eighteen questions into
+something a later phase can gate on instead of an anecdote about one machine that keeps changing.
 
 One caveat about `complete@5` here, because the ceiling argument above leans on it: the audit
 applies no client floor — it prints `floor: clients drop below 0.25, this audit shows everything`.
