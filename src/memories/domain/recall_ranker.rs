@@ -104,6 +104,13 @@
 //! the legs genuinely disagree about alone. [`DEFAULT_RELEVANCE_WEIGHT`] carries
 //! that number and the measurement that chose it.
 //!
+//! Because affinity is already multiplied into `score` when the rerank stage
+//! recovers each candidate's band, the rerank leg lands *inside* it: a second
+//! stage refines the ordering relevance helped choose rather than resetting the
+//! weighting and serving back the model's list with recency pasted on. The two
+//! stages commute, which is pinned — that is what makes "δ then rerank" and
+//! "rerank then δ" the same arithmetic.
+//!
 //! Relevance leads; recency and quality break ties among comparably relevant
 //! results. Since Phase 2 the first clause is arithmetic rather than aspiration:
 //! relevance is in the score, not only in the report. All of it is pinned by
@@ -1961,6 +1968,106 @@ mod tests {
 
         assert_eq!(ordered(&ranked)[0], sound.id(), "a NaN score took the top");
         assert!(ranked[1].score.is_nan());
+    }
+
+    #[test]
+    fn the_rerank_leg_is_added_inside_affinity_not_on_top_of_it() {
+        // `apply_rerank` knows nothing about affinity: it rebuilds each
+        // candidate's leg sum from the recorded ranks, recovers the band as
+        // `score / sum`, and adds its own term inside that band. With affinity
+        // already in `score`, the recovered band is recency × quality × affinity
+        // — which is the intended reading (the stage refines the ordering it was
+        // handed), and it makes the two stages commute.
+        //
+        // The pair is built so they genuinely disagree: affinity promotes `a`,
+        // the reranker prefers `b`. Order them both ways round and the numbers
+        // must agree, or one of the two stages is silently overwriting the other.
+        let (a, b) = symmetric_pair();
+        let fuse = |weight: f32| {
+            ranker().with_relevance_weight(weight).rank(
+                &ids(&[&a, &b]),
+                &ids(&[&b, &a]),
+                vec![a.clone(), b.clone()],
+                now(),
+            )
+        };
+        let relevance = [(a.id(), 0.9), (b.id(), 0.4)];
+        let leg = [(b.id(), 0.9), (a.id(), 0.1)];
+        let scores = |ranked: &[ScoredMemory]| {
+            ranked
+                .iter()
+                .map(|scored| (scored.memory.id(), scored.score))
+                .collect::<Vec<_>>()
+        };
+
+        // Affinity then rerank: what the pipeline actually does.
+        let mut affinity_first = with_relevance(fuse(0.2), &relevance);
+        let rank = ranker()
+            .with_relevance_weight(0.2)
+            .with_rerank_strategy(RerankStrategy::Rrf { weight: 1.0 });
+        rank.apply_relevance(&mut affinity_first);
+        rank.apply_rerank(&mut affinity_first, &leg, now());
+
+        // Rerank then affinity: the same two multiplications in the other order.
+        let mut rerank_first = with_relevance(fuse(0.0), &relevance);
+        ranker()
+            .with_rerank_strategy(RerankStrategy::Rrf { weight: 1.0 })
+            .apply_rerank(&mut rerank_first, &leg, now());
+        ranker()
+            .with_relevance_weight(0.2)
+            .apply_relevance(&mut rerank_first);
+
+        let (want, got) = (scores(&affinity_first), scores(&rerank_first));
+        assert_eq!(
+            want.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            got.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            "the two orders disagreed about which memory comes first"
+        );
+        for ((id, want), (_, got)) in want.iter().zip(got.iter()) {
+            assert!(
+                (want - got).abs() <= want.abs() * 1e-6 + f32::EPSILON,
+                "{id}: affinity-then-rerank scored {want}, rerank-then-affinity {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_weight_rerank_leg_leaves_an_affinity_ordered_list_alone() {
+        // The rerank stage's own no-op promise, restated where affinity has
+        // already moved the head: a leg weighted 0 records what the model said
+        // and changes no order. Without it, "turn the reranker off" and "turn
+        // relevance off" would be two different escapes from a second stage that
+        // did not help.
+        let (a, b) = symmetric_pair();
+        let mut ranked = with_relevance(
+            ranker().rank(
+                &ids(&[&a, &b]),
+                &ids(&[&b, &a]),
+                vec![a.clone(), b.clone()],
+                now(),
+            ),
+            &[(a.id(), 0.4), (b.id(), 0.9)],
+        );
+        ranker()
+            .with_relevance_weight(0.2)
+            .apply_relevance(&mut ranked);
+        let before = ordered(&ranked);
+        assert_eq!(
+            before[0],
+            b.id(),
+            "the fixture: affinity should have put the better match first"
+        );
+
+        ranker()
+            .with_relevance_weight(0.2)
+            .with_rerank_strategy(RerankStrategy::Rrf { weight: 0.0 })
+            .apply_rerank(&mut ranked, &[(a.id(), 0.9), (b.id(), 0.1)], now());
+
+        assert_eq!(
+            ordered(&ranked),
+            before,
+            "a zero-weight rerank leg reordered an affinity-ordered list"
+        );
     }
 
     /// Calibration with the baseline switched off, for the tests that are
