@@ -408,11 +408,18 @@ deadline costs only the remainder of one chunk, never the next request's latency
 
 ### Definition of Done
 
-- [ ] `just check-native` and `just sdk-test` pass.
+- [x] `just check-native` and `just sdk-test` pass.
 - [ ] Field host on `mode = "off"`; p50/p95 before/after recorded in §17.
+      **Not met.** This needs the deployed machine: the flip is a config edit there
+      and the numbers have to come from its traffic. The command that produces both
+      columns in one run is in §17. Blocked on access, not on code.
 - [ ] Concurrency measurement (1.5) recorded, with the R1 hypothesis marked
-      confirmed or refuted.
-- [ ] `eval` with `mode = off` identical to Phase 0's baseline.
+      confirmed or refuted. **Not met**, same reason — but it is a measurement now
+      rather than an inference: three concurrent searches with `RUST_LOG=debug`
+      report `queued_ms` and `inference_ms` for every leg, and §17 records which
+      shape confirms R1 and which refutes it.
+- [x] `eval` with `mode = off` identical to Phase 0's baseline. Every column
+      `change: -0.0`, which is what `mode = off` being the default is for.
 
 ---
 
@@ -957,6 +964,8 @@ one top-1 the Phase 2 change can lose).
 | Prompt-table rows go stale as model families evolve | Each row cites its model card. Explicit config override. Unknown models get no prompt and an info log. |
 | Eval corpus still small (110 memories) | Real-store `recall audit` is part of every gate (§4) — and that half is still unmet: see Phase 0's Task 0.9. |
 | Two `eval` runs need not agree | Measured floor: 0.7 recall points, 1.7 if a whole single-expectation case flips. Equal-BM25 documents (~38 of them match "project" through the category field) reorder with Tantivy segment layout. Below ~2 recall / ~1 p@1 a Δ is one case moving, not a result; re-run twice before gating on it. Root cause and candidate fixes in §17 Phase 0 and the follow-up below. |
+| A busy rerank stage looks like a slow one on the wire | Both stay `skipped`/`deadline`, deliberately (invariant 3.5: shipped SDKs parse two reason values, so a third is a breaking change). The distinction lives on the domain trace, in the `warn!` line beside `queued_ms`/`inference_ms`, and in `rerank audit`'s `skipped_busy`. `a_busy_skip_says_exactly_what_a_slow_one_says` pins the transport half so nobody "just adds a field" later. |
+| Phase 1's field halves (1.1, 1.5) went unmeasured | Code and measurement path shipped; §17 records which two numbers are owed, the command that produces each, and the shape that would confirm or refute R1. R1 is left open rather than called confirmed by construction. |
 
 **Follow-ups (not in this plan):**
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
@@ -977,6 +986,21 @@ one top-1 the Phase 2 change can lose).
   on content (stable across rebuilds, changes production's arbitrary order); or let
   the eval supply `MemoryId`s to the saver (deterministic, and a security-shaped API
   change). Until one is taken, treat the noise floor as part of every gate.
+- `rerank audit --concurrency N`: replay the query file with N recalls in flight, so
+  the queued/inference split and `skipped_busy` stop being structurally zero and
+  Phase 1.5's R1 question becomes one command on a real host instead of a
+  `journalctl` grep. Deliberately not built in Phase 1 — the command's contract is
+  "one query at a time, no deadline" because it exists to measure what the model
+  *costs*, and giving it concurrency changes which question it answers. That is a
+  design decision, not a flag.
+- `RerankTrace::Applied::complete`: the one field an `applied_partial` counter would
+  need, and no reader for it until the audit above exists. A partial leg is visible
+  today as `judged` below the requested depth, on the wire and in the trace.
+- `scopes_are_carried_from_the_key_that_authenticated` is load-sensitive: one 401 in
+  a full-suite run under CPU contention, 5/5 isolated, suite green every other time.
+  Worth making deterministic before it is mistaken for product fallout — same class
+  of measurement error Phase 1's own timing tests had, in a test that guards
+  isolation, which is the wrong place to learn that lesson under load.
 
 ---
 
@@ -986,7 +1010,11 @@ Fill in as phases complete. Paste raw command output, not summaries.
 
 ### Environment
 - Eval embedder: `bge-small-en-v1.5` (default config = field host's embedder as of 2026-10-17).
-- Field host config summary: _TBD_ — blocked with the rest of Task 0.9; see Phase 0.
+- Field host config summary: _TBD_ — blocked with the rest of Task 0.9, and with
+  Phase 1's 1.1 and 1.5 for the same reason: the host is the operator's.
+- Rerank models: the container's `/models` volume holds all four shipped rerankers
+  (4.6 GB), so the `--ignored` ONNX tests run here without a download. No CI job runs
+  ignored tests, so they are run by hand when the files under them change.
 - Hardware for latency: every number in this log is from the dev container
   (`docker/Dockerfile.dev`) on an arm64 Docker VM, not the field host. The p50/p95
   columns are comparable to each other, not to production.
@@ -1299,8 +1327,247 @@ reproduced on the aged corpus, so Phase 3's guard (and Phase 6's constraint) sta
 mandatory, not precautionary.
 
 ### Phase 1 — reranker off, bounded deadline work
-- Field host p50/p95 before → after `mode = off`: _TBD_
-- `queued_ms` vs `inference_ms` under 3 concurrent recalls; R1 hypothesis: _TBD_
+- Field host p50/p95 before → after `mode = off`: _TBD — blocked, see "Blocked on
+  the field host" below_
+- `queued_ms` vs `inference_ms` under 3 concurrent recalls; R1 hypothesis: _TBD —
+  blocked; the measurement is now one command, see below_
+
+The code half was measured in the dev container (`docker/Dockerfile.dev`, arm64
+Docker VM). The field half was **not** measured — see "Blocked on the field host"
+below; it is recorded as owed rather than estimated.
+
+Nothing in this phase could move the eval, and it did not: `[rerank].mode`
+defaults to `off`, so the stage that all five commits change is never loaded by a
+gated case.
+
+| | |
+|---|---|
+| commits | `9784a40` timed session acquire · `b34d6a3` chunked scoring with partial application · `9d32971` the busy/partial split · `8e98ec5` `queued_ms` vs `inference_ms` · `ee7d482` docs |
+| `just check-native` | clean — `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `check-boundaries.sh` ("no violations found"), **980 tests** (14 added here, 0 removed), 11 ignored |
+| `eval` at `mode = off` | recall@5 83.3 · p@1 50.0 · MRR 63.9 · complete@5 80.8 · abstention 100.0 — every column `change: -0.0` against Phase 0's baseline, which is the DoD requirement and not a result |
+| `just sdk-test` | 36 + 14 passed. The suite is the point of 1.4: nothing in it had to change, because nothing on the wire did |
+| `cargo test -- --ignored rerank` | 3 passed on the real model — `jina-reranker-v1-turbo-en`, the 147 MB one the other two ONNX tests already use — including the chunk-vs-whole-head invariance test above |
+
+#### 1.2 — waiting for a session is bounded
+
+`InstancePool` had one path to a session: `instances[0].lock()`, which parks. A
+recall whose rerank deadline had already expired stayed parked, then scored a head
+nobody was waiting for any more, then released the session for the next caller to
+park behind — the work reranking-plan §12 (part three) measured as 34 → 120 ms per
+pair and could not attribute.
+
+It hands out tokens now: `max_concurrency` of them, each indexing one session.
+`acquire_until(deadline)` takes one and returns `Err(budget_left)` when none is
+free by the deadline, **having entered no session**; the guard returns the token in
+`drop`, so a panic mid-scoring does not retire a session. `Reranker::score_before`
+is the domain's version of that (`Err(RaError::RerankBusy)` — a variant, not a
+string to match on, which is the thing `RaError` exists to avoid), and the adapter
+overrides it while every other implementation keeps the default: score the head,
+never report busy. The recall path turns busy into `skipped`/`deadline` before a
+handler sees it, so the transport gained a mapping that adds nothing observable —
+pinned by `a_busy_rerank_reaching_the_transport_looks_like_any_internal_error`,
+alongside the existing table test that no other variant's mapping moved.
+
+#### 1.3 — the head is scored in runs
+
+`Reranker::preferred_chunk()` (defaulted to `None` = "the head as given"; the
+adapter answers `[rerank].batch_size`) lets `rerank_scores` score a run at a time:
+the worker sends each run's scores as they land and checks an `Arc<AtomicBool>`
+*before starting* a run — ONNX cannot be pre-empted mid-batch, so the chunk is the
+grain a deadline can cut at, and what a missed deadline abandons is one batch
+instead of ten candidates nobody reads.
+
+What finished before the deadline is **applied**. Those ranks are real evidence
+about those candidates, and `apply_rerank` already treated a leg covering part of
+the head as an ordering for that part; `RerankTrace::Applied { judged }` already
+carried the number, so the wire gained nothing. Two is the floor, because one score
+cannot reorder anything: a leg that judged one candidate is `skipped`, not an
+`applied` that changed nothing.
+
+A *model* error is deliberately not treated that way. Applying the prefix of a leg
+that failed would answer `applied` while the model is broken, which hides exactly
+what the operator needs to see, and `model` is the reason they can act on. Deadline
+and busy apply the prefix; model does not.
+
+Chunking is a yield point, not a change in what is judged. `align_rerank` was split
+into `align_positions` (per run) and `order_best_first` (once, stable, so the tie
+semantics are the ones Phase 4 shipped), which is what makes a chunked leg and a
+whole-head leg produce the same list. Pinned twice: the doubles' chunked and
+unchunked legs agree candidate for candidate, and
+`scoring_the_head_in_runs_returns_the_same_scores_as_one_call` compares one
+whole-head call against three runs of `batch_size = 2` on the real model
+(`--ignored`: nothing in CI runs ignored tests — the `fastembed_reranker` header's
+"nightly CI" predates the workflows in the repo — so this was run by hand, against
+the model cached in the container's `/models` volume, and it passed).
+
+#### 1.4 — nothing moved on the wire, and the split has somewhere to live
+
+`skipped`/`deadline` for a leg cut off before two candidates, `applied` with
+`judged` below the requested depth for one cut off after: both already in the
+shipped SDKs. `busy` is a field on the **domain** trace (`RerankTrace::Skipped`)
+and `RerankResponse` drops it on the way out, which is pinned rather than implicit —
+`a_busy_skip_says_exactly_what_a_slow_one_says` asserts a busy skip serialises
+byte-identically to a slow one and that the object's keys stay exactly the four a
+client parses. Invariant 3.5, from this side.
+
+Three readers use it: `recall audit`/`rerank audit` count `skipped_busy` and label
+a busy stage `busy`/`skipped-busy` instead of "ran out of time"; the eval's "the
+stage never ran" warning names a session shortage rather than calling every skip a
+model failure; and the shadow log records `judged` beside `depth`, so a comparison
+that only looked at part of the head reads as one.
+
+#### 1.5 — queue and inference stop being one number
+
+`score_before` answers with `RerankScored { scores, queued, inferred }`. The
+adapter measures the queue where the session is handed out — the only place that
+can say — and derives inference as the call minus the queue, so the two halves sum
+to what the caller experienced instead of drifting apart. A model with no pool
+keeps the default, which reports the whole call as inference and never invents a
+zero for a wait it could not observe.
+
+Where an operator reads it:
+
+| Surface | What it says |
+|---|---|
+| `debug` (`name = rerank_leg`) | every leg: `judged`, `depth`, `complete`, `rerank_ms`, `queued_ms`, `inference_ms` |
+| `warn` (skipped leg) | as above, plus `busy` |
+| `warn` (partial apply, 1.3) | as above |
+| `info` (`rerank_shadow`) | as above — shadow mode is the "tell me about the stage" mode |
+| `rerank audit` | `Call.queued_ms`/`inferred_ms`, percentiles in the JSON, one human line |
+
+The audit's split is `None` today, by construction: the command replays one query
+at a time with no deadline (that is deliberate — it exists to measure what the
+model costs), so nothing there ever waits. It prints "not measured" rather than
+two zeros, because a healthy 0 ms and an unmeasured queue are different facts. A
+busy refusal *is* metered: 250 ms of waiting to judge nothing is the most expensive
+thing this stage can do to a recall, and leaving it out would make a host that
+refuses every call look cheaper than one that answers slowly.
+
+#### Tests added (14)
+
+| test | pins |
+|---|---|
+| `a_saturated_pool_refuses_a_caller_at_its_deadline` | refusal at the budget, and the refusing caller never entered a session |
+| `a_session_that_frees_in_time_is_used_rather_than_refused` | waiting is honoured *and* reported: the waiter's `queued` is the holder's remaining hold |
+| `a_panicking_score_gives_its_session_back` | the token outlives a panic; the pool does not shrink |
+| `a_stage_that_cannot_get_a_session_is_skipped_as_a_deadline` | busy is `skipped`/`deadline` to the client, `busy` in the trace, and judged nothing |
+| `a_second_recall_does_not_queue_behind_a_busy_session` | the concurrency case: one acquisition, one head judged — the exact form of "it did not queue" |
+| `a_head_finished_part_way_is_applied_and_the_tail_keeps_its_order` | a partial leg reorders the judged prefix and leaves the tail as fusion ordered it |
+| `a_leg_that_gives_up_stops_at_the_next_chunk_boundary` | at most one run of work is spent after the caller walks away |
+| `one_judged_candidate_is_a_skip_rather_than_an_applied_of_one` | the floor of two, so the trace never claims a reorder that cannot exist |
+| `runs_are_a_yield_point_and_not_a_change_to_the_ranking` | chunked and unchunked legs are identical candidate for candidate |
+| `scoring_the_head_in_runs_returns_the_same_scores_as_one_call` | the same claim on the real model (`--ignored`) |
+| `a_busy_skip_says_exactly_what_a_slow_one_says` | invariant 3.5 from the transport side: same JSON, same four keys |
+| `a_busy_rerank_reaching_the_transport_looks_like_any_internal_error` | busy at the transport adds nothing a client can observe |
+| `a_refused_session_is_not_reported_as_having_run_out_of_time` | the audit's vocabulary: `busy` and `deadline` are different rows |
+| `a_metered_deadline_call_keeps_queue_and_inference_apart` | the split survives into the audit's samples, and the deadline-free path says `None` |
+
+The five timing-sensitive ones among them read what the leg *did* rather than what
+a clock said it should have done by now: `judged` comes from the trace and the
+expectations are built from it, a counter owned by a detached thread is waited for
+(`waits_for`), and "nobody queued" is an acquisition count rather than an elapsed
+time. Written the other way — "two 40 ms runs fit a 90 ms budget", and asserting a
+refusal the instant `execute_traced` returns — they passed alone and failed the
+first time the suite ran with the other five test binaries competing for the CPU.
+That is a measurement error in the test, and it is now the kind that cannot come
+back quietly.
+
+#### Blocked on the field host
+
+Two halves of this phase cannot be done from a checkout, and neither is
+approximated here. Both need the deployed machine, which is the operator's:
+
+- **1.1 — `mode = "off"`, and the p50/p95 before and after.** Still owed, and the
+  expected direction is the plan's (105–568 ms → ~10–25 ms, ~1.5 GiB RSS freed).
+  Two ways to get the number, both from the server's own timing rather than a
+  client's clock: sample `took_ms` from the response over N searches of a query the
+  operator really asks, once on the current config and once after the flip; or run
+  `recall audit --config on.toml --compare-config off.toml --queries F`, which
+  prints a "recall latency: … vs …" line for both columns in one pass and writes
+  nothing. `took_ms` is a response field, not a log line, so there is no third way
+  through `journalctl`.
+- **1.5 — three concurrent recalls, and what `queued_ms` says.** The R1 hypothesis
+  ("cost per pair grew 34 → 120 ms because abandoned work accumulated") has an
+  answer now, and it is one command rather than an inference. Run the daemon with
+  `RUST_LOG=debug`, fire three searches at once, and read the stage's lines:
+
+  | What to read | Under 1.2–1.3 it should say | If instead it says |
+  |---|---|---|
+  | `rerank_leg` (debug, one per leg that judged something) | `queued_ms` ≈ 0, `inference_ms` ≈ a full head — this is the caller that got the session | a large `queued_ms`: sessions are fewer than the recall wants |
+  | `rerank leg failed …` (warn) × 2 | `busy=true`, `queued_ms` ≈ the whole budget, `inference_ms=0` — refused, having scored nothing | `inference_ms` above 0: the stage is still doing work nobody waits for, so R1's mechanism survives and this phase is wrong about it |
+
+  Then set `max_concurrency = 2` and fire three again: the third caller's
+  `queued_ms` should be roughly one head, which is the queue itself rather than the
+  refusal — the number the sizing recipe in `docs/configuration.md` multiplies.
+  Whether *this* is what turned 34 ms into 120 ms on the field host can only be
+  answered on the field host, so R1 stays neither confirmed nor refuted until
+  someone reads these lines there.
+
+The corresponding DoD boxes ("field host on `mode = off`", "concurrency measurement
+recorded") are left unticked for the same reason Task 0.9's is: the code and the
+measurement path exist, the measurement does not.
+
+#### Deviations from the task text (all deliberate, none silent)
+
+- **1.2 — "token channel used as a semaphore".** An `mpsc::Receiver` is not `Sync`,
+  so the channel version of a semaphore has to put the receiver behind a mutex, and
+  then every waiter's timeout lives under one lock: two callers whose deadlines
+  expire together contend on the mutex rather than on the token, and the code has a
+  lock-ordering question where it should have none. It is a `VecDeque` of free
+  indices under a `Mutex` with a `Condvar` (`wait_timeout_while`) — same semantics,
+  tokens index sessions, `Session::drop` returns the token including on a panic, and
+  sessions stay `Mutex<T>` so exclusivity is typed twice rather than once.
+- **1.2 — `score_before` returns `RerankScored`, not `Vec<f32>`.** 1.5 asks for the
+  queue and the inference apart, and only the pool can see the queue: the alternative
+  was to change this signature twice in one phase. The default implementation still
+  does exactly what the task's version did — call `score`, never report busy — and
+  reports the whole call as inference, because for a model with no pool that *is*
+  the true answer.
+- **1.3 — "sends `(offset, scores)`".** Sends scores only. One worker scores the
+  runs in order over an ordered channel, so the receiver's own counter is the
+  offset; carrying a number that is already implied is a second source of truth to
+  disagree with the first.
+- **1.3 — partial application does not extend to model errors.** The task says the
+  prefix is applied at a deadline, and it is; a *model* failure mid-leg still
+  reports `skipped`/`model`. Applying a third of a broken model's head would turn
+  the one reason an operator can act on into an `applied` that looks healthy.
+- **1.4 — the counters exist, and are zero here by construction.** A replay of one
+  query at a time with no deadline cannot produce a busy row, and `skipped_busy`
+  reports 0 for it. It is counted rather than assumed away, in the words the
+  existing `skipped_deadline` row already uses, because the mapping is where the
+  misreading would live: a report that calls a session shortage "ran out of time"
+  sends the operator to `timeout_ms`, the one setting that cannot help. What the
+  task's "counters" did *not* get is a `partial` counter: a partial leg is already
+  `judged < depth` on the wire, in the trace, and in `rerank_candidates_low`, so a
+  counter for it would need a new `Applied::complete` field with no reader until
+  someone builds a deadline-aware audit. Recorded in §16 instead.
+- **1.5 — the audit's split is `None` today.** Same reasoning: deadline-free replay,
+  nothing to wait for. It prints "not measured" rather than two zeros, and a busy
+  refusal — the one call that could report a queue — is metered as a call, since
+  leaving it out would make a refusing host look cheaper than a slow one.
+- **Tests: no clock is trusted with an assertion.** How many candidates were judged
+  is read back from the trace and the expectation is built from that; the counters a
+  detached scoring thread owns are waited for; the concurrency test gates on the
+  first caller actually holding the session and proves "it did not queue" with an
+  acquisition count. The first version of these tests assumed intervals
+  ("two 40 ms runs fit a 90 ms budget") and asserted a refusal the instant the
+  request returned; it passed alone and failed with five other test binaries on the
+  same four cores.
+- **1.6 — five more pages than the task named.** `docs/deployment.md`, `docs/api.md`,
+  `docs/sdk-python.md`, `docs/evaluation.md` and the example config all stated the
+  behaviour this phase removed — "the head is scored in one call", "the stage is
+  dropped and the pre-rerank order is served", a `depth = 3` sizing recipe that is
+  now unnecessary. Leaving them would have made the phase's own docs change a
+  contradiction.
+
+#### Note for whoever next runs the whole suite
+
+`tests/identity_isolation.rs::scopes_are_carried_from_the_key_that_authenticated`
+failed once, in one full-suite run of this phase, with the daemon answering 401 for
+a profile the test had just written. It passed 5/5 isolated and the full suite
+passed on every other run here, including the final `check-native`. It is
+load-sensitive and unrelated to anything in this phase (no code path touched here is
+in its stack); recorded so the next failure is not read as Phase 1 fallout.
 
 ### Phase 2 — relevance affinity
 - δ grid (eval + audit): _TBD_ · chosen δ and rationale: _TBD_
