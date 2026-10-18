@@ -152,6 +152,13 @@ result moved, and the run ends with the share of queries whose top result
 changed, mean rank displacement, p50/p95 rerank latency, and p@1 / MRR before
 vs after for the queries that carried an `expect`.
 
+That latency line has a companion reporting the wait for a session and the model
+time apart, because a p95 made of queueing and a p95 made of inference are fixed
+with different settings. It says so when there is no split to print: the audit
+replays with no deadline on purpose, so nothing in it ever waits, and "not
+measured" is a different fact from a healthy zero. The daemon's log carries both
+halves for every real request that is worth reading.
+
 Two of those columns get read backwards often enough to be worth saying here.
 
 **`contributed` counts the queries whose *after* column really is reranked.**
