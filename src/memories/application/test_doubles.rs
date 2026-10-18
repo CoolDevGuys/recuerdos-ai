@@ -16,7 +16,7 @@ use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
 use crate::memories::domain::recall_ranker::RecallRanker;
-use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, RerankScored, Reranker};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::{Clock, FixedClock};
@@ -846,15 +846,10 @@ impl Reranker for ChunkedReranker {
         Ok(self.judge(candidates))
     }
 
-    fn score_before(
-        &self,
-        _query: &str,
-        candidates: &[RerankCandidate<'_>],
-        _deadline: Instant,
-    ) -> Result<Vec<f32>> {
-        Ok(self.judge(candidates))
-    }
-
+    // `score_before` is left to the trait's default on purpose: this double has
+    // no session to wait for, so "score it, and whatever it took was inference"
+    // is the true answer, and the default is the thing being tested by the legs
+    // that use it.
     fn preferred_chunk(&self) -> Option<usize> {
         Some(self.chunk)
     }
@@ -952,17 +947,25 @@ impl Reranker for BusyReranker {
         _query: &str,
         candidates: &[RerankCandidate<'_>],
         deadline: Instant,
-    ) -> Result<Vec<f32>> {
+    ) -> Result<RerankScored> {
         // Spelled out rather than reused from `score`, because the whole
         // point is the path that does *not* wait: this must never block on
-        // the mutex indefinitely.
+        // the mutex indefinitely. The timings mirror the adapter's, since a
+        // double that reported the shape of the fault without its cost would
+        // let a test pass that the real pool's numbers would not support.
         let asked_at = Instant::now();
         loop {
             if let Ok(_held) = self.session.try_lock() {
                 self.acquired.fetch_add(1, Ordering::SeqCst);
+                let queued = asked_at.elapsed();
+                let judging = Instant::now();
                 std::thread::sleep(self.inference);
                 self.judged.fetch_add(1, Ordering::SeqCst);
-                return Ok(vec![0.0; candidates.len()]);
+                return Ok(RerankScored {
+                    scores: vec![0.0; candidates.len()],
+                    queued,
+                    inferred: judging.elapsed(),
+                });
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {

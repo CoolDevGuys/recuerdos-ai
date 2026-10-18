@@ -82,7 +82,7 @@ use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, 
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{RerankStrategy, ScoredMemory};
-use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
+use crate::memories::domain::reranker::{RerankCandidate, RerankMode, RerankScored, Reranker};
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use crate::shared::sqlite::SqliteDatabase;
@@ -90,7 +90,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Content shown per result in the terminal. Wide enough to identify a
 /// memory at a glance, short enough that a line does not wrap and turn a
@@ -335,6 +335,19 @@ pub struct AuditSummary {
     pub rerank_candidates_high: Option<usize>,
     pub rerank_ms_p50: Option<f64>,
     pub rerank_ms_p95: Option<f64>,
+    /// The same latency again, split into waiting for a session and judging.
+    ///
+    /// Only calls that could tell the two apart contribute (`RerankScored`), so
+    /// a deadline-free replay — this command today — reports `None`. That is the
+    /// honest answer: there was no queue, and a `0.0` would read as a measured
+    /// idle host rather than as a run that never had a session to wait for. Where
+    /// they *are* present, they are the whole point of the run: p95 of 300 ms with
+    /// an inference p95 of 40 ms is a host that needs more sessions, and raising
+    /// `timeout_ms` for it would only make the recall slower.
+    pub rerank_queued_ms_p50: Option<f64>,
+    pub rerank_queued_ms_p95: Option<f64>,
+    pub rerank_inference_ms_p50: Option<f64>,
+    pub rerank_inference_ms_p95: Option<f64>,
     /// Queries carrying `expect` — the denominator of the four figures below.
     pub expectations: usize,
     /// 0–100 over `expectations`. `None` when no query had one, because an
@@ -892,6 +905,12 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
     let top1_changed = rows.iter().filter(|row| row.top1_changed).count();
     let expected: Vec<&QueryAudit> = rows.iter().filter(|row| row.expect.is_some()).collect();
     let judged: Vec<f64> = timings.iter().map(|call| call.candidates as f64).collect();
+    let millis: Vec<f64> = timings.iter().map(|call| call.millis).collect();
+    // Only the calls that had a session to wait for are in these two. An empty
+    // `Vec` gives `percentile` nothing to do, which is how "this replay ran
+    // deadline-free" reaches the report as `None` instead of as a suspicious 0.
+    let queued_ms: Vec<f64> = timings.iter().filter_map(|call| call.queued_ms).collect();
+    let inferred_ms: Vec<f64> = timings.iter().filter_map(|call| call.inferred_ms).collect();
 
     AuditSummary {
         queries,
@@ -910,14 +929,12 @@ fn summarise(rows: &[QueryAudit], timings: &[Call]) -> AuditSummary {
         not_needed: rows.iter().filter(|row| row.died_at("not-needed")).count(),
         rerank_candidates_low: percentile(&judged, 0.0).map(|value| value as usize),
         rerank_candidates_high: percentile(&judged, 100.0).map(|value| value as usize),
-        rerank_ms_p50: percentile(
-            &timings.iter().map(|call| call.millis).collect::<Vec<_>>(),
-            50.0,
-        ),
-        rerank_ms_p95: percentile(
-            &timings.iter().map(|call| call.millis).collect::<Vec<_>>(),
-            95.0,
-        ),
+        rerank_ms_p50: percentile(&millis, 50.0),
+        rerank_ms_p95: percentile(&millis, 95.0),
+        rerank_queued_ms_p50: percentile(&queued_ms, 50.0),
+        rerank_queued_ms_p95: percentile(&queued_ms, 95.0),
+        rerank_inference_ms_p50: percentile(&inferred_ms, 50.0),
+        rerank_inference_ms_p95: percentile(&inferred_ms, 95.0),
         expectations: expected.len(),
         precision_at_1_before: mean_credential(&expected, |row| {
             (row.expected_before == Some(1)).then_some(1)
@@ -968,6 +985,17 @@ pub(crate) struct MeteredReranker {
 pub(crate) struct Call {
     pub(crate) millis: f64,
     pub(crate) candidates: usize,
+    /// The two halves of `millis`, for a call that could tell them apart.
+    ///
+    /// `None` is this command's ordinary shape: it replays with no deadline (see
+    /// [`QueryAudit::contributed`]), so the leg scores the head on its own thread
+    /// and there was no session to wait for. The fields exist because a run that
+    /// *did* use the deployment's deadline — or one that replays queries
+    /// concurrently, which is how the 34 → 120 ms drift is meant to be measured —
+    /// has to say whether its p95 is a slow model or a queue. Those two sentences
+    /// end in different settings, and a single `millis` cannot tell them apart.
+    pub(crate) queued_ms: Option<f64>,
+    pub(crate) inferred_ms: Option<f64>,
 }
 
 impl MeteredReranker {
@@ -987,21 +1015,81 @@ impl MeteredReranker {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// One sample, recorded the same way whichever path the leg took.
+    fn record(&self, millis: f64, candidates: usize, split: Option<(Duration, Duration)>) {
+        let (queued_ms, inferred_ms) = match split {
+            Some((queued, inferred)) => (
+                Some(queued.as_secs_f64() * 1000.0),
+                Some(inferred.as_secs_f64() * 1000.0),
+            ),
+            None => (None, None),
+        };
+        self.calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Call {
+                millis,
+                candidates,
+                queued_ms,
+                inferred_ms,
+            });
+    }
 }
 
 impl Reranker for MeteredReranker {
     fn score(&self, query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
         let started = Instant::now();
         let scores = self.inner.score(query, candidates)?;
-        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        self.calls
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Call {
-                millis: elapsed,
-                candidates: candidates.len(),
-            });
+        // No split to report: this is the deadline-free path, where the leg was
+        // never handed a session it might have had to wait for. Saying `None`
+        // rather than `0` is what keeps "nothing to wait for" distinct from
+        // "waited for nothing".
+        self.record(
+            started.elapsed().as_secs_f64() * 1000.0,
+            candidates.len(),
+            None,
+        );
         Ok(scores)
+    }
+
+    /// The deadline-aware path, metered as well — and the only one that can
+    /// report the queue and the inference apart, because it is the only one
+    /// where there was a session to wait for.
+    ///
+    /// A refusal is a sample too. It cost the request its whole budget and
+    /// judged nothing, which is the most expensive thing a rerank stage can do
+    /// to a recall; leaving it out of `rerank_calls` would let a host refusing
+    /// every call look cheaper than one that answers slowly.
+    fn score_before(
+        &self,
+        query: &str,
+        candidates: &[RerankCandidate<'_>],
+        deadline: Instant,
+    ) -> Result<RerankScored> {
+        let asked_at = Instant::now();
+        let answer = match self.inner.score_before(query, candidates, deadline) {
+            Ok(answer) => answer,
+            Err(RaError::RerankBusy(waited)) => {
+                self.record(
+                    asked_at.elapsed().as_secs_f64() * 1000.0,
+                    candidates.len(),
+                    Some((waited, Duration::ZERO)),
+                );
+                return Err(RaError::RerankBusy(waited));
+            }
+            Err(error) => return Err(error),
+        };
+        self.record(
+            asked_at.elapsed().as_secs_f64() * 1000.0,
+            candidates.len(),
+            Some((answer.queued, answer.inferred)),
+        );
+        Ok(answer)
+    }
+
+    fn preferred_chunk(&self) -> Option<usize> {
+        self.inner.preferred_chunk()
     }
 }
 
@@ -1237,6 +1325,26 @@ pub fn print_human(report: &AuditReport) {
         _ => println!(
             "rerank latency: not measured — the after side ran its stage {} times (nothing to reorder below 2 candidates)",
             summary.rerank_calls
+        ),
+    }
+    // The latency above, in the two halves a remedy is chosen by. Printed even
+    // when it is empty, because the absence is the finding: an operator looking
+    // for the queue needs to be told this replay could not have one, rather than
+    // concluding from a missing line that the queue was short.
+    match (
+        summary.rerank_queued_ms_p50,
+        summary.rerank_queued_ms_p95,
+        summary.rerank_inference_ms_p50,
+        summary.rerank_inference_ms_p95,
+    ) {
+        (Some(queued_p50), Some(queued_p95), Some(inferred_p50), Some(inferred_p95)) => println!(
+            "   split: queue p50 {:.0} / p95 {:.0} ms   inference p50 {:.0} / p95 {:.0} ms \
+             (queue high and inference low is `[rerank].max_concurrency`, not `timeout_ms`)",
+            queued_p50, queued_p95, inferred_p50, inferred_p95
+        ),
+        _ => println!(
+            "   split: not measured — this replay ran with no deadline, so no call had a \
+             session to wait for (the daemon's own log reports both halves per request)"
         ),
     }
     // The pair a config change is judged on: the same queries, the same store,
@@ -1730,6 +1838,76 @@ mod tests {
             Some("skipped-deadline"),
             "and must not call a stage that ran out of time busy"
         );
+    }
+
+    /// A reranker that *reports* a queue it did not wait through. The split has
+    /// to survive from [`RerankScored`] into the audit's sample, and a real
+    /// contended pool would turn that wiring check into a timing test.
+    struct SplitReranker {
+        queued: Duration,
+        inferred: Duration,
+    }
+
+    impl Reranker for SplitReranker {
+        fn score(&self, _query: &str, candidates: &[RerankCandidate<'_>]) -> Result<Vec<f32>> {
+            Ok(vec![0.0; candidates.len()])
+        }
+
+        fn score_before(
+            &self,
+            _query: &str,
+            candidates: &[RerankCandidate<'_>],
+            _deadline: Instant,
+        ) -> Result<RerankScored> {
+            Ok(RerankScored {
+                scores: vec![0.0; candidates.len()],
+                queued: self.queued,
+                inferred: self.inferred,
+            })
+        }
+    }
+
+    #[test]
+    fn a_metered_deadline_call_keeps_queue_and_inference_apart() {
+        let metered = MeteredReranker::new(Arc::new(SplitReranker {
+            queued: Duration::from_millis(200),
+            inferred: Duration::from_millis(40),
+        }));
+        let candidates = [
+            RerankCandidate {
+                id: MemoryId::new(),
+                text: "one",
+            },
+            RerankCandidate {
+                id: MemoryId::new(),
+                text: "two",
+            },
+        ];
+        metered
+            .score_before("q", &candidates, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+
+        let calls = metered.timings();
+        assert_eq!(calls.len(), 1, "the call should have been metered once");
+        let queued = calls[0]
+            .queued_ms
+            .expect("a deadline-aware call reports its queue");
+        let inferred = calls[0]
+            .inferred_ms
+            .expect("a deadline-aware call reports its inference");
+        assert!(
+            (queued - 200.0).abs() < 0.01 && (inferred - 40.0).abs() < 0.01,
+            "the split arrived as {queued} / {inferred}"
+        );
+
+        // And the deadline-free path says it does not know. A zero here would be
+        // a measurement of a queue that was never offered, and a report of 0 ms
+        // waiting reads as a healthy host rather than as an unmeasured one.
+        metered.score("q", &candidates).unwrap();
+        let calls = metered.timings();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].queued_ms, None);
+        assert_eq!(calls[1].inferred_ms, None);
     }
 
     #[test]

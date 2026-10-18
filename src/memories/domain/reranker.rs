@@ -47,7 +47,7 @@
 
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// One candidate for the reranker to judge: its id, and the text it is
 /// scored on. The id lets [`Reranker::score`] answers be aligned by
@@ -62,6 +62,40 @@ use std::time::Instant;
 pub struct RerankCandidate<'a> {
     pub id: MemoryId,
     pub text: &'a str,
+}
+
+/// What a scored call cost, in the two ways an operator can act on separately.
+///
+/// The pair exists because one elapsed time cannot tell a slow model from a busy
+/// host, and the two need different settings: `timeout_ms`/`depth` for the first,
+/// `max_concurrency` (or a quieter machine) for the second. It is also the pair
+/// reranking-plan §12 (part three) hypothesised but could not measure — the
+/// deployment whose cost per candidate went 34 → 120 ms could not say whether the
+/// model got slower or the calls got slower *waiting*, which is why Phase 1.5
+/// reports them apart instead of reporting `took_ms` and guessing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RerankScored {
+    /// One score per candidate, in the order they were given — the same
+    /// alignment contract [`Reranker::score`] carries.
+    pub scores: Vec<f32>,
+    /// Time between being asked and holding a session. Zero for an
+    /// implementation with no queue to wait for, which it says rather than
+    /// invents.
+    pub queued: Duration,
+    /// Time inside the model once it held one.
+    pub inferred: Duration,
+}
+
+impl RerankScored {
+    /// A whole-head answer from an implementation that cannot tell queueing from
+    /// judging: everything it spent was inference, because there was no queue.
+    fn all_inference(scores: Vec<f32>, took: Duration) -> Self {
+        Self {
+            scores,
+            queued: Duration::ZERO,
+            inferred: took,
+        }
+    }
 }
 
 /// A model that scores `(query, candidate)` pairs *together*.
@@ -95,16 +129,21 @@ pub trait Reranker: Send + Sync {
     /// it. Giving up before inference is what keeps abandoned work off the
     /// machine instead of merely off the response.
     ///
-    /// A model that cannot tell queueing from inference — the doubles, and
-    /// any implementation without a session pool — keeps the default, which
-    /// is [`score`](Self::score) and therefore never reports busy.
+    /// The answer carries the two halves of the cost separately
+    /// ([`RerankScored`]) because that is the only way a report can tell a
+    /// slow model from a busy one. A model that cannot make the distinction —
+    /// the doubles, and any implementation without a session pool — keeps the
+    /// default, which reports the whole call as inference and never reports
+    /// busy.
     fn score_before(
         &self,
         query: &str,
         candidates: &[RerankCandidate<'_>],
         _deadline: Instant,
-    ) -> Result<Vec<f32>> {
-        self.score(query, candidates)
+    ) -> Result<RerankScored> {
+        let started = Instant::now();
+        let scores = self.score(query, candidates)?;
+        Ok(RerankScored::all_inference(scores, started.elapsed()))
     }
 
     /// How many candidates to judge in one run, or `None` for "the head as

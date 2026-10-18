@@ -44,7 +44,7 @@
 //! silent fallback — "you asked for this model and we could not find it"
 //! must stop startup, like embeddings.
 
-use crate::memories::domain::reranker::{RerankCandidate, Reranker};
+use crate::memories::domain::reranker::{RerankCandidate, RerankScored, Reranker};
 use crate::shared::error::{RaError, Result};
 use fastembed::{
     RerankInitOptions, RerankInitOptionsUserDefined, RerankResult, RerankerModel, TextRerank,
@@ -139,9 +139,9 @@ impl Reranker for FastembedReranker {
         query: &str,
         candidates: &[RerankCandidate<'_>],
         deadline: Instant,
-    ) -> Result<Vec<f32>> {
+    ) -> Result<RerankScored> {
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok(RerankScored::default());
         }
 
         // The wait is bounded; the inference once a session is had is not —
@@ -149,14 +149,24 @@ impl Reranker for FastembedReranker {
         // would leave the session in an unknown state. What bounds *that* is
         // the head being scored in chunks (`preferred_chunk`), so the work
         // abandoned after a deadline is one chunk rather than the whole head.
-        let ranked = self
+        let asked_at = Instant::now();
+        let (ranked, queued) = self
             .pool
             .until(deadline, |model| self.judge(model, query, candidates))
             .map_err(|waited| match waited {
                 Waited::Busy(budget) => RaError::RerankBusy(budget),
                 Waited::Failed(error) => error,
             })?;
-        align_scores(ranked, candidates.len())
+        Ok(RerankScored {
+            scores: align_scores(ranked, candidates.len())?,
+            queued,
+            // Inference is what the call took once the queue was out of it,
+            // which is the number the sizing recipe in `docs/configuration.md`
+            // is multiplied by. Subtracting rather than timing the pass itself
+            // keeps `queued + inferred` equal to the call, so neither half can
+            // quietly drift into the other.
+            inferred: asked_at.elapsed().saturating_sub(queued),
+        })
     }
 
     /// The configured `[rerank].batch_size`: the run `fastembed` already
@@ -353,18 +363,28 @@ impl<T> InstancePool<T> {
     /// Runs `f` on one session, or returns busy when none frees by
     /// `deadline`. `Waited::Busy` says nothing was judged: the caller's
     /// budget went entirely on queueing.
+    ///
+    /// The `Duration` beside the value is how long that wait was. It is measured
+    /// here because nowhere else can say: a caller that only sees the total has
+    /// no way to tell 5 ms of queue under 245 ms of inference from 245 ms of
+    /// queue under 5 ms, and those two sentences describe different machines.
     fn until<R>(
         &self,
         deadline: Instant,
         f: impl FnOnce(&mut T) -> Result<R>,
-    ) -> std::result::Result<R, Waited> {
+    ) -> std::result::Result<(R, Duration), Waited> {
+        let asked_at = Instant::now();
         let mut session = match self.acquire_until(deadline) {
             Ok(session) => session,
             Err(budget) => return Err(Waited::Busy(budget)),
         };
+        let queued = asked_at.elapsed();
         // Whatever `f` does — score, error, or panic — the token is returned
         // by `Session::drop` before this frame is left.
-        session.with(f).map_err(Waited::Failed)
+        session
+            .with(f)
+            .map_err(Waited::Failed)
+            .map(|outcome| (outcome, queued))
     }
 
     fn acquire_blocking(&self) -> Session<'_, T> {
@@ -793,9 +813,17 @@ mod tests {
                 Ok("judged")
             });
 
+            let queued = match outcome {
+                Ok(("judged", queued)) => queued,
+                other => panic!("a waiting caller should have been served, got {other:?}"),
+            };
+            // The number 1.5 exists to report: it waited out roughly the 20 ms
+            // this holder had left, and said so. Reporting zero here would be
+            // reporting a busy host as an idle one, which is the misreading the
+            // 34 → 120 ms drift was hiding behind.
             assert!(
-                matches!(outcome, Ok("judged")),
-                "a waiting caller gave up early: {outcome:?}"
+                queued >= Duration::from_millis(15),
+                "the caller waited for a session and reported {queued:?}"
             );
             assert_eq!(
                 MAX.load(Ordering::SeqCst),
@@ -1014,11 +1042,24 @@ mod tests {
         let whole = reranker.score(question, &candidates).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut in_runs = Vec::new();
+        let mut waited = Duration::ZERO;
+        let mut judging = Duration::ZERO;
         for run in candidates.chunks(2) {
-            in_runs.extend(reranker.score_before(question, run, deadline).unwrap());
+            let answer = reranker.score_before(question, run, deadline).unwrap();
+            waited += answer.queued;
+            judging += answer.inferred;
+            in_runs.extend(answer.scores);
         }
 
         assert_eq!(in_runs.len(), whole.len());
+        // And the two halves of the cost add up to what they claim: nothing else
+        // wanted this pool, so nearly all of it should be the model, not a queue.
+        // The ratio is the assertion, because absolute inference latency is a
+        // property of the machine running the test.
+        assert!(
+            waited * 10 < judging,
+            "an idle pool reported {waited:?} of queue against {judging:?} of inference"
+        );
         for (position, (one, chunked)) in whole.iter().zip(&in_runs).enumerate() {
             assert!(
                 (one - chunked).abs() < 1e-6,

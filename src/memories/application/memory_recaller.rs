@@ -575,6 +575,13 @@ impl MemoryRecaller {
                     // "raise timeout_ms / lower depth" is bad advice for a
                     // host that never had a session to begin with.
                     busy = failure.busy,
+                    // And the two halves of the cost, which is how that line
+                    // can be checked instead of believed: a busy refusal reads
+                    // `queued_ms` ≈ the whole budget with `inference_ms` 0, a
+                    // slow model the other way round. Both say `deadline`, and
+                    // they are not the same machine.
+                    queued_ms = failure.queued.as_millis() as u64,
+                    inference_ms = failure.inferred.as_millis() as u64,
                     "rerank leg failed; falling back to the pre-rerank order"
                 );
                 return (
@@ -589,6 +596,23 @@ impl MemoryRecaller {
             }
         };
         let rerank_ms = started.elapsed().as_millis() as u64;
+        // The split for every leg, at a level nobody runs a host with turned on.
+        // It is here anyway because "am I queueing for the reranker?" is the
+        // first question a machine with `mode = on` asks, and on a healthy host
+        // the answer is in no warning — nothing is wrong, so nothing warns.
+        // `RUST_LOG=debug` makes the question answerable, which includes the
+        // three-concurrent-recall measurement Phase 1.5 asks for on a real box.
+        tracing::debug!(
+            name: "rerank_leg",
+            query_hash = %query_hash(query.text()),
+            judged = leg.scores.len(),
+            depth,
+            complete = leg.complete,
+            rerank_ms,
+            queued_ms = leg.queued.as_millis() as u64,
+            inference_ms = leg.inferred.as_millis() as u64,
+            "rerank stage finished"
+        );
         if !leg.complete {
             // The part that finished is applied, so this is not a failure and
             // the client sees `applied`. It is still a host that could not
@@ -599,13 +623,15 @@ impl MemoryRecaller {
                 judged = leg.scores.len(),
                 depth,
                 rerank_ms,
+                queued_ms = leg.queued.as_millis() as u64,
+                inference_ms = leg.inferred.as_millis() as u64,
                 "rerank leg applied the part of the head it finished before its deadline"
             );
         }
 
         if self.rerank_mode == RerankMode::Shadow {
             let changed =
-                self.log_shadow_comparison(query.text(), &ranked[..depth], &leg.scores, rerank_ms);
+                self.log_shadow_comparison(query.text(), &ranked[..depth], &leg, rerank_ms);
             return (
                 ranked,
                 Some(RerankTrace::Shadow {
@@ -668,14 +694,22 @@ impl MemoryRecaller {
                     text: scored.memory.content(),
                 })
                 .collect();
+            // No deadline, no thread, no queue to speak of: this call is made on
+            // the request's own thread and every millisecond of it is inference.
+            // `rerank audit` is the caller that lands here, which is precisely why
+            // it measures what the stage *costs* rather than what it waited.
+            let started = std::time::Instant::now();
+            let inferred = || started.elapsed();
             return reranker
                 .score(query, &candidates)
                 .and_then(|scores| align_positions(&ids, scores).map(order_best_first))
                 .map(|scores| RerankLeg {
                     scores,
                     complete: true,
+                    queued: Duration::ZERO,
+                    inferred: inferred(),
                 })
-                .map_err(RerankFailure::model);
+                .map_err(|error| RerankFailure::model(error).timed(Duration::ZERO, inferred()));
         }
 
         // A model with no opinion on run size is scored in one run, which is
@@ -721,6 +755,8 @@ impl MemoryRecaller {
         }
 
         let mut judged: Vec<(MemoryId, f32)> = Vec::with_capacity(head.len());
+        let mut queued = Duration::ZERO;
+        let mut inferred = Duration::ZERO;
         let mut next_run = 0usize;
         let mut interrupted: Option<RerankFailure> = None;
         loop {
@@ -729,9 +765,15 @@ impl MemoryRecaller {
             // and this side's own counter is the run index — no need to carry
             // it across the channel to find out which candidates these are.
             match receiver.recv_timeout(remaining) {
-                Ok(Ok(scores)) => {
+                Ok(Ok(answer)) => {
+                    // The split arrives per run and is summed here: a head whose
+                    // first run waited 200 ms for a session and whose second ran
+                    // clean is a queue story, and the sum is what the log line
+                    // has to say to be able to tell it that way.
+                    queued += answer.queued;
+                    inferred += answer.inferred;
                     let batch = &ids[next_run * chunk..ids.len().min((next_run + 1) * chunk)];
-                    match align_positions(batch, scores) {
+                    match align_positions(batch, answer.scores) {
                         Ok(pairs) => judged.extend(pairs),
                         Err(error) => {
                             interrupted = Some(RerankFailure::model(error));
@@ -748,14 +790,10 @@ impl MemoryRecaller {
                     break;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    interrupted = Some(RerankFailure {
-                        skip: RerankSkip::Deadline,
-                        busy: false,
-                        error: RaError::Internal(format!(
-                            "rerank exceeded its {} ms deadline",
-                            self.rerank_timeout.as_millis()
-                        )),
-                    });
+                    interrupted = Some(RerankFailure::deadline(RaError::Internal(format!(
+                        "rerank exceeded its {} ms deadline",
+                        self.rerank_timeout.as_millis()
+                    ))));
                     break;
                 }
                 // The scoring thread panicked (or died) rather than answering.
@@ -773,16 +811,24 @@ impl MemoryRecaller {
         stop.store(true, Ordering::SeqCst);
 
         let scores = order_best_first(judged);
-        match interrupted {
+        // The failures carry the accumulated split with them, which is the point
+        // of 1.5: a busy refusal arrives as "250 ms queued, 0 ms judged" and a
+        // slow model as "1 ms queued, 249 ms judged". Same `deadline` on the
+        // wire, opposite diagnoses.
+        match interrupted.map(|failure| failure.timed(queued, inferred)) {
             Some(failure) if failure.skip == RerankSkip::Model => Err(failure),
             Some(failure) if scores.len() < 2 => Err(failure),
             Some(_) => Ok(RerankLeg {
                 scores,
                 complete: false,
+                queued,
+                inferred,
             }),
             None => Ok(RerankLeg {
                 scores,
                 complete: true,
+                queued,
+                inferred,
             }),
         }
     }
@@ -805,7 +851,7 @@ impl MemoryRecaller {
         &self,
         query: &str,
         head: &[ScoredMemory],
-        leg: &[(MemoryId, f32)],
+        leg: &RerankLeg,
         rerank_ms: u64,
     ) -> bool {
         // The *tails* of the ids, not the heads: these are UUIDv7, whose
@@ -817,7 +863,7 @@ impl MemoryRecaller {
             id[id.len() - 8..].to_string()
         };
         let top1_before = short(head[0].memory.id());
-        let top1_after = short(leg[0].0);
+        let top1_after = short(leg.scores[0].0);
         let changed = top1_before != top1_after;
         tracing::info!(
             name: "rerank_shadow",
@@ -827,13 +873,28 @@ impl MemoryRecaller {
             // a leg cut off mid-head compares the top of the head with what the
             // stage managed to judge, and a reader who cannot see that number
             // cannot tell a disagreement from an unfinished look.
-            judged = leg.len(),
+            judged = leg.scores.len(),
             rerank_ms,
+            // Shadow mode is the mode an operator turns on to be told about the
+            // stage, so it gets the queue/inference split too: whether the
+            // second opinion is *slow* or merely *waiting* is the same question
+            // here as on a host serving the results.
+            queued_ms = leg.queued.as_millis() as u64,
+            inference_ms = leg.inferred.as_millis() as u64,
             top1_before = %top1_before,
             top1_after = %top1_after,
             changed,
-            before = %head.iter().map(|s| short(s.memory.id())).collect::<Vec<_>>().join(","),
-            after = %leg.iter().map(|(id, _)| short(*id)).collect::<Vec<_>>().join(","),
+            before = %head
+                .iter()
+                .map(|s| short(s.memory.id()))
+                .collect::<Vec<_>>()
+                .join(","),
+            after = %leg
+                .scores
+                .iter()
+                .map(|(id, _)| short(*id))
+                .collect::<Vec<_>>()
+                .join(","),
             "rerank_shadow",
         );
         changed
@@ -850,6 +911,13 @@ struct RerankFailure {
     /// the log and the audit counters say which.
     busy: bool,
     error: RaError,
+    /// What the leg had spent by the time it failed, if it had spent anything.
+    /// A model error after three judged runs is worth reporting with those
+    /// runs' cost, and a busy refusal reports its whole budget as queue and no
+    /// inference at all — which is the difference between "the model is slow"
+    /// and "there was no model to be had".
+    queued: Duration,
+    inferred: Duration,
 }
 
 impl RerankFailure {
@@ -860,6 +928,8 @@ impl RerankFailure {
             skip: RerankSkip::Model,
             busy: false,
             error,
+            queued: Duration::ZERO,
+            inferred: Duration::ZERO,
         }
     }
 
@@ -875,6 +945,8 @@ impl RerankFailure {
             skip: RerankSkip::Deadline,
             busy: true,
             error,
+            queued: Duration::ZERO,
+            inferred: Duration::ZERO,
         }
     }
 
@@ -885,6 +957,29 @@ impl RerankFailure {
             RaError::RerankBusy(_) => Self::busy(error),
             _ => Self::model(error),
         }
+    }
+
+    /// Out of time with a session asked for and, in the ordinary case, held:
+    /// the wire's `deadline`, and not busy. The stage was judging when the
+    /// budget ran out; a busy leg is the one that never started.
+    fn deadline(error: RaError) -> Self {
+        Self {
+            skip: RerankSkip::Deadline,
+            busy: false,
+            error,
+            queued: Duration::ZERO,
+            inferred: Duration::ZERO,
+        }
+    }
+
+    /// Stamps the cost the leg had already accumulated. Separate from the
+    /// constructors because they are written where the timings are not yet known,
+    /// and because a failure that reported `0 ms` of queue when nothing was
+    /// measured would be a number, not a measurement.
+    fn timed(mut self, queued: Duration, inferred: Duration) -> Self {
+        self.queued = queued;
+        self.inferred = inferred;
+        self
     }
 }
 
@@ -925,6 +1020,15 @@ fn order_best_first(mut leg: Vec<(MemoryId, f32)>) -> Vec<(MemoryId, f32)> {
 struct RerankLeg {
     scores: Vec<(MemoryId, f32)>,
     complete: bool,
+    /// Time the runs spent waiting for a session, and time spent judging.
+    ///
+    /// Carried up from [`Reranker::score_before`] because it can only be measured
+    /// where the session is handed out. `took_ms` on the trace is their sum plus
+    /// the leg's own bookkeeping, and it is the only one of the three the client
+    /// sees; these two are what tells an operator whether the model is slow or
+    /// the host is contended.
+    queued: Duration,
+    inferred: Duration,
 }
 
 // Invariant, held by `rerank_scores`: `scores` has at least two entries. A leg
