@@ -97,18 +97,31 @@
 //! gap nearer than about 60 ranks** — nearly a whole result list, not a large
 //! gap. So "bounded by 0.5" is not what keeps relevance from becoming the
 //! primary sort key, and any doc comment that claimed it was is wrong arithmetic
-//! rather than a wide band. What keeps it honest is the grid, and the grid chose
-//! [`DEFAULT_RELEVANCE_WEIGHT`] = 0.05 on the age-aware eval: precision@1
-//! 50.0 → 53.8, MRR 63.9 → 66.6, everything else unmoved, no case losing its top
-//! hit. That is a near-tie-sized influence: the maximum relevance gap at 0.05
-//! reverses rank 1 against rank 4 and no further (rank 5 would need 0.062).
-//! The curve rose all the way to the ceiling (+9.6 p@1 at 0.2, +17.3 at 0.5) with
-//! nothing regressing, and the larger values were left unshipped because this
-//! corpus rewards relevance partly by construction — its expected memories are
-//! the topically nearest ones — so a monotone line says little about δ once it is
-//! large enough to move ranks rather than ties. §17 of the plan carries the
-//! table; the instrument that could change the answer is `recall audit` over a
-//! real store.
+//! rather than a wide band. What keeps it honest is measurement, and there are
+//! now two independent ones behind [`DEFAULT_RELEVANCE_WEIGHT`] = 0.5.
+//!
+//! On the age-aware eval, against the baseline δ = 0.05 this replaces: precision@1
+//! 53.8 → 67.3, MRR 68.4 → 75.9, recall@5 87.2 → 87.8, complete@5 and abstention
+//! unchanged. Against δ = 0 on that corpus the ladder reads +17.3 precision@1. On a
+//! deployed personal store — 18 questions written by the person whose memories they
+//! are, replayed by `scripts/field-measure.sh` against the shipped binary with the
+//! rerank stage off — precision@1 goes 27.8 → 50.0 and MRR 47.7 → 63.4 over the same
+//! range. On neither instrument did anything holding first place ever lose it, at
+//! any δ.
+//!
+//! Phase 2 shipped 0.05 instead, with the ceiling in view, and the reason is worth
+//! keeping next to the changed number: this corpus rewards relevance partly by
+//! construction (its expected memories are the topically nearest ones), so a
+//! monotone line says little about δ once it is large enough to move ranks rather
+//! than ties. That caution was tested rather than dropped, and the field store —
+//! data nobody wrote for the test — read the same way. What neither instrument
+//! settles is the one structural consequence of a δ this size: affinity is applied
+//! before truncation, so it moves the top-`limit` *window* and not only the order
+//! inside it. Both instruments saw that movement go towards better answers (the
+//! field store's complete@5 rose 83.3 → 88.9 between δ = 0 and 0.05), which is a
+//! measurement and not a guarantee — so the audit command, not this comment, is what
+//! an operator should trust on their own store. §17 of the plan carries both tables
+//! and the readings that could still reverse this.
 //!
 //! Because affinity is already multiplied into `score` when the rerank stage
 //! recovers each candidate's band, the rerank leg lands *inside* it: a second
@@ -881,23 +894,43 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.25;
 /// by any amount. That is what every eval baseline before Phase 2 was recorded
 /// with, and what a deployment that wants the pre-Phase-2 order should set.
 ///
-/// **`0.05`** is the grid's choice (plan §17). On the age-aware eval it puts
-/// precision@1 at 50.0 → 53.8 and MRR at 63.9 → 66.6 with recall@5,
-/// complete@5 and abstention unmoved, and no case losing its top hit; two cases
-/// gained one, both of them exactly the call this phase exists for — a newer,
-/// weaker match sitting above a memory that answered better.
+/// **`0.5`** is what the two instruments agreed on (plan §17). Against the baseline
+/// this replaces (δ = 0.05, same build, re-recorded in `eval/baseline.json`):
+/// precision@1 53.8 → 67.3 and MRR 68.4 → 75.9, with recall@5 up slightly
+/// (87.2 → 87.8), complete@5 unchanged at 84.6, abstention unchanged at 100.0, and
+/// no kind's precision@1 falling — four rose (`near-miss` 57.1 → 100.0,
+/// `statement` 25.0 → 75.0, `needle` 33.3 → 66.7, `nl-category` 50.0 → 62.5).
+/// Against δ = 0 on the same corpus the ladder reads +17.3 precision@1, rising
+/// monotonically over 0.05 / 0.2 / 0.3 / 0.5 with nothing regressing at any step.
 ///
-/// The curve kept climbing past here (+9.6 p@1 at δ = 0.2, +17.3 at 0.5) with
-/// nothing regressing, and the higher values were *not* shipped, for two reasons
-/// that belong next to the number. First, the eval favours relevance somewhat by
-/// construction — its expected memories are the topically nearest ones — so a
-/// monotone curve is weak evidence about large δ; the instrument that could
-/// falsify it, `recall audit` over a real store with the operator's own `expect`
-/// file, is still outstanding. Second, at 0.2 relevance can overrule a ten-rank
-/// gap (the table above), which is a different pipeline from the one this project
-/// ranks with. Raising the default is a measurement away, not a re-reading of
-/// this curve.
-pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.05;
+/// Two things that is not claiming, both worth keeping beside the number. Affinity
+/// is applied **before** the list is cut to `limit`, so a δ this large moves which
+/// memories are in the window as well as their order — on both instruments it moved
+/// towards better answers (the field store's complete@5 rose 83.3 → 88.9 between
+/// δ = 0 and 0.05), but that is a measurement rather than a guarantee, and
+/// `recall audit` is how you check it on yours. And δ cannot move abstention at all:
+/// the floor compares [`ScoredMemory::relevance`] while this multiplies `score`,
+/// which is why 100.0 survived every value in the ladder.
+///
+/// It was not shipped on the eval alone, and that restraint was the right call when
+/// it was made: Phase 2 left the ceiling unshipped because this corpus rewards
+/// relevance partly by construction — its expected memories are the topically
+/// nearest ones — so a monotone line says little about δ once it is big enough to
+/// move ranks rather than ties. The instrument that could falsify that caution was
+/// `scripts/field-measure.sh`: 18 real questions written by the owner of the store
+/// they query, replayed against that store on the shipped binary with the rerank
+/// stage off. It read the same direction with a larger effect (p@1 27.8 → 38.9 →
+/// 44.4 → 50.0 across δ = 0 / 0.05 / 0.2 / 0.5, MRR 47.7 → 63.4) and, on both
+/// instruments, no query ever lost first place at any value.
+///
+/// Which is how a default sits at the top of the permitted range `0.0..=0.5`
+/// rather than below it. That shape is deliberate. The ceiling is not a safety
+/// margin but the point the table above identifies — at δ = 0.5 the largest
+/// relevance gap can reverse a sixty-rank separation, which is nearly a whole
+/// result list, i.e. relevance as primary sort key. Reaching past it is a
+/// different pipeline rather than a bigger number, so exploring beyond this
+/// requires arguing for a new bound instead of nudging one.
+pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.5;
 
 /// The relevance credited to a memory that entered recall *only* through a
 /// graph hop.
