@@ -53,8 +53,61 @@
 //! already did. That property is pinned by a test below; anything that
 //! adds a fourth signal should join this band, not open another.
 //!
-//! Relevance leads; recency and quality break ties among comparably
-//! relevant results. All of it is pinned by tests below.
+//! # Why relevance finally gets a multiplier, and how wide it may be
+//!
+//! Relevance used to be reported, thresholded, and nothing else: it was
+//! computed after fusion and never entered the score, so a memory that matched
+//! the question *better* lost every close call to one that happened to be a day
+//! newer. `affinity` gives it a voice, in the shape the other two signals
+//! already use — a bounded multiplier:
+//!
+//! ```text
+//! affinity(r) = 1 − δ · (1 − r)        δ = [retrieval].relevance_weight ∈ [0, 0.5]
+//! score'      = score × affinity(relevance)
+//! ```
+//!
+//! How wide δ may go is the same calibration question the other bands answer,
+//! and the answer here is less comfortable than theirs. Read δ as the *spread*
+//! relevance is allowed across, and compare it with RRF's spacing at `k = 60`
+//! (the gap between two memories ranked like this on both legs):
+//!
+//! | Rank gap | How far apart | Largest δ that cannot reverse it |
+//! |---|---|---|
+//! | rank 1 vs 2 | 1.6% | 0.016 |
+//! | rank 1 vs 5 | 6.6% | 0.061 |
+//! | rank 1 vs 10 | 14.8% | 0.129 |
+//! | rank 1 vs 20 | 31.1% | 0.238 |
+//! | rank 1 vs 60 | 96.7% | 0.492 |
+//!
+//! The last column is `1 − 1/R` for gap ratio `R`, and it assumes the worst
+//! pair the range allows: the better-ranked memory at relevance `0`, the
+//! worse-ranked one at `1`. Real lists are kinder, because the floor has
+//! usually removed the bottom of the relevance range before affinity sees it.
+//!
+//! The comparison is asymmetric in one more way, and it favours relevance more
+//! than the half-life suggests. Recency's own multiplier is
+//! [`MULTIPLIER_FLOOR`]-bounded, so a day of age is worth 0.15% of a score here,
+//! not the 0.77% raw decay implies, and no age whatsoever is worth more than the
+//! band's 1.25×. Affinity gets its full `δ · Δr`. In a personal store, where the
+//! memories competing for a rank are days apart rather than years, δ is therefore
+//! doing more work per point than the table's rank gaps imply — which is a second
+//! reason the grid, not the bound, is what picks the value.
+//!
+//! Which says out loud what the ceiling is really for: **δ = 0.5 overrules any
+//! gap nearer than about 60 ranks** — nearly a whole result list, not a large
+//! gap. So "bounded by 0.5" is not what keeps relevance from becoming the
+//! primary sort key, and any doc comment that claimed it was is wrong arithmetic
+//! rather than a wide band. What keeps it honest is the grid: the shipped value
+//! is the largest relevance effect the eval and the audit actually pay for,
+//! which lands where relevance decides *near-ties* — the same-rank and
+//! near-adjacent calls recency and quality decide alone today — and leaves a gap
+//! the legs genuinely disagree about alone. [`DEFAULT_RELEVANCE_WEIGHT`] carries
+//! that number and the measurement that chose it.
+//!
+//! Relevance leads; recency and quality break ties among comparably relevant
+//! results. Since Phase 2 the first clause is arithmetic rather than aspiration:
+//! relevance is in the score, not only in the report. All of it is pinned by
+//! tests below.
 //!
 //! # Second stage: the rerank leg (reranking-plan.md Phase 4)
 //!
@@ -270,10 +323,21 @@ pub struct RecallRanker {
     /// every path until a reranker is wired — so the knob alone changes
     /// nothing today.
     rerank_strategy: RerankStrategy,
-    /// How the legs' raw signals are read as relevance. Used only for the
-    /// `relevance` field — the ranking above does not consult it, which is
-    /// what keeps this knob from being able to reorder anything.
+    /// How the legs' raw signals are read as relevance.
+    ///
+    /// This decides the *number*; what decides its weight in the order is
+    /// [`relevance_weight`](Self::relevance_weight), which turns it into a
+    /// bounded multiplier after fusion. The fusion itself never consults either,
+    /// so recalibrating the scale still cannot quietly become a re-ranker: the
+    /// most a different baseline can do is move `relevance`, and δ is what
+    /// decides how far that moves a result.
     relevance: RelevanceCalibration,
+    /// Weight on relevance as a third bounded multiplier, in `0.0..=0.5`
+    /// (Task 2, `[retrieval].relevance_weight`). Inert until
+    /// [`apply_relevance`](Self::apply_relevance) is called — a ranker that
+    /// fuses and never applies relevance orders exactly as it did before this
+    /// knob existed.
+    relevance_weight: f32,
 }
 
 impl RecallRanker {
@@ -289,6 +353,7 @@ impl RecallRanker {
             graph_unanchored_floor: DEFAULT_GRAPH_UNANCHORED_FLOOR,
             rerank_strategy: RerankStrategy::default(),
             relevance: RelevanceCalibration::default(),
+            relevance_weight: DEFAULT_RELEVANCE_WEIGHT,
         }
     }
 
@@ -299,6 +364,20 @@ impl RecallRanker {
     /// recalibration cannot quietly change which memory comes first.
     pub fn with_relevance_calibration(mut self, relevance: RelevanceCalibration) -> Self {
         self.relevance = relevance;
+        self
+    }
+
+    /// Sets how strongly relevance counts inside the bounded bands
+    /// (`[retrieval].relevance_weight`, applied by
+    /// [`apply_relevance`](Self::apply_relevance)).
+    ///
+    /// Defaults to [`DEFAULT_RELEVANCE_WEIGHT`]. Zero is not a small weight but a
+    /// separate path — the apply step returns before touching the list — so a
+    /// build that never sets this knob cannot reorder anything even through a
+    /// rounding error. The module docs' table is what says what each part of the
+    /// range costs; the range itself is validated in `[retrieval]`.
+    pub fn with_relevance_weight(mut self, weight: f32) -> Self {
+        self.relevance_weight = weight;
         self
     }
 
@@ -440,6 +519,50 @@ impl RecallRanker {
         sort_ranked(&mut scored);
 
         scored
+    }
+
+    /// Lets relevance compete with recency and quality inside the fused bands
+    /// (recall-quality-plan.md Phase 2).
+    ///
+    /// `score ×= affinity(relevance)` for every candidate, then re-sort. The
+    /// multiplier spans `[1 − δ, 1]`, so it can decide a near-tie and — depending
+    /// on δ — more than that: the module docs carry the rank gaps it can and
+    /// cannot reverse, and the grid is what chooses δ against them.
+    ///
+    /// **The caller owns the position**, and it is not arbitrary. This reads
+    /// `relevance`, so it has to run after the legs' raw scores have been turned
+    /// into it; and it has to run before the floor and the rerank stage, so the
+    /// head the second stage judges and the list the client's `limit` truncates
+    /// are the ones this ordering chose.
+    ///
+    /// At δ = 0 it returns before touching anything — identity by code path, the
+    /// same promise `apply_rerank` makes for an empty rerank list, for the same
+    /// reason: "knob at zero, no change" must not depend on `1 − 0 · (1 − r)`
+    /// evaluating to exactly `1.0` for every `r` in the list.
+    pub fn apply_relevance(&self, ranked: &mut [ScoredMemory]) {
+        // `<= 0.0` and `is_nan()` rather than a negated `>`: same set of
+        // weights, and clippy's point about negated partial comparisons
+        // generally. A NaN δ that escaped `[retrieval]`'s validation turns the
+        // stage off instead of multiplying every score in the list into a NaN —
+        // the failure `highest_first` was written to survive, and one this stage
+        // should not manufacture.
+        if self.relevance_weight <= 0.0 || self.relevance_weight.is_nan() {
+            return;
+        }
+
+        for scored in ranked.iter_mut() {
+            scored.score *= self.affinity(scored.relevance);
+        }
+        sort_ranked_with_relevance(ranked);
+    }
+
+    /// Relevance as a multiplier in `[1 − δ, 1]`.
+    ///
+    /// Clamped because a relevance outside `0..=1` — which only a broken
+    /// calibration can produce — would widen the band by however far it strayed,
+    /// silently undoing the bound the module docs calibrate.
+    fn affinity(&self, relevance: f32) -> f32 {
+        1.0 - self.relevance_weight * (1.0 - relevance.clamp(0.0, 1.0))
     }
 
     /// Applies the rerank stage to an already-fused list
@@ -602,6 +725,26 @@ fn highest_first(a: f32, b: f32) -> std::cmp::Ordering {
 /// recency then id so the same inputs always produce the same list —
 /// pagination depends on it, whether the tie came from the fusion or from
 /// the rerank stage re-sorting it.
+/// `sort_ranked`'s order with one extra key: score, then the *relevance* that
+/// produced it, then recency and id.
+///
+/// Only [`RecallRanker::apply_relevance`] sorts this way, which is why it is not
+/// simply the canonical comparator. Promoting relevance to the second key
+/// everywhere would also decide the exact-tie pairs that exist *today* — and this
+/// phase's anchor is that δ = 0 changes nothing, in a corpus whose exact ties are
+/// common enough to have their own noise floor (§17, Phase 0). Here it covers the
+/// one situation affinity itself creates: two candidates whose post-affinity
+/// scores come out equal, where preferring the better match is the entire point
+/// of the knob.
+fn sort_ranked_with_relevance(scored: &mut [ScoredMemory]) {
+    scored.sort_by(|a, b| {
+        highest_first(a.score, b.score)
+            .then_with(|| highest_first(b.relevance, a.relevance))
+            .then_with(|| b.memory.created_at().cmp(&a.memory.created_at()))
+            .then_with(|| a.memory.id().to_string().cmp(&b.memory.id().to_string()))
+    });
+}
+
 fn sort_ranked(scored: &mut [ScoredMemory]) {
     scored.sort_by(|a, b| {
         highest_first(a.score, b.score)
@@ -639,6 +782,19 @@ const BM25_SATURATION: f32 = 8.0;
 /// scale it is a threshold on: the two have to move together, and a test
 /// below asserts that they still do against measured numbers.
 pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.25;
+
+/// How strongly relevance competes with recency and quality inside the fused
+/// bands (`[retrieval].relevance_weight`, recall-quality-plan.md Phase 2).
+///
+/// `0.0` is not "a very small weight": [`RecallRanker::apply_relevance`]
+/// returns before touching the list at zero, so relevance cannot move a result
+/// by any amount — which is how ranking behaved before Phase 2, and the value
+/// every eval baseline since has been recorded with.
+///
+/// The grid (Task 2.6) decides whether something above zero earns the default.
+/// Until it reports, this stays 0.0, and the doc comment is where the chosen
+/// number and the measurement behind it land.
+pub const DEFAULT_RELEVANCE_WEIGHT: f32 = 0.0;
 
 /// The relevance credited to a memory that entered recall *only* through a
 /// graph hop.
@@ -1494,6 +1650,317 @@ mod tests {
             forwards.last().unwrap().score.is_nan(),
             "a NaN sorts behind every real score, not into the middle"
         );
+    }
+
+    // — affinity: relevance inside the score (recall-quality-plan.md Phase 2) —
+
+    /// Two memories ranked 1 in both legs, so their rank evidence is identical
+    /// and only age, quality and relevance can separate them.
+    fn symmetric_pair() -> (Memory, Memory) {
+        let a = memory_aged(0, 1.0);
+        let b = memory_aged(0, 1.0);
+        (a, b)
+    }
+
+    fn with_relevance(
+        mut ranked: Vec<ScoredMemory>,
+        relevance: &[(MemoryId, f32)],
+    ) -> Vec<ScoredMemory> {
+        for scored in ranked.iter_mut() {
+            scored.relevance = relevance
+                .iter()
+                .find(|(id, _)| *id == scored.memory.id())
+                .map(|(_, value)| *value)
+                .unwrap_or_default();
+        }
+        ranked
+    }
+
+    #[test]
+    fn zero_weight_leaves_the_fused_order_and_scores_bit_identical() {
+        // The phase's anchor at unit level. With the knob at zero the list is
+        // not "recomputed to the same thing": `apply_relevance` returns before
+        // reading it, so relevance cannot move a result by one bit. Relevance is
+        // deliberately pointed the other way from the tie-breaks — the first
+        // memory is the *less* relevant of the pair — so any affinity that ran
+        // anyway would show up as a swap.
+        let (first, second) = symmetric_pair();
+        let built = || {
+            ranker().rank(
+                &ids(&[&first, &second]),
+                &ids(&[&first, &second]),
+                vec![first.clone(), second.clone()],
+                now(),
+            )
+        };
+        let fingerprint = |ranked: &[ScoredMemory]| {
+            ranked
+                .iter()
+                .map(|scored| {
+                    (
+                        scored.memory.id(),
+                        scored.score.to_bits(),
+                        scored.relevance.to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let attached = || with_relevance(built(), &[(first.id(), 0.0), (second.id(), 1.0)]);
+        let fingerprinted = fingerprint(&attached());
+        assert_eq!(fingerprinted[0].0, first.id(), "the fixture itself moved");
+
+        for rank in [ranker(), ranker().with_relevance_weight(0.0)] {
+            let mut ranked = attached();
+            rank.apply_relevance(&mut ranked);
+            assert_eq!(
+                fingerprint(&ranked),
+                fingerprinted,
+                "δ = 0 touched the list"
+            );
+        }
+    }
+
+    #[test]
+    fn affinity_spans_exactly_the_band_the_module_docs_promise() {
+        for delta in [0.05_f32, 0.2, 0.5] {
+            let rank = ranker().with_relevance_weight(delta);
+            for relevance in [-1.0_f32, 0.0, 0.25, 0.5, 1.0, 2.0, f32::MAX] {
+                let affinity = rank.affinity(relevance);
+                assert!(
+                    (1.0 - delta..=1.0).contains(&affinity),
+                    "δ = {delta}, relevance {relevance} escaped [1−δ, 1]: {affinity}"
+                );
+            }
+            // The ends of the range are the ends of the band, and it is monotone:
+            // a better match never gets the smaller multiplier.
+            assert_eq!(rank.affinity(0.0), 1.0 - delta);
+            assert_eq!(rank.affinity(1.0), 1.0);
+            assert!(rank.affinity(0.0) < rank.affinity(0.5));
+            assert!(rank.affinity(0.5) < rank.affinity(1.0));
+        }
+    }
+
+    #[test]
+    fn a_nan_weight_switches_affinity_off_rather_than_poisoning_every_score() {
+        // `[retrieval]` refuses a NaN, so this only arrives from a ranker built
+        // in code. Guarding it anyway keeps the worst case "changes nothing";
+        // the alternative is multiplying every score in the list into a NaN and
+        // leaving `highest_first` to sort a list that means nothing.
+        let (a, b) = symmetric_pair();
+        let mut ranked = with_relevance(
+            ranker().rank(
+                &ids(&[&a, &b]),
+                &ids(&[&a, &b]),
+                vec![a.clone(), b.clone()],
+                now(),
+            ),
+            &[(a.id(), 0.1), (b.id(), 0.9)],
+        );
+        let fingerprint = |list: &[ScoredMemory]| {
+            list.iter()
+                .map(|scored| (scored.memory.id(), scored.score.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        let untouched = fingerprint(&ranked);
+
+        ranker()
+            .with_relevance_weight(f32::NAN)
+            .apply_relevance(&mut ranked);
+
+        assert_eq!(
+            fingerprint(&ranked),
+            untouched,
+            "a NaN weight moved or poisoned a score"
+        );
+    }
+
+    #[test]
+    fn an_exact_symmetric_tie_goes_to_the_more_relevant_memory() {
+        // v1/k2 against v2/k1: the rank sums are the same number, the ages and
+        // confidences are equal, so before Phase 2 this was decided by id.
+        // Relevance decides it now — in both assignments, which is what makes it
+        // relevance rather than a tie-break that happens to agree.
+        let (a, b) = symmetric_pair();
+        let fuse = |weight: f32| {
+            ranker().with_relevance_weight(weight).rank(
+                &ids(&[&a, &b]),
+                &ids(&[&b, &a]),
+                vec![a.clone(), b.clone()],
+                now(),
+            )
+        };
+
+        let mut b_is_better = with_relevance(fuse(0.2), &[(a.id(), 0.4), (b.id(), 0.9)]);
+        ranker()
+            .with_relevance_weight(0.2)
+            .apply_relevance(&mut b_is_better);
+        assert_eq!(
+            ordered(&b_is_better),
+            [b.id(), a.id()],
+            "the more relevant memory lost an exact rank tie"
+        );
+
+        let mut a_is_better = with_relevance(fuse(0.2), &[(a.id(), 0.9), (b.id(), 0.4)]);
+        ranker()
+            .with_relevance_weight(0.2)
+            .apply_relevance(&mut a_is_better);
+        assert_eq!(
+            ordered(&a_is_better),
+            [a.id(), b.id()],
+            "the more relevant memory lost an exact rank tie"
+        );
+    }
+
+    #[test]
+    fn relevance_and_age_are_worth_this_much_against_each_other() {
+        // The exchange rate, in both directions. Recency's multiplier is
+        // `MULTIPLIER_FLOOR`-bounded, so three days at a 90-day half-life cost
+        // 0.46% of a score — not the 1.5% raw decay suggests, and a day only
+        // 0.15%. A relevance gap of 0.06 is worth 0.06·δ: 1.2% at δ = 0.2 and
+        // 0.3% at δ = 0.05. So the same pair goes opposite ways at the two
+        // settings, which is the knob's whole design in one test — relevance
+        // competes with age, and what it wins is arithmetic an operator can read
+        // off the config rather than guess at.
+        let wiser = memory_aged(3, 1.0);
+        let fresher = memory_aged(0, 1.0);
+        let fuse = |weight: f32| {
+            ranker().with_relevance_weight(weight).rank(
+                &ids(&[&wiser, &fresher]),
+                &ids(&[&fresher, &wiser]),
+                vec![wiser.clone(), fresher.clone()],
+                now(),
+            )
+        };
+
+        for (delta, expected) in [(0.2_f32, wiser.id()), (0.05, fresher.id())] {
+            let mut ranked =
+                with_relevance(fuse(delta), &[(wiser.id(), 0.80), (fresher.id(), 0.74)]);
+            ranker()
+                .with_relevance_weight(delta)
+                .apply_relevance(&mut ranked);
+            assert_eq!(
+                ordered(&ranked)[0],
+                expected,
+                "δ = {delta} should let {} win against a three-day age gap",
+                if delta > 0.1 { "relevance" } else { "recency" }
+            );
+        }
+    }
+
+    #[test]
+    fn how_far_relevance_can_overrule_a_rank_gap() {
+        // Rank 1 against rank 10 on both legs is 14.8% apart, so the maximum
+        // relevance gap (the better-ranked memory read as if it answered
+        // nothing, the worse one as perfect) starts to reverse it just above
+        // δ = 1 − 61/70 = 0.129. Pinned on both sides of the documented number,
+        // because the table in the module docs is what an operator sizes a
+        // config against — including the part of it that says a δ of 0.5 is a
+        // measuring stick and not a shippable weight.
+        let strong = memory_aged(0, 1.0);
+        let weak = memory_aged(0, 1.0);
+        let padding: Vec<Memory> = (0..8).map(|_| memory_aged(0, 1.0)).collect();
+        let mut leg = vec![strong.clone()];
+        leg.extend(padding.iter().cloned());
+        leg.push(weak.clone());
+        let leg_ids = RankedIds(leg.iter().map(|memory| memory.id()).collect());
+
+        for (delta, expected) in [
+            (0.05_f32, strong.id()),
+            (0.10, strong.id()),
+            (0.20, weak.id()),
+            (0.50, weak.id()),
+        ] {
+            let rank = ranker().with_relevance_weight(delta);
+            let mut ranked = rank.rank(&leg_ids, &leg_ids, leg.clone(), now());
+            for scored in ranked.iter_mut() {
+                scored.relevance = if scored.memory.id() == weak.id() {
+                    1.0
+                } else {
+                    0.0
+                };
+            }
+            rank.apply_relevance(&mut ranked);
+            assert_eq!(
+                ordered(&ranked)[0],
+                expected,
+                "δ = {delta}: the maximum relevance gap {} a nine-rank gap it should not",
+                if expected == weak.id() {
+                    "overruled"
+                } else {
+                    "held"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_graph_only_hit_is_penalised_exactly_as_the_formula_says() {
+        // A hop's relevance is an estimate (`GRAPH_HOP_RELEVANCE`), not a
+        // measured number, and affinity reads it like any other. So a δ taxes
+        // every graph-only hit by δ·(1 − 0.35) — worth writing down before
+        // Phase 3 gives the hop a slot of its own instead of a score.
+        for delta in [0.05_f32, 0.2] {
+            let hop = memory_aged(0, 1.0);
+            let mut ranked = vec![ScoredMemory {
+                memory: hop.clone(),
+                score: 0.03,
+                relevance: GRAPH_HOP_RELEVANCE,
+                rerank_score: None,
+                match_detail: MatchDetail {
+                    vector_rank: None,
+                    bm25_rank: None,
+                    graph_rank: Some(1),
+                    rerank_rank: None,
+                },
+            }];
+            let rank = ranker().with_relevance_weight(delta);
+            rank.apply_relevance(&mut ranked);
+            assert_eq!(
+                ranked[0].score,
+                0.03 * rank.affinity(GRAPH_HOP_RELEVANCE),
+                "δ = {delta} taxed the hop by something other than the formula"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nan_relevance_costs_the_row_its_number_not_the_request() {
+        // The same hazard as the sort, arrived at from the other side: affinity
+        // multiplies relevance into the score, so a NaN relevance becomes a NaN
+        // score. The apply step must neither panic nor hand the top of the list
+        // to the row whose number could not be computed.
+        let sound = memory_aged(0, 1.0);
+        let broken = memory_aged(0, 1.0);
+        let detail = MatchDetail {
+            vector_rank: Some(1),
+            bm25_rank: Some(1),
+            graph_rank: None,
+            rerank_rank: None,
+        };
+        let mut ranked = vec![
+            ScoredMemory {
+                memory: sound.clone(),
+                score: 0.03,
+                relevance: 0.5,
+                rerank_score: None,
+                match_detail: detail,
+            },
+            ScoredMemory {
+                memory: broken.clone(),
+                score: 0.04,
+                relevance: f32::NAN,
+                rerank_score: None,
+                match_detail: detail,
+            },
+        ];
+
+        ranker()
+            .with_relevance_weight(0.2)
+            .apply_relevance(&mut ranked);
+
+        assert_eq!(ordered(&ranked)[0], sound.id(), "a NaN score took the top");
+        assert!(ranked[1].score.is_nan());
     }
 
     /// Calibration with the baseline switched off, for the tests that are

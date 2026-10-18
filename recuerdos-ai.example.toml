@@ -216,6 +216,26 @@ recency_half_life_days = 90
 # floor that produced the list.
 min_relevance = 0.25
 
+# How much relevance counts in the ORDER, as a multiplier applied after the two
+# index legs have been fused: score x= 1 - relevance_weight*(1 - relevance).
+# The floor above decides what gets returned; this decides what comes first
+# among what was.
+#
+# 0.0 (the default) leaves the fused order exactly as fusion decided it: the
+# vector and keyword ranks, with a bounded recency and quality nudge. Above
+# zero, the memory that matches the question better can win the calls the legs
+# tie — at 0.2, a relevance gap of 0.06 is worth 1.2% of a score, which beats
+# three days of age and is still nowhere near enough to overrule a rank gap of
+# ten. Which delta can reverse which rank gap is arithmetic, tabulated in the
+# source module docs (memories/domain/recall_ranker.rs).
+#
+# Raise it in small steps and measure it on your own memories:
+#   recuerdos-ai recall audit --config a.toml --compare-config b.toml \
+#       --queries questions.txt
+# (writes nothing, so the daemon may stay running). The eval's shipped default
+# is 0.0 until that grid reports a value that earns a place in it.
+relevance_weight = 0.0
+
 # The cosine similarity at which the vector leg stops being evidence. Two
 # unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,
 # so that much similarity is what *nothing* looks like, and it is subtracted

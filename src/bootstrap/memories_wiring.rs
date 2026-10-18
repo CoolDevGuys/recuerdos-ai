@@ -319,6 +319,9 @@ impl RecallCore {
             clock,
             ranker: RecallRanker::new(config.retrieval.recency_half_life_days)
                 .with_graph_ranking(config.graph.rank_weight, config.graph.unanchored_floor)
+                // Applied after fusion, in the recaller, and only when non-zero:
+                // wiring the knob is not the same as turning it on.
+                .with_relevance_weight(config.retrieval.relevance_weight)
                 .with_relevance_calibration(RelevanceCalibration::new(resolve_similarity_baseline(
                     config,
                     embedder.model_id(),
