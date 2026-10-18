@@ -1356,6 +1356,10 @@ pub fn write_baseline(report: &Report, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: the corpus-shape test below reads the same candidate scanner the
+    // pipeline seeds a hop from. Importing it here rather than at the top of the
+    // module keeps the shipping build from carrying an import nothing there reads.
+    use crate::memories::application::memory_recaller::seed_candidates;
 
     fn result(kind: &str, recall: f64, top_hit: bool) -> CaseResult {
         CaseResult {
@@ -2439,6 +2443,85 @@ mod tests {
                 .filter(|c| c.kind == "negative")
                 .all(|c| c.expect_empty),
             "a negative case that expects memories is not a negative case"
+        );
+    }
+
+    /// Which of the corpus's cases a graph is even allowed to start from.
+    ///
+    /// A hop begins at a name the *store* confirmed: [`seed_candidates`] offers
+    /// every 1- to 3-word window of the query and `EntityGraph::seeds` keeps only
+    /// the ones some memory declared — the G2 guard (recall-quality-plan.md §10),
+    /// deliberately exact, because §17 has the abstention number for fuzzy seeding.
+    /// The consequence the plan's Phase 3 gate did not anticipate: a case whose
+    /// query paraphrases its entities away is unreachable by *any* graph mechanism,
+    /// however the hop or the reserved slot is tuned.
+    ///
+    /// Pinned because Phase 3 was designed to move this kind and did not: all four
+    /// `chain` cases Task 0.7 wrote are of that shape, which is why
+    /// `[graph].expansion_slots` moves `relational` by 28.6 points of complete@5 and
+    /// `chain` by exactly nothing (§17). The fifth chain case names `checkout flow`
+    /// outright, which is what gives the kind one instance the mechanism can be
+    /// reviewed on. If this test flips, it is the corpus's seedability that moved —
+    /// re-measure the phase's gate either way, because the recorded number stopped
+    /// meaning what it says.
+    #[test]
+    fn chain_cases_paraphrase_their_entities_so_no_hop_can_start() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/cases.toml");
+        let set = load_set(&path).expect("the committed set loads");
+
+        let declared: BTreeSet<String> = set
+            .memories
+            .iter()
+            .flat_map(|memory| memory.entities.iter())
+            .map(|entity| EntityKey::new(&entity.name).as_str().to_string())
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "a corpus with no declared entities makes every graph case unreachable by \
+             construction, which is not the same as passing"
+        );
+
+        let confirmed = |query: &str| {
+            seed_candidates(query)
+                .into_iter()
+                .filter(|key| declared.contains(key.as_str()))
+                .collect::<Vec<_>>()
+        };
+
+        let chain: Vec<&Case> = set.cases.iter().filter(|c| c.kind == "chain").collect();
+        let seedable: Vec<&str> = chain
+            .iter()
+            .filter(|c| !confirmed(&c.query).is_empty())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(
+            seedable,
+            vec!["chain: the checkout flow named outright"],
+            "the chain kind's seedability changed. Unseedable cases cannot be reached by the \
+             hop, so a slot change measured against them is measuring nothing: {seedable:?}",
+        );
+
+        // `relational` is the kind the slot's +28.6 was measured on, and the reason
+        // it could be measured there at all: most of its cases name something.
+        let relational: Vec<&Case> = set
+            .cases
+            .iter()
+            .filter(|c| c.kind == "relational")
+            .collect();
+        assert_eq!(
+            relational.len(),
+            7,
+            "the kind the gate reads has changed size"
+        );
+        let seeded = relational
+            .iter()
+            .filter(|c| !confirmed(&c.query).is_empty())
+            .count();
+        assert!(
+            seeded >= 5,
+            "only {seeded} of {} relational cases confirm a seed, and the slot's measured gain \
+             is bounded by exactly that: what the hop is allowed to start from",
+            relational.len(),
         );
     }
 }

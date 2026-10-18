@@ -1126,7 +1126,9 @@ fn scores(hits: &[(MemoryId, f32)]) -> HashMap<MemoryId, f32> {
 /// "the billing service team" offers `billing service` and `billing
 /// service team` as candidate seeds. Deduplicated, empties dropped; the
 /// graph then keeps only the ones some memory actually declared.
-fn seed_candidates(text: &str) -> Vec<EntityKey> {
+// `pub(crate)` for the eval's own test, which asserts which of its cases this
+// scanner can and cannot seed (`chain_cases_paraphrase_their_entities_so_no_hop_can_start`).
+pub(crate) fn seed_candidates(text: &str) -> Vec<EntityKey> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut seen = std::collections::HashSet::new();
     let mut candidates = Vec::new();

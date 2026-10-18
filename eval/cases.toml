@@ -1396,7 +1396,39 @@ kind = "chain"
 # checkout flow → Stripe → PCI review. The first expectation is the bridge:
 # the review rule names a vendor the query never says, and only the checkout
 # memory says which vendor that is.
+#
+# What it cannot do is start the hop: the query says "in checkout", and the
+# store's key is "checkout flow", so `EntityGraph::seeds` confirms nothing and
+# the graph leg stays silent. Measured, not assumed — see
+# `chain_cases_paraphrase_their_entities_so_no_hop_can_start`. Same for the
+# three cases below it, which is why the reserved slot (recall-quality-plan.md
+# Phase 3) moves this kind by nothing at all; the case after this one is the
+# same chain asked in a way that does seed.
 query = "a vendor wants to change how we take card details in checkout, what has to happen before this merges"
+expect = [
+    "The checkout flow processes card payments through Stripe",
+    "Any code path that touches Stripe must pass a PCI compliance review",
+]
+informational = true
+
+[[case]]
+name = "chain: the checkout flow named outright"
+kind = "chain"
+# The chain above, asked with the entity named: "checkout flow" is a key the
+# store holds, so the seed is confirmed, the hop runs, and the PCI rule — one
+# edge past the bridge, and invisible to both text legs, which share no word
+# with this query — is a graph candidate for the first time. This is the case
+# the Phase 3 slot is measured on: without a reserved slot the hop's relevance
+# (0.35) and its single fusion term leave it outside the five, with one it
+# arrives beside the bridge.
+#
+# Task 0.7 wrote this kind expecting the graph to be the route in. Its four
+# cases all paraphrase their entities away, so before this case no graph
+# mechanism could be measured on chain-shaped data at all (§17, Phase 3). It
+# stays informational like its siblings: the defect the kind documents is still
+# real for the other four, it is now simply known to be seed availability
+# (Phase 6's aliases) rather than ranking.
+query = "we are changing how the checkout flow takes card details, what has to happen before this merges"
 expect = [
     "The checkout flow processes card payments through Stripe",
     "Any code path that touches Stripe must pass a PCI compliance review",
