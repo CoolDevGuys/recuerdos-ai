@@ -409,10 +409,11 @@ deadline costs only the remainder of one chunk, never the next request's latency
 ### Definition of Done
 
 - [x] `just check-native` and `just sdk-test` pass.
-- [ ] Field host on `mode = "off"`; p50/p95 before/after recorded in §17.
-      **Not met.** This needs the deployed machine: the flip is a config edit there
-      and the numbers have to come from its traffic. The command that produces both
-      columns in one run is in §17. Blocked on access, not on code.
+- [x] Field host on `mode = "off"`; p50/p95 before/after recorded in §17.
+      **Met 2026-10-18** on the operator's host: p50 6.7 → 306.2 ms, p95 9.6 → 603.9 ms for the
+      stage (same-config noise floor 299 → 302 ms), ~1.6 GiB held with the model loaded against
+      a 1.5 GiB prediction. Table in §17 · Field host. The warm-daemon-with-stage-off RSS is
+      still owed as a refinement; the direction and the magnitude are not in doubt.
 - [ ] Concurrency measurement (1.5) recorded, with the R1 hypothesis marked
       confirmed or refuted. **Not met**, same reason — but it is a measurement now
       rather than an inference: three concurrent searches with `RUST_LOG=debug`
@@ -533,13 +534,14 @@ score'      = score × affinity(relevance)
       still hand-run), clippy `-D warnings` clean, boundaries clean. `eval` green and
       `sdk-test` skipped: nothing on the wire changed, only a CLI report section and
       a config key.
-- [ ] Grid table (eval and `recall audit`) pasted in §17. Chosen δ and rationale in
-      the doc comments. **Half met.** The eval grid, its gated re-read, the chosen
-      δ = 0.05 and the reasoning are in §17, in `DEFAULT_RELEVANCE_WEIGHT`, the
-      config field, the example file and `docs/configuration.md`. The `recall audit`
-      half is not met and is not approximated: it needs a copy of the deployed store
-      plus the operator's `expect` file. §17 records the command and what to read
-      off it.
+- [x] Grid table (eval and `recall audit`) pasted in §17. Chosen δ and rationale in
+      the doc comments. **Met 2026-10-18**, both halves. The eval grid, its gated re-read, the
+      chosen δ = 0.05 and the reasoning are in §17, in `DEFAULT_RELEVANCE_WEIGHT`, the config
+      field, the example file and `docs/configuration.md`. The `recall audit` half arrived with
+      `v0.5.0-rc1` on the operator's host: δ 0 → 0.05 is **p@1 +5.6, MRR +3.5** on 18 real
+      queries whose expectations the operator wrote, and the sweep went further than the gate
+      asked — δ 0.5 reads **p@1 +27.8, MRR +19.9** over the shipped value. The shipped default
+      is not refuted; it looks timid. Table and reading in §17 · Field host.
 - [x] §4 gate holds at δ = 0.05: p@1 +3.8 (needs ≥ +2), MRR +2.7, recall@5 ±0, no
       `by_kind` regression, abstention 100.0. Caveat on one row — the +5 ms latency
       limit is measured at eval scale (+0.5 ms) and only *argued* at 20k: `scripts/
@@ -642,8 +644,14 @@ Properties:
       cases this phase inherited produce no graph seeds at all, so the movement is one new
       case the mechanism could reach. §17 says so rather than letting the number stand.
 - [ ] `recall audit` on the field host's store: every changed result reviewed by hand.
-      — **not met**: needs the deployed store, which is the operator's. Recipe in §17
-      ("Not measured"). Same blocker as Task 0.9, Phase 1's field halves, Phase 2's audit.
+      — **half met, 2026-10-18**: the audit ran on the deployed store (18 queries, all with
+      expectations). The aggregate is in §17 · Field host — top-1 changed 0/18, so G1 held, and
+      MRR −2.8 with `complete@5` flat at a store already 88.9% complete inside the window. The
+      hand reading is not done, so this box stays open: 0.5 reciprocal-rank units of cost — three
+      expected memories pushed 2 → 3, or one pushed out of the window, which the per-query rank
+      lines will settle — and only a person can say whether the rows that arrived were
+      related-but-useless or vacuous. `⚑` marks nothing here (no top-1 moved); the marker to read
+      is `(from N)` in the `after` column.
 
 ---
 
@@ -992,21 +1000,34 @@ one top-1 the Phase 2 change can lose).
 |---|---|
 | Age-aware eval moves every baseline number | Expected and recorded (0.8). All later phases compare against the new baseline only. |
 | Affinity lets relevance override real rank evidence | The band's *bound* is not the protection — δ = 0.5 reverses any gap nearer than ~62 ranks (§17, Phase 2), so the protection is the chosen value: δ = 0.05, whose maximum relevance gap stops between rank 4 and rank 5. Pinned arithmetically (`how_far_relevance_can_overrule_a_rank_gap`), and `0.0` remains a different code path for anyone who wants none of it. |
-| Phase 2's default was chosen on a corpus that favours relevance by construction | True of the instrument, and the reason the shipped value is the smallest that clears §4 rather than the largest that scores. The larger δ values (0.2–0.5) are recorded as measured-but-unshipped, and the falsifier — `recall audit` with the operator's `expect` file — is spelled out in §17 as owed. If it holds there, raising the default is a release note, not a config edit. |
+| Phase 2's default was chosen on a corpus that favours relevance by construction | Read on the field host 2026-10-18, and the worry pointed the wrong way: on 18 real queries with owner-authored expectations, δ 0 → 0.05 gained p@1 +5.6 / MRR +3.5, and δ 0.5 over the shipped value gains **+27.8 / +19.9**. The eval understated the gain. So the shipped value is not dangerous, it is timid — and the thing that would argue against a large δ is not "relevance overrides rank evidence" but *supersession*: two near-identical memories where only recency separates them, and the older one is stale. Raising the default is a Phase 8 decision with that check attached, not a quiet edit. §17 · Field host has the table. |
 | `scripts/recall-grid.sh`'s absolute columns include the informational cases since Task 0.7, so they no longer match the gated baseline | Phase 0's grid table (83.3 reference) and Phase 2's (75.8) are not the same measurement, and a reader who assumes they are will mis-read both. Phase 2's entry records both readings and the `-- --baseline … --max-drop 100` invocation that produces the gated one; the script itself is a follow-up below. |
-| Expansion slot surfaces an irrelevant neighbour at #2 | Only when the query names a known entity, never at #1, only memories that passed filters and the floor; `recall audit` hand review. |
+| Expansion slot surfaces an irrelevant neighbour at #2 | Only when the query names a known entity, never at #1, only memories that passed filters and the floor. Measured on the field host 2026-10-18: **top-1 changed 0/18** (the "never at #1" property held on real memories), and the cost that did land — MRR −2.8 at `complete@5` flat — is 0.5 reciprocal-rank units, which with no top-1 change means either three queries pushed 2 → 3 or one pushed 2 → out of the window; the per-query `expect …: rank` lines say which, and reading them is the owed review. `complete@5` was already 88.9% with the slot off, so this store has almost no recall headroom for the mechanism to earn against: it paid and did not gain. The hand reading of those arrivals decides whether the right conclusion is "wrong for stores whose recall is already good" or "wrong generally". |
 | Probe noise passes the floor | Separate calibrated probe baseline (5.4); negatives in the gate. |
 | Probe generation cost / no LLM configured | Off by default; budgeted backfill; client-supplied questions for `:direct`. |
 | Wrong aliases merge distinct concepts | Kind compatibility, calibrated τ, optional LLM confirm, `--list/--remove`, rejected pairs remembered. |
 | Prompt-table rows go stale as model families evolve | Each row cites its model card. Explicit config override. Unknown models get no prompt and an info log. |
-| Eval corpus still small (110 memories) | Real-store `recall audit` is part of every gate (§4) — and that half is still unmet: see Phase 0's Task 0.9. |
+| Eval corpus still small (110 memories) | The §4 "and on a real store" half now exists — 18 owner-authored queries run by `scripts/field-measure.sh` on the deployed store, first reading 2026-10-18 in §17 — and it read the same direction with a much larger effect (δ, where the field reading was ~1.6× the corpus's at the same value). It is still 18 queries on one person's store, so treat the corpus as the gate and the field host as the falsifier, never the reverse. Growing it is Task 0.9's copy. |
 | Two `eval` runs need not agree | Measured floor: 0.7 recall points, 1.7 if a whole single-expectation case flips. Equal-BM25 documents (~38 of them match "project" through the category field) reorder with Tantivy segment layout. Below ~2 recall / ~1 p@1 a Δ is one case moving, not a result; re-run twice before gating on it. Root cause and candidate fixes in §17 Phase 0 and the follow-up below. |
 | A busy rerank stage looks like a slow one on the wire | Both stay `skipped`/`deadline`, deliberately (invariant 3.5: shipped SDKs parse two reason values, so a third is a breaking change). The distinction lives on the domain trace, in the `warn!` line beside `queued_ms`/`inference_ms`, and in `rerank audit`'s `skipped_busy`. `a_busy_skip_says_exactly_what_a_slow_one_says` pins the transport half so nobody "just adds a field" later. |
-| Phase 1's field halves (1.1, 1.5) went unmeasured | Code and measurement path shipped; §17 records which two numbers are owed, the command that produces each, and the shape that would confirm or refute R1. R1 is left open rather than called confirmed by construction. |
+| Phase 1's field halves: 1.1 measured, 1.5 still open | 1.1 read on the field host 2026-10-18 — the stage costs p50 6.7 → 306.2 ms and holds 1.6 GiB, for −0.2 MRR and nothing else across 18 real queries; the operator runs `mode = "off"` now, which was the plan's own default anyway. 1.5 has become harder rather than easier: with the stage off on the only field host, the queue has nothing to queue, so either it is measured in the few minutes with `mode = "on"` or R1 stays neither confirmed nor refuted and §17 says so. |
 | Phase 3's default is measured on a kind that could not see it | The eval's four inherited `chain` cases produce no seeds, so `chain`'s +20.0 is one case the mechanism could reach, not the kind working. §17 states it, `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which cases are reachable, and the DoD's `chain` tick carries the asterisk. The hand review on a real store is the half that could still refute it, and it is owed. |
 | `just check-native` in the dev container can be green against a stale build | Measured in Phase 3: a green run clippy'd `recuerdos-ai v0.3.1` while the manifest said `0.4.3`, `cargo fmt --check` said nothing about an unformatted file, and `cargo test` ran a unit-test binary 117 tests behind the tree. Until the recipe is fixed, touch the sources first and check the run against `cargo test -- --list` (1 027 declared = 1 016 passed + 11 ignored on this branch); confirm the log names the tests you just wrote. `test result: ok` alone is not evidence. |
 
 **Follow-ups (not in this plan):**
+- **Raise `[retrieval].relevance_weight` above 0.05, with one check attached.** Both instruments
+  now point the same way and neither shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 /
+  +17.3 at δ 0.2 / 0.3 / 0.5 with abstention unmoved and no `by_kind` regression at any cell (§17,
+  Phase 2), and the field host reads +27.8 / +19.9 at 0.5 over the shipped value (§17 · Field host).
+  Phase 2's own text said this is a release note rather than a config edit, and the condition it set
+  is now met. Read first the shape a large δ can get wrong: two near-identical memories where only
+  recency separates them and the older one is stale — a supersession consolidation missed. On the
+  field host's 0.5 run seven top-1s moved for a net of +5, so either nothing lost rank 1 (two flips
+  were one wrong answer replacing another) or exactly one query did; the per-query rank lines say
+  which, and two of the seven are the pair of inference-server questions, which is that shape's
+  neighbourhood. Note too that the corpus flips at 0.2 where the field host does not budge until
+  0.5 — the corpus's close calls are nearer tied than this store's, so a default chosen on it is
+  not the default this store wants. Raising it re-records `eval/baseline.json`, as Phases 2 and 3 did.
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
 - Query-embedding LRU cache for repeated agent queries.
 - An approximate-NN index beyond ~100k memories (`docs/performance.md`).
@@ -1584,9 +1605,12 @@ approximated here. Both need the deployed machine, which is the operator's:
   answered on the field host, so R1 stays neither confirmed nor refuted until
   someone reads these lines there.
 
-The corresponding DoD boxes ("field host on `mode = off`", "concurrency measurement
-recorded") are left unticked for the same reason Task 0.9's is: the code and the
-measurement path exist, the measurement does not.
+Read on the field host 2026-10-18. **1.1 is met**: p50 6.7 → 306.2 ms, p95 9.6 → 603.9 ms for the
+stage, 1.6 GiB resident against the ~1.5 GiB predicted, bought −0.2 MRR and nothing else across 18
+real queries, and the host is now on the shipped `mode = "off"` (§17 · Field host). **1.5 is not
+met**, and 1.1's outcome is what made it harder — with the stage off there is no session pool to
+watch, so the table above needs a host deliberately running the stage for a few minutes. R1 stays
+neither confirmed nor refuted until then.
 
 #### Deviations from the task text (all deliberate, none silent)
 
@@ -1827,8 +1851,13 @@ whoever reads the file next rather than a bar quietly raised.
 #### Not measured (blocked, and deliberately not approximated)
 
 - **`recall audit` on a real store with the operator's `expect` file** — the second
-  instrument in Task 2.6 and in every §4 gate. Same blocker as Task 0.9 and Phase
-  1's field halves: it needs a copy of the deployed store, which is the operator's.
+  instrument in Task 2.6 and in every §4 gate. **Read 2026-10-18** (§17 · Field host): δ 0 → 0.05
+  gained p@1 +5.6 / MRR +3.5 on 18 real queries whose expectations the owner wrote, and the sweep
+  continued to 0.5, where it gains +27.8 / +19.9 over the shipped value. So the question below —
+  does the eval's curve hold on real memories? — is answered, and it holds with a larger effect.
+  One thing the summary cannot yet say is whether §4's last row held: three top-1s moved for a net
+  of +1, so either nothing lost rank 1 or one query did and two gained, and the per-query
+  `expect …: rank N → M` lines are what settle it. That reading is owed before the default moves.
   The recipe, which writes nothing and works with the daemon running:
 
   ```bash
@@ -1848,7 +1877,8 @@ whoever reads the file next rather than a bar quietly raised.
   What to read: **no query whose `expect` was at rank 1 loses it** (§4's last row),
   and how many queries gain rank 1. Repeat at 0.2 and 0.5 — if the eval's curve
   holds on real memories with real expectations, the case for a higher default
-  becomes real, and it should be raised in a release note rather than silently.
+  becomes real, and it should be raised in a release note rather than silently. *Both repeats done
+  2026-10-18: 0.2 moved no top-1 at all, 0.5 moved seven of eighteen.*
 - **`scripts/bench.sh 20000 500`** for the §4 latency row. The added work is one
   multiply per returned candidate plus a re-sort of a list already truncated to
   `limit`; the eval's own p95 moved +0.5 ms at the shipped δ. Recorded as unmeasured
@@ -2118,9 +2148,12 @@ environment fix.
 #### Not measured (blocked, and deliberately not approximated)
 
 - **`recall audit` on the field host's store, every changed result reviewed by hand** —
-  the last box of §10's DoD, and the same blocker as Phase 0's Task 0.9, Phase 1's field
-  halves and Phase 2's audit: it needs a copy of the deployed store, which is the
-  operator's. The recipe, which writes nothing:
+  the last box of §10's DoD. **Half read 2026-10-18** (§17 · Field host): the audit ran on the
+  deployed store with 18 owner-authored expectations; top-1 changed 0/18, `complete@5` flat at a
+  store already 88.9% complete inside the window, MRR −2.8. The hand reading is what is left, and
+  the marker to read is **`(from N)` in the `after` column, not `⚑`** — no top-1 moved, so no flag
+  fires, while the displaced rows and the seat's occupant are both marked with where they came from.
+  The recipe, which writes nothing:
 
   ```bash
   # The comparison side is the pipeline before this phase. Put the key inside [graph],
@@ -2154,6 +2187,140 @@ are the concrete target for Phase 6's alias/τ work (that kind's remaining 60 �
 there, and `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which rows must
 flip — the fourth case expects an entity-less memory, so it is nobody's seeding problem);
 and `rank_weight` 0.3 vs 0.15 is an open question this instrument cannot answer.
+
+### Field host — the readings Phases 0–3 owed (v0.5.0-rc1, 2026-10-18)
+
+One machine, one operator, one afternoon. The host is a host install (`lamalamita`, store at
+`/home/lamita/.recuerdos-ai/data`), the binary is `v0.5.0-rc1`, and the instrument is
+`scripts/field-measure.sh` (branch `chore/field-measure`), which builds each config variant,
+asks the binary to read the value back, and refuses to measure when the read-back disagrees —
+the v0.4.1 orphaned-key bug made fatal rather than silent. **18 queries, all 18 carrying an
+`expect` the operator wrote against their own store**, which was listed first from
+`GET /v1/memories/export?format=markdown` so the questions were written from what is actually
+there rather than from recall.
+
+Config during the readings: `relevance_weight 0.05`, `expansion_slots 1`, graph on (2 hops,
+weight 0.3), rerank **on** at depth 5 / rrf weight 1 / 1200 ms, floor 0.25, recency half-life
+90 d. The audits ran the 0.5.0-rc1 binary against the live store file while the daemon still
+served 0.4.3 — that is a reading of the new pipeline on real memories, not of the service; the
+daemon was restarted onto 0.5.0-rc1 after these runs with `[rerank].mode = "off"`.
+
+The floor is worth naming before the numbers, because it disposes of a worry: the client floor
+compares *relevance*, and δ multiplies the *score*, so no δ cell here can move abstention —
+which is why the eval's δ grid reported abstention unchanged and this reading does not measure
+it. It is not an unmeasured risk; it is a knob that cannot reach that metric.
+
+#### δ — the falsifier Phase 2 owed, and it reads the other way
+
+| comparison | top-1 changed | mean displacement | p@1 | MRR | complete@5 |
+|---|---|---|---|---|---|
+| δ 0 → 0.05 (what shipped) | 3/18 | 0.20 | 44.4 → **50.0** | 57.6 → **61.1** | 88.9 → 88.9 |
+| δ 0.05 → 0.2 | 0/18 | 0.34 | 50.0 → 50.0 | 61.1 → 61.1 | 88.9 → 88.9 |
+| δ 0.05 → 0.5 | 7/18 | 0.85 | 50.0 → **77.8** | 61.1 → **81.0** | 88.9 → 88.9 |
+
+Phase 2 shipped δ = 0.05 as "the smallest value that clears the gate while the curve keeps
+climbing", and §4's honest caveat was that the eval might reward relevance *by construction*.
+On the operator's own memories, with expectations they wrote independently of any pipeline
+output, that caveat does not hold: the shipped value leaves **27.8 points of precision@1 and
+19.9 of MRR on the table**. The eval understated the gain rather than inventing it.
+
+The shape is explicable. What a 90-day half-life punishes hardest on a personal store is exactly
+the material that never goes out of date — hardware specs, tooling preferences, project rules —
+and those are the questions in the file (`which GPU does the other inference server use`,
+`which Python tools for packaging, linting, testing, typing`, `which repository must contain all
+implementation changes`). A 5% relevance tax cannot beat an age advantage; by 50% it does. The
+0.2 cell doing nothing while 0.5 moves seven top-1 results is not a contradiction: the pairs the
+0.05 flip could afford were already flipped, and the rest need a penalty large enough to beat a
+recency term that is still winning by more than 15%.
+
+What this does **not** settle, and why the default is not being changed in this commit: a δ that
+high makes relevance largely win, so the case to look for is the one where only recency separates
+two near-identical matches — a superseded fact that consolidation failed to retire, or a
+preference restated last week. `chain`-shaped pairs like queries 10 and 11 here (two inference
+servers, one question each) are the neighbourhood. Raising the shipped default is a Phase 8
+decision with that check attached, and §16 carries it.
+
+*One unexplained cell:* the after side's p50 falls as δ rises (304 → 237 ms) while the same-config
+twice noise floor for this host is 299 → 302 ms (1%). Nothing in the mechanism says a relevance
+weight should make a recall cheaper, and the per-side `rerank latency` lines (which report how many
+candidates were judged) were not captured in the summary. Recorded as an open observation, not a
+finding.
+
+#### The reserved seat — aggregate in, hand reading owed
+
+| slots 0 → 1 (shipped) | value |
+|---|---|
+| top-1 changed | **0/18** |
+| mean rank displacement | 0.58 |
+| p@1 | 50.0 → 50.0 |
+| MRR | 63.9 → **61.1** |
+| complete@5 | 88.9 → 88.9 |
+| recall latency | p50 307.8 / p95 634.7 → p50 308.8 / p95 617.9 |
+
+G1 held exactly as designed: a reserved seat never touches the first result, on real memories as
+well as in the arithmetic. What it did cost is arithmetic rather than observation — with no top-1
+change, −2.8 points of MRR over 18 queries is 0.5 reciprocal-rank units, and the moves that cheap
+are **three expected memories pushed from rank 2 to rank 3**, or one pushed from rank 2 out of the
+window. The per-query `expect …: rank N → M` lines say which, and those lines are the review: in
+either case a row that was not the answer took a place a correct answer had.
+
+Why the eval's benefit is absent comes from the ceiling column: `complete@5` was already **88.9%
+with the slot off**. The mechanism earns recall where the answer is *outside* the window, and on a
+store this well-populated it almost never is, so there is nothing here for it to gain and a rank it
+must pay for. That is the §16 risk row for a personal store arriving as a measurement rather than
+as a worry: `relational` +28.6 on 74 curated cases has no counterpart when 16 of 18 answers are
+already in the top five.
+
+Hand review still owed on the moved blocks (the marker to read is `(from N)` in the `after`
+column, not `⚑`: a rank-2 row whose `from` is larger than 2 is the seat used). What it can still
+change is the recommendation, not the arithmetic — if those arrivals are related-but-not-the-answer,
+the seat is defensible for stores whose recall is short and wrong for stores whose recall is not;
+if they are vacuous, it is wrong generally. `expansion_slots = 0` is meanwhile the honest setting
+for a store of this shape, and it is one config line.
+
+#### The second stage — Phase 1's Task 1.1, and a finding nobody gated
+
+| | rerank off | rerank on (deployed) |
+|---|---|---|
+| recall latency | **p50 6.7 / p95 9.6 ms** | **p50 306.2 / p95 603.9 ms** |
+| p@1 / MRR / complete@5 | 50.0 / 61.3 / 88.9 | 50.0 / 61.1 / 88.9 |
+| daemon RSS | 31,756 kB (fresh start, nothing served yet) | 1,668,708 kB (after a real search) |
+
+Eighteen calls, five candidates judged each, `split: not measured` because the replay runs with no
+deadline — Phase 1's own reporting, behaving as specified. The stage costs **45× the p50 and about
+1.6 GiB resident** and bought −0.2 MRR and nothing else across 18 real queries. The plan's predicted
+"~1.5 GiB freed" is confirmed by the process holding 1.59 GiB; the strictly like-for-like
+comparison (a *warm* daemon with the stage off) is still owed, since 31 MiB is a process that has
+not loaded anything yet.
+
+The operator set `mode = "off"` after this reading. That is a config decision about their own
+traffic, and it has a consequence for this plan: **Task 1.5's queue cannot be observed on this host
+while the stage is off.** Either it gets run in the few minutes it takes with `mode = "on"`, or it
+is recorded as what it would then be — a mechanism this deployment does not exercise — and R1 stays
+neither confirmed nor refuted.
+
+#### Limits of this reading, stated before anyone quotes it
+
+18 queries on one personal store, expectations authored by the person whose memories they are:
+strong for "is this the memory I meant", weak for breadth, and its absolutes (p@1 50.0, complete@5
+88.9) describe that store's difficulty and are **not comparable to the eval corpus's 87.2 / 53.8 /
+68.4 / 84.6**. Latency is the same rule as `eval`'s latency columns — the embedder is inside both
+numbers, so the difference is the finding and the absolute is a property of one machine. Three
+single-knob comparisons at n=18 means one flipped query is 5.6 points of p@1, so anything under
+about two queries in either direction should be read as nothing, exactly as the eval's 1.7-per-case
+noise floor says here.
+
+Still owed on this host: the M1 hand review above, the warm-RSS-with-stage-off number, Task 1.5 if
+the stage goes back on, and Task 0.9's store copy (optional, and the only one of the four that
+would let the eval corpus itself be tuned on real data).
+
+One caveat about `complete@5` here, because the ceiling argument above leans on it: the audit
+applies no client floor — it prints `floor: clients drop below 0.25, this audit shows everything`.
+So 88.9% is what the pipeline *recalled*, not what a client would have been served, and a caller
+asking these same eighteen questions could abstain on some of them. That softens "there was nothing
+for the seat to gain" into "there was nothing inside the window for the seat to gain, and a row the
+floor refuses is unreachable by the slot anyway" — which is still the right design (the slot runs
+after the floor, deliberately), but it is a narrower claim than the table reads.
 
 ### Phase 4 — embedding prompts
 - Per-model with/without tables + `calibrate`: _TBD_
