@@ -316,6 +316,22 @@ pub struct RetrievalConfig {
     /// return every candidate the indexes produced, as an exhaustive admin
     /// tool or an eval harness wants.
     pub min_relevance: f32,
+    /// How much relevance counts in the *order*, as a multiplier applied to the
+    /// fused score (recall-quality-plan.md Phase 2).
+    ///
+    /// `score ×= 1 − δ·(1 − relevance)`, so δ is the spread relevance is allowed
+    /// across. `0.05` — the shipped default, the grid's choice — lets a better
+    /// match win the calls the legs tie and the calls that turn on a few days of
+    /// age; even its maximum relevance gap reverses rank 1 against rank 4 and
+    /// stops there (rank 5 would need 0.062). `0.0` switches the stage off (a
+    /// different code path, not a small weight) and restores the order recall
+    /// shipped before this knob existed.
+    ///
+    /// Not the floor, and not a knob on it: `min_relevance` still decides what is
+    /// returned at all. The range `0.0..=0.5` is deliberately generous at the top
+    /// so a grid can measure a regime nobody should ship; `recall_ranker`'s module
+    /// docs carry which δ can and cannot reverse which rank gap.
+    pub relevance_weight: f32,
     /// The cosine similarity at which the vector leg stops being evidence.
     ///
     /// Two unrelated English sentences measure 0.4–0.55 in a sentence
@@ -342,6 +358,10 @@ impl Default for RetrievalConfig {
             default_limit: 8,
             recency_half_life_days: 90,
             min_relevance: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_FLOOR,
+            // The grid's choice (plan §17). This default and the ranker's come
+            // from one constant, so the report, the field docs and the ranker
+            // cannot drift apart.
+            relevance_weight: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT,
             // Unset means "look the baseline up per embedding model" — see
             // the field docs and `SIMILARITY_BASELINES`.
             similarity_baseline: None,
@@ -848,6 +868,17 @@ impl AppConfig {
                 self.retrieval.min_relevance
             ));
         }
+        // Negatives and NaN corrupt a fused score rather than tuning it. The
+        // ceiling is generous on purpose — 0.5 is what the calibration grid
+        // measures against, not a value to ship: it overrules any rank gap
+        // nearer than ~60 ranks. The module docs carry that arithmetic.
+        if !(0.0..=0.5).contains(&self.retrieval.relevance_weight) {
+            issues.push(format!(
+                "[retrieval].relevance_weight {} is out of range 0.0..=0.5 \
+                 (0.0 leaves the fused order alone)",
+                self.retrieval.relevance_weight
+            ));
+        }
         // Only when set explicitly: `None` defers to the per-model map, and
         // warning about a value the operator never wrote would be noise.
         if let Some(baseline) = self.retrieval.similarity_baseline {
@@ -1327,6 +1358,96 @@ mod tests {
                     .iter()
                     .any(|m| m.contains("[retrieval].similarity_baseline")),
                 "{:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relevance_weight_defaults_to_the_value_the_ranker_shares() {
+        // Two things, both worth pinning. The default is a measurement rather
+        // than a taste (plan §17: +3.8 precision@1, +2.7 MRR, nothing else
+        // moved), so the literal below is what turns a quiet edit of
+        // `DEFAULT_RELEVANCE_WEIGHT` into a reviewable change of behaviour. And
+        // both layers read that one constant, which is the no-drift property:
+        // `recuerdos-ai config`, the field docs and the ranker cannot disagree
+        // about what is running.
+        Jail::expect_with(|_jail| {
+            let config = AppConfig::load(None).expect("defaults must be valid");
+            assert_eq!(
+                config.retrieval.relevance_weight,
+                crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT
+            );
+            assert_eq!(config.retrieval.relevance_weight, 0.05);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relevance_weight_is_read_from_file_and_env() {
+        Jail::expect_with(|jail| {
+            jail.create_file("recuerdos-ai.toml", "[retrieval]\nrelevance_weight = 0.2\n")?;
+            assert_eq!(
+                AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                    .unwrap()
+                    .retrieval
+                    .relevance_weight,
+                0.2
+            );
+
+            // The env form is what the calibration grid sets per cell, so it is
+            // part of the knob's contract rather than a figment side effect.
+            jail.set_env("RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT", "0.1");
+            assert_eq!(
+                AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                    .unwrap()
+                    .retrieval
+                    .relevance_weight,
+                0.1
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn relevance_weight_outside_the_range_is_rejected() {
+        // Above 0.5, relevance overrules any rank gap a result list contains;
+        // below 0 it would subtract from a fused score. Neither is a typo worth
+        // clamping — both are configs that silently replace the ranking.
+        Jail::expect_with(|jail| {
+            for value in ["0.51", "2.0", "-0.1"] {
+                jail.create_file(
+                    "recuerdos-ai.toml",
+                    &format!("[retrieval]\nrelevance_weight = {value}\n"),
+                )?;
+                let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+                assert!(
+                    err.0
+                        .iter()
+                        .any(|m| m.contains("[retrieval].relevance_weight")),
+                    "{value} was refused for something else: {:?}",
+                    err.0
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_nan_relevance_weight_is_refused_rather_than_read_as_off() {
+        // TOML spells a NaN, and `0.0..=0.5` does not contain one, so this falls
+        // out of the range check rather than a special case. Worth pinning: the
+        // alternative is a config line that looks like a number, silences the
+        // stage, and reads back as `NaN` in `recuerdos-ai config`.
+        Jail::expect_with(|jail| {
+            jail.create_file("recuerdos-ai.toml", "[retrieval]\nrelevance_weight = nan\n")?;
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0
+                    .iter()
+                    .any(|m| m.contains("[retrieval].relevance_weight")),
+                "NaN was refused for something else: {:?}",
                 err.0
             );
             Ok(())

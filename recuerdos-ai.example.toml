@@ -216,6 +216,32 @@ recency_half_life_days = 90
 # floor that produced the list.
 min_relevance = 0.25
 
+# How much relevance counts in the ORDER, as a multiplier applied after the two
+# index legs have been fused: score x= 1 - relevance_weight*(1 - relevance).
+# The floor above decides what gets returned; this decides what comes first
+# among what was.
+#
+# 0.05 is the default: what the calibration grid earned on the eval set (+3.8
+# precision@1, +2.7 MRR, with recall, completeness and "no match" answers
+# unmoved, and no case losing its top hit). It is a near-tie-sized influence:
+# even the largest relevance gap at 0.05 reverses rank 1 against rank 4 and stops
+# there, so the two index legs' disagreement survives everything except its
+# closest calls.
+#
+# 0.0 switches the stage off and restores the order recall shipped before this
+# setting existed. Larger values were measured and deliberately NOT shipped as
+# the default: 0.2 buys more precision@1 on that eval (+9.6), but at 0.2
+# relevance can overrule a ten-rank gap, which is a bigger claim about your
+# memories than a default should make on this evidence. Which delta can reverse
+# which rank gap is arithmetic, tabulated in the source module docs
+# (memories/domain/recall_ranker.rs).
+#
+# Measure a change on your own memories before trusting it:
+#   recuerdos-ai recall audit --config a.toml --compare-config b.toml \
+#       --queries questions.txt
+# (writes nothing, so the daemon may stay running).
+relevance_weight = 0.05
+
 # The cosine similarity at which the vector leg stops being evidence. Two
 # unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,
 # so that much similarity is what *nothing* looks like, and it is subtracted

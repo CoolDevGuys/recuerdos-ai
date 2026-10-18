@@ -440,6 +440,14 @@ impl MemoryRecaller {
             );
         }
 
+        // The weight on relevance (recall-quality-plan.md Phase 2), applied where
+        // the number exists and before everything that consumes the order: the
+        // floor below, the rerank head, the truncation. At the shipped default of
+        // zero this returns without reading `ranked` at all, which is what keeps
+        // "knob at zero, no change" — and the byte-identical eval baseline — a
+        // code path rather than an arithmetic coincidence.
+        self.ranker.apply_relevance(&mut ranked);
+
         // Before the truncate, so a caller asking for five results gets
         // five relevant ones rather than three once the floor has eaten two
         // of the five it was truncated to.
@@ -1863,6 +1871,140 @@ mod tests {
             "the pre-change shape includes rerank fields"
         );
         assert_eq!(fake.calls(), 0, "mode `Off` consulted the reranker");
+    }
+
+    /// The fixture's pipeline over an arbitrary ranker, for the tests that are
+    /// about a ranker knob rather than about the fixture's index fakes.
+    fn recaller_with(fixture: &Fixture, ranker: RecallRanker) -> MemoryRecaller {
+        MemoryRecaller::new(
+            Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&fixture.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&fixture.text) as Arc<dyn TextIndex>,
+            Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
+            ranker,
+            fixed_clock(),
+            None,
+            2,
+            50,
+        )
+    }
+
+    /// Five memories the fake indexes agree about, which is what gives affinity
+    /// a head to work on.
+    fn five_notes(fixture: &Fixture) {
+        for index in 0..5 {
+            fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
+        }
+    }
+
+    #[test]
+    fn every_off_spelling_of_the_relevance_weight_runs_the_same_recall() {
+        // δ = 0 has to be identity through the wiring, and now that the shipped
+        // default is above zero the pipeline's anchor cannot be "whatever
+        // `RecallRanker::new` does" — `new` applies affinity today. So the anchor
+        // is that every spelling of off is the *same* run bit for bit: the zero,
+        // a negative `[retrieval]` would refuse, and a NaN that escaped it. Both
+        // columns are read untracked: `execute` records access, importance decay
+        // reads access, and a test comparing two runs would otherwise be
+        // measuring its own first run.
+        let fixture = Fixture::new();
+        five_notes(&fixture);
+        let question = query("pnpm");
+        let fingerprint = |results: &[ScoredMemory]| {
+            results
+                .iter()
+                .map(|scored| {
+                    (
+                        scored.memory.id(),
+                        scored.score.to_bits(),
+                        scored.relevance.to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let weights = [0.0_f32, -0.1, f32::NAN];
+        let runs: Vec<Vec<ScoredMemory>> = weights
+            .iter()
+            .map(|weight| {
+                recaller_with(
+                    &fixture,
+                    RecallRanker::new(90).with_relevance_weight(*weight),
+                )
+                .execute_untracked(&fixture.alex, &question)
+                .unwrap()
+            })
+            .collect();
+        assert!(runs[0].len() >= 2, "the fixture should return a head");
+
+        let reference = fingerprint(&runs[0]);
+        for (weight, run) in weights[1..].iter().zip(&runs[1..]) {
+            assert_eq!(
+                fingerprint(run),
+                reference,
+                "δ = {weight} changed recall through the pipeline"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relevance_weight_discounts_every_result_by_exactly_its_relevance() {
+        // What the knob does to a real recall, asserted as the formula rather
+        // than as one particular swap: each score becomes the fused one times
+        // `1 − δ·(1 − relevance)`, relevance itself is untouched, no row is
+        // dropped or added, and the list is ordered by the discounted numbers.
+        // Pinning a specific reorder here would test the fixture's index fakes
+        // rather than the stage. The shipped default runs through it alongside a
+        // deliberately loud 0.2, so the number a deployment actually gets is the
+        // one under test.
+        let fixture = Fixture::new();
+        five_notes(&fixture);
+        let question = query("pnpm");
+        let plain = recaller_with(&fixture, RecallRanker::new(90).with_relevance_weight(0.0))
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert!(
+            plain.iter().any(|scored| scored.relevance < 1.0),
+            "the fixture has nothing for affinity to discount — this test would pass vacuously"
+        );
+
+        for delta in [
+            0.2_f32,
+            crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT,
+        ] {
+            let tuned = recaller_with(&fixture, RecallRanker::new(90).with_relevance_weight(delta))
+                .execute_untracked(&fixture.alex, &question)
+                .unwrap();
+
+            assert_eq!(tuned.len(), plain.len(), "δ = {delta} changed the row set");
+            for scored in &tuned {
+                let before = plain
+                    .iter()
+                    .find(|candidate| candidate.memory.id() == scored.memory.id())
+                    .unwrap_or_else(|| {
+                        panic!("{} appeared only after affinity", scored.memory.id())
+                    });
+                assert_eq!(
+                    scored.relevance.to_bits(),
+                    before.relevance.to_bits(),
+                    "affinity rewrote the relevance it was only meant to read"
+                );
+                let expected = before.score * (1.0 - delta * (1.0 - before.relevance));
+                assert!(
+                    (scored.score - expected).abs() <= expected.abs() * 1e-6 + f32::EPSILON,
+                    "{}: expected {} after δ = {delta}, got {}",
+                    scored.memory.id(),
+                    expected,
+                    scored.score
+                );
+            }
+            assert!(
+                tuned
+                    .windows(2)
+                    .all(|pair| pair[0].score >= pair[1].score || pair[1].score.is_nan()),
+                "δ = {delta}: the discounted list is not ordered by the discounted score"
+            );
+        }
     }
 
     /// A recaller over the `Replace` rerank strategy: with the reversing

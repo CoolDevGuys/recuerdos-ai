@@ -1159,6 +1159,22 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         println!("  disabled");
     }
 
+    // Retrieval decides what comes back and in what order, so it is worth
+    // confirming without opening the file. `relevance_weight` prints in every
+    // state including its zero, for the same reason the rerank mode does: "the
+    // order is what fusion decided" is an effective state, and 0.0 is the answer
+    // an operator needs to hear rather than a line to hide.
+    let retrieval = &config.retrieval;
+    println!("\nretrieval");
+    println!("  hybrid     {}", retrieval.hybrid);
+    println!("  limit      {}", retrieval.default_limit);
+    println!(
+        "  recency    {} d half-life",
+        retrieval.recency_half_life_days
+    );
+    println!("  floor      {}", retrieval.min_relevance);
+    println!("  relevance_weight {}", retrieval.relevance_weight);
+
     // The rerank stage prints in every mode: `off` is its effective
     // state as much as `on` is, and the whole point of this report is
     // answering "what is the daemon actually doing" without opening the
