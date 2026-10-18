@@ -575,15 +575,36 @@ impl RecallRanker {
     }
 }
 
+/// Descending order for a score-like number, with NaN last.
+///
+/// `total_cmp` rather than `partial_cmp` because the `Equal` a partial
+/// comparison reports for a NaN is not a consistent answer: it calls a NaN
+/// tied with one value and unordered against the next, inside the same sort,
+/// and a comparator that contradicts itself is not merely wrong — since Rust
+/// 1.81 the sort may panic on it. `total_cmp` always answers.
+///
+/// It is wrapped rather than used bare because a *total* order puts a positive
+/// NaN's bit pattern above `+infinity`: compared straight, a score that could
+/// not be computed would win the list and be served first. A NaN means "no
+/// number", which is the least of everything, so it is pinned to the bottom —
+/// and pinning it keeps the order total, since every pair is answered the same
+/// way no matter what the sort asks in between.
+fn highest_first(a: f32, b: f32) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => b.total_cmp(&a),
+    }
+}
+
 /// The canonical result ordering: best score first, and ties broken by
 /// recency then id so the same inputs always produce the same list —
 /// pagination depends on it, whether the tie came from the fusion or from
 /// the rerank stage re-sorting it.
 fn sort_ranked(scored: &mut [ScoredMemory]) {
     scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        highest_first(a.score, b.score)
             // Ties must not depend on the order rows came back from
             // SQLite, or the same query would paginate differently
             // between calls. Newest first, then id.
@@ -1426,6 +1447,53 @@ mod tests {
         );
 
         assert_eq!(ordered(&result)[0], newer.id());
+    }
+
+    #[test]
+    fn a_nan_score_cannot_break_the_ordering() {
+        // A degenerate calibration can hand `relevance` a NaN, and affinity
+        // multiplies that into the score. The sort itself must not fail:
+        // `partial_cmp(…).unwrap_or(Equal)` calls a NaN tied with one value
+        // and unordered against another in the same sort, and a comparator
+        // that contradicts itself may panic (Rust ≥ 1.81). So the promise is
+        // the boring one — every row survives, the real scores keep their
+        // order, and the number that means nothing arrives last.
+        let scored = |score: f32| ScoredMemory {
+            memory: memory(),
+            score,
+            relevance: 0.5,
+            rerank_score: None,
+            match_detail: MatchDetail {
+                vector_rank: Some(1),
+                bm25_rank: Some(1),
+                graph_rank: None,
+                rerank_rank: None,
+            },
+        };
+        let nan = scored(f32::NAN);
+        let high = scored(0.02);
+        let low = scored(0.01);
+
+        let mut forwards = vec![nan.clone(), high.clone(), low.clone()];
+        let mut backwards = vec![low.clone(), high.clone(), nan.clone()];
+        sort_ranked(&mut forwards);
+        sort_ranked(&mut backwards);
+
+        assert_eq!(
+            ordered(&forwards),
+            ordered(&backwards),
+            "a NaN made the order depend on the input order"
+        );
+        assert!(
+            forwards[0].score > forwards[1].score,
+            "the real scores should still be sorted, got {:?} then {:?}",
+            forwards[0].score,
+            forwards[1].score
+        );
+        assert!(
+            forwards.last().unwrap().score.is_nan(),
+            "a NaN sorts behind every real score, not into the middle"
+        );
     }
 
     /// Calibration with the baseline switched off, for the tests that are
