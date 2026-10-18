@@ -2075,7 +2075,7 @@ wire: Task 3.3 did not land.
 One caveat about that number, because it was nearly wrong. The first `just check-native` of
 this phase reported green and **was not valid**: under `docker compose run` the build cache
 can answer for a tree the container is not looking at. That run clippy'd
-`recuerdos-ai v0.3.1` when the manifest says `0.4.3`, `cargo fmt --check` said nothing about
+`recuerdos-ai v0.3.1` when the manifest said `0.4.3`, `cargo fmt --check` said nothing about
 a file that was not formatted, and `cargo test` ran a unit-test binary 117 tests behind the
 tree — none of this phase's tests appeared in its output. Every check quoted here was
 re-run after `find src tests -name '*.rs' -exec touch {} +`, and the reading is accepted

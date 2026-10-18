@@ -81,7 +81,56 @@ memories before you spend either.
   `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
   carries no rerank model, since the default does not use one.
 
-## v0.4.3 — A release to publish the Python SDK
+## v0.5.0-rc1 — Three ordering changes, and the measurements they still owe
+
+A **prerelease**, deliberately: `latest` is not moved, the Python SDK is not
+published, and what this tag is for is measurement rather than adoption.
+
+[recall-quality-plan.md](../ai-specs/recall-quality-plan.md) Phases 0–3 are merged.
+Each one shipped with a §4 gate whose second half is *"and the same comparison on a
+real store"* — and every one of those halves has been blocked on the same thing: the
+deployed server runs `v0.4.3`, which predates all three, so it has neither
+`recall audit --compare-config` nor the two knobs the audits are meant to compare.
+This build puts them on the same box as the store so the owed numbers can be read
+off it. Until they are, treat what follows as *measured on the eval corpus, not yet
+on your memories*.
+
+- **`[retrieval].relevance_weight` = 0.05** (Phase 2, `v0.4.3..main`). After the
+  index legs are fused, how well a memory matches the question now competes, a
+  bounded amount, with how new it is: `score ×= 1 − δ·(1 − relevance)`. Before this,
+  a memory matching the question *better* lost every close call to one three days
+  newer. Eval: **precision@1 50.0 → 53.8**, MRR 63.9 → 66.6, recall@5 unchanged,
+  abstention unchanged. `0.0` restores the old ordering exactly.
+  [configuration.md](configuration.md#retrieval) explains why the shipped value is
+  the smallest that clears the gate when the curve keeps climbing.
+- **`[graph].expansion_slots` = 1** (Phase 3). A memory reached only by walking an
+  entity relation brings one fusion term where a direct match brings two, so it
+  cannot win a rank at any weight — now it reserves a *seat* instead: the
+  best-connected memory you would otherwise not see is shown second, and your top
+  result is untouched. Eval: **relational `complete@5` 57.1 → 85.7**, gated recall@5
+  83.3 → 87.2, precision@1 unmoved. `0` gives back the `v0.4` pipeline, and nothing
+  happens at all when a query names no entity the store knows — which, because seeds
+  are exact, is most queries. One consequence to know about before it surprises you:
+  a promoted row keeps its own `score`, so **the returned list is no longer sorted
+  by score**, and a client that re-sorts by `score` undoes the feature.
+- **A missed rerank deadline costs one chunk, never the next request** (Phase 1).
+  The stage's model session used to be held by work that had already run out of
+  budget, so one slow query could make the next one skip; the queue and the
+  inference are now separately visible in the debug log and in `rerank audit`.
+
+**Upgrade is ordinary and reversible.** No migrations landed since `v0.4.3`, so the
+store file is untouched; pull the tag, recreate the container, and the volume stays
+as it is. Rolling back is pulling `v0.4.3` again. If you want `v0.4`'s ordering while
+keeping the tooling, set `relevance_weight = 0.0` and `expansion_slots = 0` — both
+changes are config-reversible without another deploy.
+
+What this tag is owed, and what your numbers will decide: whether 0.05 is the right
+weight or too timid (the eval rewards relevance partly by construction, so a real
+store is the falsifier); whether one reserved seat is the right seat count on a store
+with thousands of entities rather than the eval's eighteen; and whether a hop ever
+places something a human would call unrelated. The commands are in
+[plan §17](../ai-specs/recall-quality-plan.md#17-results-log), and the findings go back
+into that log before Phase 4 starts.
 
 Nothing server-side changed. This cut exists because `release.yml` publishes the
 Python client when a tag goes out, and the SDK's `0.4.0` — merged after
