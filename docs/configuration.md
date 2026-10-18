@@ -86,11 +86,15 @@ with its default and an explanatory comment. Highlights:
   62.5%. The floor caps a memory *only* the graph found so it can't leapfrog
   a strong direct match. Both are inert when a query surfaces no graph hits,
   so non-relational recall is unaffected.
-- `[retrieval].relevance_weight` defaults to `0.05` — after the index legs are
+- `[retrieval].relevance_weight` defaults to `0.5` — after the index legs are
   fused, how well a memory matches competes with how new it is, as a bounded
-  multiplier `1 − weight × (1 − relevance)`. It earned **+3.8 precision@1** on
-  the eval with nothing else moving, and is deliberately near-tie-sized; `0.0`
-  gives back ranking by the legs alone. [Retrieval](#retrieval) carries the
+  multiplier `1 − weight × (1 − relevance)`. Against the `0.05` earlier releases
+  shipped it is worth **+13.5 precision@1 and +7.5 MRR** on the eval with recall,
+  completeness and abstention unmoved, and **+22.2 precision@1** on a deployed
+  store's own 18 questions; nothing that held first place lost it at any value on
+  either instrument. `0.0` gives back ranking by the legs alone. It is applied
+  before the list is cut, so a default this large moves the top-`limit` window as
+  well as its order — [Retrieval](#retrieval) carries what that means and the
   arithmetic of what each part of the accepted range can and cannot overrule.
 - `[graph].expansion_slots` defaults to `1` — one of the results you ask for is
   reserved for the hop. It exists because fusion is arithmetic the hop loses: a
@@ -326,7 +330,7 @@ The full-text (BM25) index is model-independent and is not touched.
 hybrid                 = true
 default_limit          = 8
 recency_half_life_days = 90
-relevance_weight       = 0.05
+relevance_weight       = 0.5
 ```
 
 `recency_half_life_days` tunes how much a memory's age discounts it.
@@ -341,25 +345,51 @@ memory matches* is allowed to compete with how new it is. A recall score is
 number every result reports — measured from what the indexes actually matched,
 which is also what `[retrieval].min_relevance` thresholds.
 
-The default, `0.05`, is what the calibration grid earned: precision@1 50.0 → 53.8
-and MRR 63.9 → 66.6 on the eval set, with recall, completeness and abstention
-unmoved and no case losing its top hit. That is a near-tie-sized influence: a
-maximum relevance gap at `0.05` reverses rank 1 against rank 4 and stops there
-(reversing rank 1 against rank 5 needs `0.062`), which is the legs' disagreement
-surviving everything except their closest calls. Set `0.0` to switch the stage off
-entirely (that is a different code path, not a small weight) and get back the
-order recall shipped before this setting existed.
+The default, `0.5`, is what two independent instruments agreed on, and plan
+`ai-specs/recall-quality-plan.md` §17 carries both recordings. On the eval set,
+against the `0.05` this replaces on the same build: precision@1 53.8 → 67.3, MRR
+68.4 → 75.9, recall@5 87.2 → 87.8, complete@5 unchanged at 84.6 and abstention
+unchanged at 100.0 — and no kind's precision@1 fell, while four rose
+(`near-miss` 57.1 → 100.0, `statement` 25.0 → 75.0, `needle` 33.3 → 66.7,
+`nl-category` 50.0 → 62.5). Against `0` on that corpus the ladder reads +17.3
+precision@1, rising monotonically over 0.05 / 0.2 / 0.3 / 0.5. On a deployed
+personal store — 18 questions written by the person whose memories they are,
+replayed against that store with the rerank stage off — precision@1 goes 27.8 → 50.0
+and MRR 47.7 → 63.4. At no value on either instrument did something holding first
+place lose it.
 
-The value is a *spread*, so it is worth knowing what a larger one buys and what
-it costs. At `0.2`, a relevance gap of `0.06` is worth 1.2% of a score — enough
-to win a pair a week of age apart, and also enough to overrule the two legs
-disagreeing by ten ranks (14.8%). Where the line sits is arithmetic rather than
-taste, and the accepted range runs to `0.5`, at which relevance overrules any rank
-gap a result list contains: ranking by relevance, with the indexes demoted to a
-suggestion. The grid measured `0.2` through `0.5` and shipped none of them,
-because that corpus favours relevance partly by construction — its expected
-memories are the topically nearest ones. Confirm a larger value on your own
-memories before trusting it:
+What is *not* in those numbers, and is worth understanding anyway: affinity is
+applied *before* the list is cut to your `limit`, so a δ big enough to reorder ranks
+also changes which memories are in the window. Both instruments saw that movement go
+towards better answers — the field store's complete@5 rose 83.3 → 88.9 between
+δ = 0 and `0.05`, because reweighting pulled an answer up into the five you asked
+for — but a measurement is not a guarantee, so the command at the bottom of this
+section is what to trust on your own store. What δ provably cannot do is change a
+"no match" answer: the floor judges `relevance`, this multiplies `score`, so
+abstention read 100.0 at every value. So the choice is about how much you want the
+first result to be the best-matching memory rather than the best-ranked one:
+
+| If you want | set | what it means |
+|---|---|---|
+| the best first result | `0.5` (default) | relevance may overrule any rank gap a result list contains |
+| the behaviour of earlier releases | `0.05` | +3.8 precision@1 and the window itself untouched: even a maximum relevance gap reverses rank 1 against rank 4 and stops there |
+| the index legs alone | `0.0` | a different code path, not a small weight — the order recall shipped before this setting existed |
+
+The arithmetic behind the middle row is `1 − 1/R` for the worst pair the range
+allows (the better-ranked memory at relevance `0`, the worse-ranked at `1`): at
+`0.05` the largest gap cannot reverse rank 1 against rank 5, which needs `0.062`;
+at `0.2` relevance overrules a ten-rank disagreement between the legs (14.8%); at
+`0.5` it overrules a sixty-rank one, which is nearly a whole result list —
+relevance as primary sort key, the indexes demoted to a suggestion. The accepted
+range stops there on purpose and the shipped default now sits at its top, so going
+higher means arguing for a new bound rather than nudging one.
+
+An earlier release shipped `0.05` with `0.5` plainly in view, and the reason
+belongs with the changed number rather than being edited out: that corpus favours
+relevance partly by construction — its expected memories are the topically nearest
+ones — so a monotone curve says little about δ once it is large enough to move ranks
+instead of ties. Confirm any value on your own memories before trusting it, which is
+exactly how `0.5` got here:
 
 ```bash
 recuerdos-ai recall audit --config tuned.toml --compare-config deployed.toml \

@@ -221,26 +221,41 @@ min_relevance = 0.25
 # The floor above decides what gets returned; this decides what comes first
 # among what was.
 #
-# 0.05 is the default: what the calibration grid earned on the eval set (+3.8
-# precision@1, +2.7 MRR, with recall, completeness and "no match" answers
-# unmoved, and no case losing its top hit). It is a near-tie-sized influence:
-# even the largest relevance gap at 0.05 reverses rank 1 against rank 4 and stops
-# there, so the two index legs' disagreement survives everything except its
-# closest calls.
+# 0.5 is the default: what two independent measurements agreed on. Against the
+# 0.05 earlier releases shipped, on the eval set with the same build: precision@1
+# 53.8 -> 67.3, MRR 68.4 -> 75.9, recall@5 87.2 -> 87.8, complete@5 and "no match"
+# answers unchanged, and no kind's precision@1 going down (four rose). Against 0 on
+# that corpus the ladder reads +17.3 precision@1. On a deployed personal store -- 18
+# questions written by the person whose memories they are, replayed against that
+# store by `scripts/field-measure.sh` with the rerank stage off -- the same range is
+# worth +22.2 precision@1 and +15.7 MRR. On neither instrument did anything holding
+# first place ever lose it, at any value.
 #
-# 0.0 switches the stage off and restores the order recall shipped before this
-# setting existed. Larger values were measured and deliberately NOT shipped as
-# the default: 0.2 buys more precision@1 on that eval (+9.6), but at 0.2
-# relevance can overrule a ten-rank gap, which is a bigger claim about your
-# memories than a default should make on this evidence. Which delta can reverse
-# which rank gap is arithmetic, tabulated in the source module docs
+# One structural consequence is worth knowing before you change it: this multiplier
+# is applied BEFORE the list is cut to your limit, so a delta this large moves which
+# memories are in the window and not only their order. On both instruments that
+# movement went towards better answers, which is a measurement and not a promise --
+# so check it on your own memories with the command at the bottom of this section
+# rather than trusting either direction. It cannot change "no match" answers at all:
+# the floor above judges `relevance`, this judges `score`.
+#
+# 0.05 is what earlier releases shipped; set it if you would rather not answer the
+# window question for +3.8 precision@1, with the top-5 itself untouched. 0.0
+# switches the stage off entirely -- not a small weight but a different code path --
+# restoring the order recall had before this setting existed.
+#
+# The accepted range is 0.0..=0.5 and the default now sits at its top, on purpose:
+# 0.5 is the point where relevance can reverse a gap of sixty ranks, i.e. where it
+# becomes the primary sort key rather than a strong influence. Past that is a
+# different pipeline, not a bigger number. Which delta reverses which rank gap is
+# arithmetic, tabulated in the source module docs
 # (memories/domain/recall_ranker.rs).
 #
 # Measure a change on your own memories before trusting it:
 #   recuerdos-ai recall audit --config a.toml --compare-config b.toml \
 #       --queries questions.txt
 # (writes nothing, so the daemon may stay running).
-relevance_weight = 0.05
+relevance_weight = 0.5
 
 # The cosine similarity at which the vector leg stops being evidence. Two
 # unrelated English sentences measure 0.4-0.55 in a sentence-embedding space,

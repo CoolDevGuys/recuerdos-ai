@@ -81,6 +81,44 @@ memories before you spend either.
   `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
   carries no rerank model, since the default does not use one.
 
+## Unreleased — the field host answered the questions rc1 asked, and one answer changes a default
+
+Deployed measurements are in. [`recall-quality-plan.md`](../ai-specs/recall-quality-plan.md) §17 now
+carries the first readings taken against a live personal store running `v0.5.0-rc1`: 18 questions
+written by the person whose memories they are, replayed over that store by
+[`scripts/field-measure.sh`](../scripts/field-measure.sh) with the rerank stage off, at four values of
+one knob. Three of rc1's owed questions have answers, and one of them is a shipped default.
+
+- **`[retrieval].relevance_weight` now defaults to `0.5`, not `0.05`.** rc1 asked whether 0.05 was
+  right or too timid; it was timid. Against the baseline it replaces, same build: **precision@1
+  53.8 → 67.3**, **MRR 68.4 → 75.9**, recall@5 87.2 → 87.8, `complete@5` and abstention unchanged, and
+  **no case kind's precision@1 fell** — four rose (`near-miss` 57.1 → 100.0, `statement` 25.0 → 75.0,
+  `needle` 33.3 → 66.7, `nl-category` 50.0 → 62.5). Against `0.0` on that corpus the ladder reads
+  +17.3 precision@1 and climbs monotonically through 0.05 / 0.2 / 0.3 / 0.5. On the real store:
+  precision@1 **27.8 → 50.0** and MRR **47.7 → 63.4** across δ = 0 / 0.05 / 0.2 / 0.5. On neither
+  instrument, at no value, did anything holding first place lose it — which is the sentence that
+  mattered, because "the eval rewards relevance by construction" was the only reason 0.05 shipped.
+  *Behaviour change on upgrade*: the order you get back changes. `relevance_weight = 0.05` restores
+  what rc1 shipped, `0.0` restores the pre-Phase-2 order, and the accepted range is unchanged.
+- **The reserved graph seat costs a little here, and the mechanism is visible in the audit.** With
+  the seat on, precision@1 held (38.9 → 38.9) while MRR fell 57.9 → 55.7, twice, because an arrival
+  the graph alone found enters at rank 2 by design and the second stage never judges it. Not a
+  regression against rc1 — a measured price on a store whose entity graph is denser than the eval's.
+  The default stays where rc1 put it, with the number recorded next to it.
+- **`[rerank].mode = "off"` was the right default for a reason we had not published.** Fused as
+  shipped (`strategy = "rrf"`, `weight = 1`) the stage changed almost nothing while costing 236 ms p50
+  and ~1.4 GiB resident. Re-fused as `strategy = "replace"` on the same 18 questions it reads
+  **83.3 precision@1 / 85.2 MRR** against the shipped fusion's 38.9 / 54.6 — eight queries gained
+  first place, none lost it. That is a finding, not a shipped default: the eval grid has `replace`
+  *losing* up to −9.6 precision@1 on three of four models, and the same field run shows how both can
+  be true (where the model has nothing to say, its head scores 0.000 and banded raw scores reorder
+  noise). What separates those two readings is a frozen copy of a real store inside the harness, and
+  that is now the project's next measurement rather than a new phase.
+
+Nothing else moves: no migrations, no wire changes, no new downloads. Upgrading from `v0.5.0-rc1` to
+a build containing this is a config-file question — the store is untouched, and both knobs above stay
+reversible without another deploy.
+
 ## v0.5.0-rc1 — Three ordering changes, and the measurements they still owe
 
 A **prerelease**, deliberately: `latest` is not moved, the Python SDK is not
@@ -131,6 +169,10 @@ with thousands of entities rather than the eval's eighteen; and whether a hop ev
 places something a human would call unrelated. The commands are in
 [plan §17](../ai-specs/recall-quality-plan.md#17-results-log), and the findings go back
 into that log before Phase 4 starts.
+
+> **Answered on 2026-10-18**, by the box this tag was cut for: 0.05 was timid and the default is now
+> `0.5`; one seat is affordable but not free; and the rerank stage turned out to be muted by its
+> fusion rather than wrong. See the Unreleased entry above and §17 for the numbers.
 
 ## v0.4.3 — A release to publish the Python SDK
 

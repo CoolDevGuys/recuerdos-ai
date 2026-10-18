@@ -320,17 +320,33 @@ pub struct RetrievalConfig {
     /// fused score (recall-quality-plan.md Phase 2).
     ///
     /// `score ×= 1 − δ·(1 − relevance)`, so δ is the spread relevance is allowed
-    /// across. `0.05` — the shipped default, the grid's choice — lets a better
-    /// match win the calls the legs tie and the calls that turn on a few days of
-    /// age; even its maximum relevance gap reverses rank 1 against rank 4 and
-    /// stops there (rank 5 would need 0.062). `0.0` switches the stage off (a
-    /// different code path, not a small weight) and restores the order recall
-    /// shipped before this knob existed.
+    /// across. `0.5` — the shipped default — makes relevance the strongest single
+    /// influence on the order, which is what two independent measurements agreed
+    /// on: this corpus's grid (+13.5 precision@1 and +7.5 MRR over the `0.05` it
+    /// replaces, no kind's precision@1 down) and an owner's 18 real questions
+    /// replayed against their own deployed store (+22.2 precision@1), with nothing
+    /// that held first place losing it on either.
     ///
-    /// Not the floor, and not a knob on it: `min_relevance` still decides what is
-    /// returned at all. The range `0.0..=0.5` is deliberately generous at the top
-    /// so a grid can measure a regime nobody should ship; `recall_ranker`'s module
-    /// docs carry which δ can and cannot reverse which rank gap.
+    /// What to know before changing it: affinity is applied *before* the list is cut
+    /// to `limit`, so a δ this large moves which memories are in the window as well
+    /// as their order. Both instruments saw that go towards better answers, which is
+    /// a measurement rather than a guarantee — audit it on your own store with
+    /// `recall audit` before trusting it either way. It cannot move abstention:
+    /// `min_relevance` compares `relevance` while this multiplies `score`, so the
+    /// "no match" answer is identical at every δ.
+    ///
+    /// `0.05` is what earlier releases shipped, and is the value to set if the
+    /// window question above is one you would rather not answer: it is worth +3.8
+    /// precision@1 and leaves the window alone. `0.0` switches the stage off — a
+    /// different code path, not a small weight — restoring the order recall shipped
+    /// before this knob existed.
+    ///
+    /// The accepted range `0.0..=0.5` now ships at its top rather than leaving
+    /// headroom, deliberately: 0.5 is where relevance can reverse a sixty-rank gap,
+    /// i.e. where it becomes the primary sort key, so going higher is a different
+    /// pipeline rather than a bigger number and an operator who wants that has to
+    /// argue for a new bound. `recall_ranker`'s module docs carry which δ can and
+    /// cannot reverse which rank gap.
     pub relevance_weight: f32,
     /// The cosine similarity at which the vector leg stops being evidence.
     ///
@@ -1486,8 +1502,9 @@ mod tests {
     #[test]
     fn relevance_weight_defaults_to_the_value_the_ranker_shares() {
         // Two things, both worth pinning. The default is a measurement rather
-        // than a taste (plan §17: +3.8 precision@1, +2.7 MRR, nothing else
-        // moved), so the literal below is what turns a quiet edit of
+        // than a taste (plan §17: +17.3 precision@1 on the eval against δ = 0,
+        // +22.2 on a deployed store, no query losing first place on either), so
+        // the literal below is what turns a quiet edit of
         // `DEFAULT_RELEVANCE_WEIGHT` into a reviewable change of behaviour. And
         // both layers read that one constant, which is the no-drift property:
         // `recuerdos-ai config`, the field docs and the ranker cannot disagree
@@ -1498,7 +1515,7 @@ mod tests {
                 config.retrieval.relevance_weight,
                 crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_WEIGHT
             );
-            assert_eq!(config.retrieval.relevance_weight, 0.05);
+            assert_eq!(config.retrieval.relevance_weight, 0.5);
             Ok(())
         });
     }
