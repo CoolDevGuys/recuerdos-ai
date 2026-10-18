@@ -1014,20 +1014,31 @@ one top-1 the Phase 2 change can lose).
 | Phase 3's default is measured on a kind that could not see it | The eval's four inherited `chain` cases produce no seeds, so `chain`'s +20.0 is one case the mechanism could reach, not the kind working. §17 states it, `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which cases are reachable, and the DoD's `chain` tick carries the asterisk. The hand review on a real store is the half that could still refute it, and it is owed. |
 | `just check-native` in the dev container can be green against a stale build | Measured in Phase 3: a green run clippy'd `recuerdos-ai v0.3.1` while the manifest said `0.4.3`, `cargo fmt --check` said nothing about an unformatted file, and `cargo test` ran a unit-test binary 117 tests behind the tree. Until the recipe is fixed, touch the sources first and check the run against `cargo test -- --list` (1 027 declared = 1 016 passed + 11 ignored on this branch); confirm the log names the tests you just wrote. `test result: ok` alone is not evidence. |
 
+| The remaining phases target recall failures this store may not have | The field host is 16/18 complete inside five before Phase 3's mechanism runs, and its two failures are not mis-ranking: no memory above relevance 0.24 came back at all for either. If the memories are absent, the plan's remaining machinery solves a problem that does not exist here and the right move is calibration plus a release; if they are present under different words ("Strix Halo" asked, "Radeon 8060S Graphics" stored), that is the first field-observed case for Phase 4's prompts or Phase 6's aliases — and one `grep` over the export says which. Recorded before choosing, so the choice is not made on the synthetic corpus's evidence alone. |
+| The eval corpus's agreement rate is not the field's | The shipped rerank fusion assumes vector+BM25 agreement is nearly always right, which the eval corpus supports and query 5 of the field files does not. Any future grid must run against a real store copy, not only `eval/cases.toml`. |
+
 **Follow-ups (not in this plan):**
-- **Raise `[retrieval].relevance_weight` above 0.05, with one check attached.** Both instruments
-  now point the same way and neither shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 /
-  +17.3 at δ 0.2 / 0.3 / 0.5 with abstention unmoved and no `by_kind` regression at any cell (§17,
-  Phase 2), and the field host reads +27.8 / +19.9 at 0.5 over the shipped value (§17 · Field host).
-  Phase 2's own text said this is a release note rather than a config edit, and the condition it set
-  is now met. Read first the shape a large δ can get wrong: two near-identical memories where only
-  recency separates them and the older one is stale — a supersession consolidation missed. On the
-  field host's 0.5 run seven top-1s moved for a net of +5, so either nothing lost rank 1 (two flips
-  were one wrong answer replacing another) or exactly one query did; the per-query rank lines say
-  which, and two of the seven are the pair of inference-server questions, which is that shape's
-  neighbourhood. Note too that the corpus flips at 0.2 where the field host does not budge until
-  0.5 — the corpus's close calls are nearer tied than this store's, so a default chosen on it is
-  not the default this store wants. Raising it re-records `eval/baseline.json`, as Phases 2 and 3 did.
+- **Raise `[retrieval].relevance_weight` above 0.05.** Both instruments point the same way and
+  neither shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 / +17.3 at δ 0.2 / 0.3 / 0.5 with
+  abstention unmoved and no `by_kind` regression at any cell (§17, Phase 2), and the field host reads
+  +27.8 / +19.9 at 0.5 over the shipped value (§17 · Field host). Phase 2 said this is a release note
+  rather than a config edit if the falsifier held, and it held — read per query, five rank-1 gains at
+  0.5 and one at 0.05 with **nothing losing first place at either value**. Three things are still open
+  and each is small: the *value* (0.5 is what this store measures best, 0.3 is what the corpus rates
+  a safe plateau — no instrument has found a turning point, so the choice is a risk preference rather
+  than a measurement); `grep -c superseded` over the export, which is the only failure class a large
+  δ can lose and which may not exist on a store that consolidates well; and the cell nobody has run,
+  **δ 0.5 with the stage off** — every δ comparison so far had the reranker on both sides, so the
+  absolute at the shipped `mode = "off"` is unknown even though every *difference* is valid. Raising
+  it re-records `eval/baseline.json`, as Phases 2 and 3 did.
+- **Is the rerank stage muted rather than useless?** Query 5 of the field files is the exhibit: the
+  model scored the right memory 0.999 and the served first 0.056, and rank 4 stood, because
+  `strategy = "rrf"` at `weight = 1` may break a tie against one leg but never overrule vector+BM25
+  agreement — and on a store that repeats project names, that agreement is a lexical artifact more
+  often than the eval corpus's paraphrased cases made it. One config line and the same query file
+  answers it: rerank `on` with `strategy = "replace"`, then again with `weight = 2`, each against the
+  shipped fusion at the same δ. If either lifts p@1 past what off buys, the 300 ms has a purpose and
+  the default deserves a second look; if neither does, off is confirmed for the right reason.
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
 - Query-embedding LRU cache for repeated agent queries.
 - An approximate-NN index beyond ~100k memories (`docs/performance.md`).
@@ -1855,9 +1866,10 @@ whoever reads the file next rather than a bar quietly raised.
   gained p@1 +5.6 / MRR +3.5 on 18 real queries whose expectations the owner wrote, and the sweep
   continued to 0.5, where it gains +27.8 / +19.9 over the shipped value. So the question below —
   does the eval's curve hold on real memories? — is answered, and it holds with a larger effect.
-  One thing the summary cannot yet say is whether §4's last row held: three top-1s moved for a net
-  of +1, so either nothing lost rank 1 or one query did and two gained, and the per-query
-  `expect …: rank N → M` lines are what settle it. That reading is owed before the default moves.
+  One thing the summary could not say was whether §4's last row held; read per query it **did**: one
+  rank-1 gain (q2), two improvements short of first (q15 5 → 4, q17 4 → 3), and nothing lost rank 1
+  — the other two `⚑` rows changed between two memories that were both wrong. The condition Phase 2
+  attached to raising the default is met.
   The recipe, which writes nothing and works with the daemon running:
 
   ```bash
@@ -2233,18 +2245,81 @@ implementation changes`). A 5% relevance tax cannot beat an age advantage; by 50
 0.05 flip could afford were already flipped, and the rest need a penalty large enough to beat a
 recency term that is still winning by more than 15%.
 
-What this does **not** settle, and why the default is not being changed in this commit: a δ that
-high makes relevance largely win, so the case to look for is the one where only recency separates
-two near-identical matches — a superseded fact that consolidation failed to retire, or a
-preference restated last week. `chain`-shaped pairs like queries 10 and 11 here (two inference
-servers, one question each) are the neighbourhood. Raising the shipped default is a Phase 8
-decision with that check attached, and §16 carries it.
+**Per query, in full, so the arithmetic is not left in the air.** The `expect …: rank N → M`
+lines resolve the question the summary could not. At **δ 0 → 0.05**: one query gained rank 1 (q2,
+2 → 1), two improved without reaching it (q15 5 → 4, q17 4 → 3), nothing lost it; the other two
+`⚑` rows (q11, and q15's top-1) changed between two memories that were *both* wrong, which is why
+3 top-1 changes net out at +1. At **δ 0.05 → 0.5**: five queries gained rank 1 (q3 3 → 1, q4 3 → 1,
+q6 4 → 1, q16 4 → 1, q17 3 → 1), nothing lost it, and the other two `⚑` rows are q10 and q11
+reshuffling noise. So **§4's last row — "no query whose `expect` was at rank 1 loses it" — holds on
+the field host at both values**, which is the condition Phase 2 attached to raising the default, and
+the eval's own grid never regressed a kind at any δ either.
 
-*One unexplained cell:* the after side's p50 falls as δ rises (304 → 237 ms) while the same-config
-twice noise floor for this host is 299 → 302 ms (1%). Nothing in the mechanism says a relevance
-weight should make a recall cheaper, and the per-side `rerank latency` lines (which report how many
-candidates were judged) were not captured in the summary. Recorded as an open observation, not a
-finding.
+What *still* argues for caution is narrower than the worry Phase 2 recorded, and it is not about
+relevance overrunning rank evidence: a δ that large makes relevance largely win, so the one case it
+can lose is two near-identical memories where only recency separates them and the older is stale —
+a superseded fact consolidation failed to retire. That is checkable rather than philosophical: the
+export marks superseded rows, so `grep -c superseded` over it says whether the failure class even
+exists on this store. It is worth noting that the one query a large δ left un-fixed even at 0.5 (q15: `pnpm` served first
+when the answer is the `uv`/`ruff`/`pytest` memory) is not that class either — it is a vocabulary
+collision, where "package management" pulls the JS preference ahead of the Python one, and the
+cross-encoder knew better (rerank 0.371 for pnpm against 0.982 for the answer).
+
+*The unexplained latency cell is explained, and it was never about δ.* The rerank leg's own p50 in
+those two files is 306 ms and 232 ms, and the recall latency tracked it exactly (313.6 and 238.8) —
+with the embedder and fusion costing ~6 ms, a recall's wall clock *is* the stage's wall clock, and
+the stage's p50 varies 232–306 ms run to run on this box. So δ has no measurable latency effect at
+all; what looked like a cheaper δ was a faster afternoon for the model. The recall noise floor for
+this host is therefore bounded by the stage whenever the stage is on, which is one more reason the
+`mode = "off"` decision makes the host easier to reason about.
+
+#### The stage is not useless, it is muted — and this is the finding neither gate was looking for
+
+Query 5 of the δ files, in both cells, is the exhibit. The right memory (`Residential proxies are
+mandatory…`) sits at rank 4 with **rerank 0.999**, and the memory served first (`The
+linkedin-scrappy subproject is a private Apify Actor…`) carries **rerank 0.056**. The model was
+decisive and correct by a factor of eighteen, and the order did not change. That is
+`[rerank].strategy = "rrf"` at `weight = 1`, whose documented semantics are exactly this: *lets the
+reranker break ties against a single retrieval leg but never overrule vector+BM25 agreement*. Here
+the agreement was a lexical artifact — "linkedin-scrappy" appears in the wrong memory's text, and
+BM25 is content to agree about it.
+
+The shipped default was chosen on a grid over the eval corpus, which found `replace` losing up to
+−9.6 p@1 and `weight = 2` giving back 2 points plus a third of the `needle` kind's, because on that
+corpus a cross-encoder's raw-score gaps mean little (expected pairs score 0.006 as often as 0.99)
+and the index legs' agreement is nearly always right. That store is paraphrased synthetic cases. A
+real store repeats project names across memories, which is the condition under which lexical
+agreement is confidently wrong — and then weight 1 spends the stage's judgement entirely. So Phase
+1's reading here ("45× the p50 for −0.2 MRR") needs this footnote to be honest: **the stage is not
+shown to be wrong, it is shown to be muted**, and its cost buys nothing *as fused*. The test that
+would settle whether the latency has a purpose is one config line and the same query file: rerank
+`on` with `strategy = "replace"`, and separately with `weight = 2`, each against the shipped fusion.
+
+This does not undo the `mode = "off"` decision. At weight 1 the stage demonstrably does not pay for
+300 ms, so off is right as configured; what is open is whether some *other* fusion makes it pay.
+
+#### Two of eighteen are not ranking failures at all
+
+q10 and q11 — the two inference-server questions — have **no memory above relevance 0.24** (q11:
+0.31) anywhere in the returned head, and the expectation was `absent → absent` in every cell. The
+pipeline did not mis-rank an answer; it found nothing on the topic. Two readings, and they are not
+the same decision:
+
+- **The memory is not in the store.** Then abstention is *correct* behaviour, these two rows are
+  impossible expectations, the honest complete@5 for the answerable queries is 16/16, and the
+  client would in fact have abstained — the floor is 0.25 and the whole head sits under it. Worth
+  recording that this reading makes the 88.9% ceiling used in the seat argument *more* damning, not
+  less: the recall job was already done.
+- **It is in the store under different words** — a query saying "Strix Halo" against a memory
+  saying "Radeon 8060S Graphics", say. Then this is the first field-observed instance of the failure
+  Phases 4 (embedding prompts) and 6 (aliases) were written for, and a better reason to build one of
+  them than the synthetic `chain` kind ever was.
+
+`grep -in "radeon\|3090\|strix\|vram" ~/field-private/memories.md` decides which, and it is the
+highest-value five seconds available in this whole project: it is the difference between "the plan's
+remaining phases solve a problem this store does not have" and "here is one, named, with the query
+that fails".
+
 
 #### The reserved seat — aggregate in, hand reading owed
 
@@ -2310,9 +2385,13 @@ single-knob comparisons at n=18 means one flipped query is 5.6 points of p@1, so
 about two queries in either direction should be read as nothing, exactly as the eval's 1.7-per-case
 noise floor says here.
 
-Still owed on this host: the M1 hand review above, the warm-RSS-with-stage-off number, Task 1.5 if
-the stage goes back on, and Task 0.9's store copy (optional, and the only one of the four that
-would let the eval corpus itself be tuned on real data).
+Still owed on this host, in the order that would change a decision: the `grep` over the export that
+names q10/q11 as absent-memory or vocabulary-mismatch; the δ sweep with the stage **off**, which is
+the configuration the host now runs and whose absolute no file here measures; the fusion test
+(`replace`, then `weight = 2`) that decides whether the stage is muted or merely expensive; the M1
+hand review of the seat's moved rows; the warm-RSS-with-stage-off number; Task 1.5 if the stage goes
+back on; and Task 0.9's store copy, which is what turns these eighteen questions into something a
+later phase can gate on instead of an anecdote about one machine.
 
 One caveat about `complete@5` here, because the ceiling argument above leans on it: the audit
 applies no client floor — it prints `floor: clients drop below 0.25, this audit shows everything`.
