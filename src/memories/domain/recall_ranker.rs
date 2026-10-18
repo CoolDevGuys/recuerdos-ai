@@ -815,10 +815,6 @@ fn highest_first(a: f32, b: f32) -> std::cmp::Ordering {
     }
 }
 
-/// The canonical result ordering: best score first, and ties broken by
-/// recency then id so the same inputs always produce the same list —
-/// pagination depends on it, whether the tie came from the fusion or from
-/// the rerank stage re-sorting it.
 /// `sort_ranked`'s order with one extra key: score, then the *relevance* that
 /// produced it, then recency and id.
 ///
