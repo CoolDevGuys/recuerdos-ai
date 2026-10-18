@@ -633,10 +633,17 @@ Properties:
 
 ### Definition of Done
 
-- [ ] `just check-native` (and `just sdk-test` if 3.3 lands) passes.
-- [ ] Grid pasted in §17. Chosen `expansion_slots` default with rationale in doc comments.
-- [ ] §4 gate holds, including `complete@5` for `relational`/`chain` up ≥ 15 points.
+- [x] `just check-native` (and `just sdk-test` if 3.3 lands) passes. — clean; `sdk-test`
+      not applicable, 3.3 did not land (deferred to Phase 8, §17's deviations).
+- [x] Grid pasted in §17. Chosen `expansion_slots` default with rationale in doc comments.
+      — 10 cells, default `1`, rationale in the field docs and the `config.rs` comment.
+- [x] §4 gate holds, including `complete@5` for `relational`/`chain` up ≥ 15 points.
+      — `relational` +28.6 on the mechanism. `chain` +20.0 **with an asterisk**: the four
+      cases this phase inherited produce no graph seeds at all, so the movement is one new
+      case the mechanism could reach. §17 says so rather than letting the number stand.
 - [ ] `recall audit` on the field host's store: every changed result reviewed by hand.
+      — **not met**: needs the deployed store, which is the operator's. Recipe in §17
+      ("Not measured"). Same blocker as Task 0.9, Phase 1's field halves, Phase 2's audit.
 
 ---
 
@@ -996,6 +1003,8 @@ one top-1 the Phase 2 change can lose).
 | Two `eval` runs need not agree | Measured floor: 0.7 recall points, 1.7 if a whole single-expectation case flips. Equal-BM25 documents (~38 of them match "project" through the category field) reorder with Tantivy segment layout. Below ~2 recall / ~1 p@1 a Δ is one case moving, not a result; re-run twice before gating on it. Root cause and candidate fixes in §17 Phase 0 and the follow-up below. |
 | A busy rerank stage looks like a slow one on the wire | Both stay `skipped`/`deadline`, deliberately (invariant 3.5: shipped SDKs parse two reason values, so a third is a breaking change). The distinction lives on the domain trace, in the `warn!` line beside `queued_ms`/`inference_ms`, and in `rerank audit`'s `skipped_busy`. `a_busy_skip_says_exactly_what_a_slow_one_says` pins the transport half so nobody "just adds a field" later. |
 | Phase 1's field halves (1.1, 1.5) went unmeasured | Code and measurement path shipped; §17 records which two numbers are owed, the command that produces each, and the shape that would confirm or refute R1. R1 is left open rather than called confirmed by construction. |
+| Phase 3's default is measured on a kind that could not see it | The eval's four inherited `chain` cases produce no seeds, so `chain`'s +20.0 is one case the mechanism could reach, not the kind working. §17 states it, `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which cases are reachable, and the DoD's `chain` tick carries the asterisk. The hand review on a real store is the half that could still refute it, and it is owed. |
+| `just check-native` in the dev container can be green against a stale build | Measured in Phase 3: a green run clippy'd `recuerdos-ai v0.3.1` while the manifest said `0.4.3`, `cargo fmt --check` said nothing about an unformatted file, and `cargo test` ran a unit-test binary 117 tests behind the tree. Until the recipe is fixed, touch the sources first and check the run against `cargo test -- --list` (1 027 declared = 1 016 passed + 11 ignored on this branch); confirm the log names the tests you just wrote. `test result: ok` alone is not evidence. |
 
 **Follow-ups (not in this plan):**
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
@@ -1034,6 +1043,33 @@ one top-1 the Phase 2 change can lose).
   `baseline … now: …` lines in each cell's output; parsing them and printing a
   gated column next to the wide one is a day's care, and it removes a trap for every
   later phase's grid.
+- Make the dev container's `just check-native` unable to pass on a stale build. Today it
+  can: `cargo fmt --check` reads file contents cargo thinks are unchanged, `clippy
+  --all-targets` can finish in ~1 s, and `cargo test` can run a test binary that predates
+  the tests you just added (measured in Phase 3: 117 of the tree's tests were missing from
+  a "green" run). Either touch the sources at the head of the recipe, or drop the
+  `#[ignore]`d count from the reported total and compare it with `cargo test -- --list`,
+  whose 1 027 is what the tree actually declares. Until then §17's checks are only worth
+  what their logs' test names are.
+- Phase 6 has a concrete target it did not have before: the four `chain` cases whose
+  queries confirm no seed (`chain_cases_paraphrase_their_entities_so_no_hop_can_start`
+  lists the one that does). A τ-seeded or alias-resolved hop that reaches them is where
+  that kind's remaining 60 → 100 lives, and it is falsifiable in one command — three of
+  them flip, abstention stays 100.0, and the pinning test is updated to say so. Three, not
+  four: `tuning the database the invoices live in` expects a memory that declares no
+  entities at all, so it needs extraction or a reclassified case rather than a seed (§17).
+  If a τ that reaches the rest costs abstention, §1.3's 100 → 0 is the shape to notice
+  first.
+- `matched.via` (Task 3.3, deferred to Phase 8 with the rest of the agent-facing surface):
+  what a hop came through, as the seed entity's display name. Needs `EntityGraph::neighbours`
+  to carry the originating seed (`MIN(depth)` per key, `sqlite_entity_graph.rs`'s recursive
+  CTE), a `GraphHit` in its place, a `skip_serializing_if` field on the REST dto, an
+  optional field plus a present/absent parsing test in both SDKs, and `just sdk-test`.
+  Cheap to do while Phase 8 is deciding what agents see; expensive to do twice.
+- `[graph].rank_weight` 0.3 vs 0.15 is an open question, not a settled default: on this
+  corpus the two differ by one informational `alias` case, which is under the noise floor
+  for a case flip. Either more `alias` cases or the field-host audit can decide it; a
+  third grid on the same 73 cases cannot.
 - Port or delete `ai-specs/experiments/recall-accuracy-2026-10-17.patch`. It no
   longer applies (`git apply --check` fails at `memory_recaller.rs:427` — it predates
   Phase 1's deadline plumbing and Phase 2's affinity stage), which makes it a trap
@@ -1828,7 +1864,296 @@ grids inherit the new baseline; anything that reads Phase 0's grid numbers off t
 file should read the "two readings" note above first.
 
 ### Phase 3 — graph expansion
-- slots × δ × rank_weight grid: _TBD_ · `complete@5` relational/chain: _TBD_ · hand review: _TBD_
+
+**Shipped default: `[graph].expansion_slots = 1`.** Gated reading, against the baseline as
+Phase 2 left it: recall@5 83.3 → **87.2** (+3.8), `complete@5` 80.8 → **84.6** (+3.8),
+MRR 66.6 → **68.4** (+1.8), precision@1 **53.8 unchanged**, abstention **100.0**
+unchanged. The gate's per-kind condition — `complete@5` up ≥ 15 points on `relational`
+and `chain` — is met on both: **+28.6** and **+20.0**, with the `chain` half carrying an
+asterisk recorded in full below
+([Why the gate's `chain` half could not be measured](#the-gates-chain-half-could-not-be-measured-and-the-corpus-was-why)).
+
+#### The anchor first (slots = 0)
+
+`apply_expansion` is called on every recall and returns on `slots == 0` before reading
+the list, so "knob at zero, no change" is a code path rather than arithmetic — which is
+what the anchor then confirmed. With `RECUERDOS_AI_GRAPH__EXPANSION_SLOTS=0` and every
+other knob at its shipped value, `eval --baseline eval/baseline.json` reported
+`change: -0.0` on all four gated metrics (83.3 / 53.8 / 66.6 / 80.8). No pre-existing
+assertion was edited anywhere in the phase; the only edits to existing test code were
+passing the new `MemoryRecaller::new` argument, and the graph tests that predate this
+phase pass `0`.
+
+#### The knob grid (Task 3.5)
+
+Ten cells, one `eval` process each (`scripts/recall-grid.sh --no-defaults`, slots through
+`RECUERDOS_AI_GRAPH__EXPANSION_SLOTS`), measured **before** the corpus change described
+below — so its absolute columns are the bare summary over the then-73 scored cases, not
+the gated 59. The reference row is the shipped config with the knob at zero. Noise floor
+carried forward from §16: ~0.7 recall, ~1.7 if a whole single-expectation case flips.
+
+| cell | recall | p@1 | complete | MRR | p50/p95 | Δrecall | Δp@1 | Δcomp | ΔMRR |
+|---|---|---|---|---|---|---|---|---|---|
+| slots-0-rw030 | 75.8 | 45.2 | 72.6 | 58.7 | 8.2/9.5 | reference | — | — | — |
+| slots-1-rw030 | 78.5 | 45.2 | 75.3 | 59.6 | 8.2/9.6 | +2.7 | +0.0 | +2.7 | +0.9 |
+| slots-2-rw030 | 78.5 | 45.2 | 75.3 | 59.7 | 8.6/11.0 | +2.7 | +0.0 | +2.7 | +1.0 |
+| slots-0-rw015 | 75.8 | 46.6 | 72.6 | 59.3 | 8.5/10.2 | +0.0 | +1.4 | +0.0 | +0.6 |
+| slots-1-rw015 | 78.5 | 46.6 | 75.3 | 60.4 | 8.3/10.1 | +2.7 | +1.4 | +2.7 | +1.7 |
+| slots-2-rw015 | 78.5 | 46.6 | 75.3 | 60.8 | 8.4/10.0 | +2.7 | +1.4 | +2.7 | +2.1 |
+| slots-0-delta0 | 75.8 | 42.5 | 72.6 | 56.5 | 8.1/9.9 | +0.0 | −2.7 | +0.0 | −2.2 |
+| slots-1-delta0 | 78.5 | 42.5 | 75.3 | 57.4 | 8.5/10.4 | +2.7 | −2.7 | +2.7 | −1.3 |
+| slots-1-delta02 | 79.9 | 50.7 | 76.7 | 63.1 | 8.7/10.5 | +4.1 | +5.5 | +4.1 | +4.4 |
+| slots-1-delta05 | 80.4 | 57.5 | 76.7 | 67.8 | 8.2/10.0 | +4.6 | +12.3 | +4.1 | +9.1 |
+
+Four readings from it:
+
+1. **The slot's gain is the same at every δ and every graph weight**: +2.7 recall, +2.7
+   `complete@5`, +0.9 MRR, and precision@1 exactly ±0.0 in all six slotted cells. The
+   p@1 column is not luck — index 0 is never on offer, so no cell can move it.
+2. **The slot is indifferent to affinity, as designed.** It reads positions, not scores,
+   so the hop's δ tax does not stop it: at δ = 0 it still buys +2.7/+2.7 (the −2.7 p@1 in
+   those two rows is δ = 0's own cost — `slots-0-delta0` shows the same number). At
+   δ = 0.2 and 0.5 the affinity gain and the slot gain both appear (+4.1, +4.6 recall),
+   i.e. they stack rather than compete for the same cases.
+3. **`rank_weight` 0.15 is not distinguishable from the shipped 0.3**, at either slot
+   count: recall and `complete@5` identical in all three pairs, and the whole +1.4 p@1 is
+   *one* `alias` case (alias p@1 20.0 → 40.0 — one of five, which is +1.4 overall and
+   under the 1.7 it costs to flip a case). `alias` is one of Task 0.7's informational
+   kinds, so on the gated subset the two weights differ by nothing measurable. Task 3.5
+   asked whether the RRF term still earns its precision cost; the honest answer is that
+   this instrument cannot see either an earning or a cost, so 0.3 stands and the question
+   goes to §16 rather than into a config edit.
+4. **Latency is flat** — 8.1–8.7 p50 across all ten cells, and the confirmation run below
+   reads 8.2/9.8 with the knob at zero against 8.0/9.7 shipped. A slot is at most three
+   scans over a ≤50-id leg and the truncated list; nothing in the §4 latency row moved.
+
+The invocation, so the table can be re-made (it was recorded against the corpus *before*
+Task 3.5's own case was added, and `expansion_slots` now defaults to `1`, so the zero rows
+need saying out loud where they did not then):
+
+```bash
+./scripts/recall-grid.sh --no-defaults \
+  --cell slots-0,RECUERDOS_AI_GRAPH__EXPANSION_SLOTS=0 \
+  --cell slots-1 \
+  --cell slots-2,RECUERDOS_AI_GRAPH__EXPANSION_SLOTS=2 \
+  --cell rw015,RECUERDOS_AI_GRAPH__RANK_WEIGHT=0.15 \
+  --cell slots-1-rw015,RECUERDOS_AI_GRAPH__EXPANSION_SLOTS=1,RECUERDOS_AI_GRAPH__RANK_WEIGHT=0.15 \
+  --cell slots-0-delta0,RECUERDOS_AI_GRAPH__EXPANSION_SLOTS=0,RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT=0 \
+  --cell slots-1-delta0,RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT=0 \
+  --cell slots-1-delta02,RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT=0.2 \
+  --cell slots-1-delta05,RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT=0.5
+```
+
+Adding `-- --baseline eval/baseline.json --max-drop 100` puts the *gated* `baseline … now:`
+lines in each cell's kept output, which is where the 83.3 → 87.2 table below comes from; the
+script's own columns stay the bare summary (§16 has that trap and the fix owed to it).
+
+#### What the shipped cell buys, by kind
+
+The head-to-head after the corpus change (74 scored, 22 informational), bare summary:
+knob at 0 reads 75.5 / 45.9 / 71.6 / 59.3, shipped reads **78.8 / 45.9 / 75.7 / 60.2**.
+Gated, that is the 83.3 → 87.2 table above. By kind, the two the gate reads, and nothing
+else:
+
+| kind | recall@5 | Δ | p@1 | Δ | complete@5 | Δ |
+|---|---|---|---|---|---|---|
+| `relational` | 57.1 | **+28.6** | 0.0 | +0.0 | 57.1 | **+28.6** |
+| `chain` | 70.0 | +10.0 | 100.0 | +0.0 | 40.0 | **+20.0** |
+| the other 15 kinds | — | +0.0 | — | +0.0 | — | +0.0 |
+
+Which cases moved is worth naming, because the number is small enough to count.
+`relational` is seven cases: with the knob at zero, three read 0% and four read 100%. With
+one slot, two of those three go from finding **neither** expectation to finding both —
+`relational: who owns a decision about a service` (seeds `billing service`) and
+`relational: on-call for an app's dependency` (seeds `mobile app`). Two cases × 1.0 recall
+unit over seven cases *is* the +28.6; nothing else moved. The third 0% case,
+`relational: where a service's team sits`, seeds `billing service` and still reads 0% —
+its answer is not one edge from that seed. So: five of the seven confirm a seed, two of
+those five needed no help, two were delivered by the slot, and one is bounded by what the
+hop reaches rather than where the slot places. `max_hops` and the edge direction are that
+case's ceiling, not this knob.
+
+`relational` p@1 stays 0.0 and *cannot* move: §10's property is that index 0 is never
+touched, and a design that never touches index 0 cannot fix "which result is first" — it
+fixes "did the pair arrive together". That is the promise this phase made seen from the
+side it costs something on, and it is why `chain`'s four unreachable cases below are
+Phase 6's problem rather than a reason to widen the slot.
+
+#### Why one slot and not two
+
+`slots-2` equals `slots-1` on recall and `complete@5` in both weight pairs it was run at
+(+0.0, with MRR differences of +0.1 and +0.4 — under the noise floor). The reason is structural
+rather than a coincidence of this corpus's size: a slot pays for itself only when the hop
+reaches a *second* memory that the indexes left outside the window, and this corpus has
+one promotable hop per affected query. A second slot therefore costs a visible row on
+every recall that promotes, for a gain this instrument cannot see. `2` remains available;
+`0` remains the pipeline as v0.4 shipped it.
+
+#### The relocation Task 3.2 asked to re-measure
+
+Task 3.2 moved the step from before the floor (the experiment patch's position) to after
+the floor and after the rerank leg, and asked for re-measurement rather than trust. The
+measured answer is: **no difference — and no way for this instrument to see one.**
+`relational` recall and `complete@5` both read **57.1 → 85.7**, which is §1.3's row for the
+expansion slot exactly, and the overall movement is the same size: +3.8 points of gated
+recall here against §1.3's +3.9 there (the two corpora's absolute columns are not
+comparable — §16). The eval cannot distinguish the two positions for two measurable
+reasons: the rerank stage is `mode = "off"` in the eval config, so there is no later
+reorder for it to be buried by; and no hop ever falls below the floor on this corpus,
+because hop memories carry a constant 0.35 relevance against a 0.25 floor. So the
+relocation is justified by what it guarantees (the floor's verdict stands; a reranker
+cannot bury the hop) and pinned by a test
+(`the_slot_is_applied_after_the_rerank_leg_not_before_it`, a reversing fake reranker plus a
+slot), **not** by a measured gain.
+Anyone who wants that gain measured needs a corpus where a hop lands below the floor —
+which is the same instrument gap §16 already records for the field host.
+
+#### The gate's `chain` half could not be measured, and the corpus was why
+
+The first grid read `chain` `complete@5` at 50.0 → 50.0 in every cell, which is not what
+§10 expected the mechanism to do. Reading the corpus rather than guessing explains it: a
+hop starts at a name the store confirmed, and **all four `chain` cases Task 0.7 wrote
+paraphrase their entities out of the query.**
+
+| case | what its query says | keys the store actually holds | measured |
+|---|---|---|---|
+| `what a checkout change needs before merge` | "in checkout" | `checkout flow`, `Stripe` | no seed → the leg is silent |
+| `who documents the funnel events` | "our funnel events" | `analytics pipeline`, `Priya`, `Kinesis` | no seed; with one, the row it misses is a single edge away |
+| `the queue between payments and billing` | "a payment job", "billing" | `payment worker`, `billing service`, `Meridian team` | no seed (it passes on the text legs regardless) |
+| `tuning the database the invoices live in` | "the database behind our invoices", "that engine" | `billing service`, `ledger-db`, `Postgres` | no seed — and its answer, the tuning-notes URL, declares **no entities at all**, so no hop reaches it at any threshold |
+
+That last row is not a seeding problem and no phase fixes it by seeding: a memory with no
+declared entities has no graph presence, so it is invisible to the hop by construction. It
+either becomes an extraction question (ingest should have given it `Postgres`) or it stops
+claiming to be a graph case. Recorded in §16 with the other half of this kind's debt.
+
+With no seed, `EntityGraph::seeds` returns nothing, the leg is silent, and no tuning of
+the hop or the slot can reach the far end of the chain. The two cases that pass, pass
+through the text legs — so the `chain` kind has never measured the graph at all, and the
+gate's `chain` half was written against an instrument that could not read it. This is G2
+(exact seeds only) working as designed: §1.3 measured what fuzzy seeding costs
+(abstention 100 → 0), and Phase 6's alias classes are the sanctioned way to buy it back.
+
+So the corpus gained one case rather than the guard being relaxed:
+`chain: the checkout flow named outright` asks the same checkout → Stripe → PCI chain
+with the entity named. It is the kind's only seedable instance, and it behaves exactly as
+the phase predicts — **50% recall / 0% `complete@5` with no slot** (it finds the bridge
+and not the rule, the failure this phase exists for), **100% / 100% with one**. That
+single case is where the kind's +10.0 recall / +20.0 `complete@5` above comes from; the
+four originals stay at +0.0 each. It is informational like its siblings, so no gated
+number from any phase is restated, and the original four cases are untouched.
+
+`chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins the shape instead of
+leaving it to prose: it lists which `chain` cases confirm a seed (exactly one) and asserts
+`relational` keeps at least five of its seven. Either list moving means a recorded number
+stopped meaning what it says, which is worth a failing test to learn.
+
+**Reading of the gate, stated plainly:** `relational` +28.6 passes on the mechanism.
+`chain` +20.0 passes as written *only because the corpus gained the case that can exercise
+the mechanism*; on the cases the phase inherited it delivered exactly nothing, and the
+reason is now measured and pinned. Phase 8's release note should not claim the chain kind
+works: four of its five cases still name nothing the store knows, and one of those four
+expects a memory that declares no entities at all, which no seed — exact or resolved — can
+reach.
+
+#### Tests added (19)
+
+| where | count | what they hold |
+|---|---|---|
+| `recall_ranker.rs` | 8 | the move; no slot count touches index 0; a candidate sitting exactly *on* the edge stays there; a hop already in the head is left alone; slots fill in graph-leg order and never promote the same hop twice; `slots == 0` and an empty leg return before reading the list; the promoted row keeps its `score` and `match_detail` (so the list is knowingly no longer score-monotone); slot counts wider than the list are harmless |
+| `memory_recaller.rs` | 8 | slot 1 puts the connected answer second and leaves first alone; zero slots is the pipeline as it shipped; nothing is promoted when the query names no known entity; a category filter the hop fails is not a bypass; the floor's refusal is not reversed by a slot; `limit = 1` shows exactly what it showed before; the step runs after the rerank leg rather than before it; and the G2 guard end to end — a hop starts only from a name the graph confirms, so a misspelled seed seeds nothing while the correctly-spelled name reaches the answer |
+| `config.rs` | 2 | the default is the value the grid chose, read from file and env; out-of-range refuses to boot |
+| `eval.rs` | 1 | which cases the graph is allowed to start from (above) |
+
+`just check-native` is clean on this branch — `cargo fmt --check`, `cargo clippy
+--all-targets -- -D warnings`, `check-boundaries.sh` ("no violations found"), and
+**1 016 tests passing, 11 ignored** (the ONNX ones CI skips) across the ten binaries —
+1 027 declared, which is exactly what `cargo test -- --list` counts, and 19 more than the
+1 008 this branch started from. `just sdk-test` was not run because nothing reached the
+wire: Task 3.3 did not land.
+
+One caveat about that number, because it was nearly wrong. The first `just check-native` of
+this phase reported green and **was not valid**: under `docker compose run` the build cache
+can answer for a tree the container is not looking at. That run clippy'd
+`recuerdos-ai v0.3.1` when the manifest says `0.4.3`, `cargo fmt --check` said nothing about
+a file that was not formatted, and `cargo test` ran a unit-test binary 117 tests behind the
+tree — none of this phase's tests appeared in its output. Every check quoted here was
+re-run after `find src tests -name '*.rs' -exec touch {} +`, and the reading is accepted
+only because the log contains this phase's test names and its totals match
+`cargo test -- --list`. `test result: ok` by itself is not evidence. §16 carries the
+environment fix.
+
+#### Deviations from the task text (all deliberate, none silent)
+
+- **Two guards the plan's arithmetic did not state.** The rule as written promotes the
+  first hop whose position `p` satisfies `p >= max(1, limit - slot)`; at `limit = 1` the
+  bare subtraction qualifies index 0, so `.max(1)` makes the plan's "never index 0"
+  arithmetic rather than a comment. And `p > slot` is required so a slot cannot promote a
+  hop that a *previous* slot already moved — without it, slot 2 re-promotes the row slot 1
+  placed and the list loses its second seat. Both are pinned by tests.
+- **Task 3.3 (`matched.via`) did not land.** The plan marks it optional. Extending the
+  recursive CTE to carry the originating seed means changing `EntityGraph::neighbours`,
+  the REST dto, and both SDKs — an agent-facing surface decision that Phase 8 owns (the
+  same reason §10 refuses to put it in the MCP text: context budget). `matched.graph_rank`
+  already tells a client a row came from the hop. Deferred to Phase 8 rather than dropped;
+  §16 carries it, and `just sdk-test` is therefore not this phase's gate.
+- **The factorial was run as 10 cells, not 24.** The full product of 3 slot counts × 4 δ
+  × 2 graph weights is mostly cells that cannot inform a default this phase owns: `rw` is
+  measured at both slot counts and at δ = 0.05 and δ = 0, δ is measured at both slot
+  counts, and the missing `rw × δ > 0.05` combinations would only re-measure Phase 2's
+  already-shipped δ decision. Every axis and both interactions that could change
+  `expansion_slots` are covered; each cell is one ~50 s `eval`, and §17's invocation is in
+  the grid log header for anyone who wants the rest.
+- **The eval corpus gained a case** (see above). A measurement-instrument change, made
+  because the instrument could not read the thing the gate asks about; the four inherited
+  cases are byte-identical and no recorded number was restated.
+- **`recuerdos-ai config` grew a `[graph]` block** (hops, weight, floor, and
+  `expansion_slots`, the last printed at zero too). Not in the plan; it is the place an
+  operator sees which of these pipelines they are running without opening the file, and
+  `retrieval` and `rerank` already argue for exactly that.
+- **Commit `f0ad350`'s message overcounts.** It says nine `recall_ranker` tests; the file
+  gained eight. `head_with_hop_at` is a fixture that returns the list and its edge, and it
+  was counted as a test. The history is left as-is and the correction is recorded here.
+
+#### Not measured (blocked, and deliberately not approximated)
+
+- **`recall audit` on the field host's store, every changed result reviewed by hand** —
+  the last box of §10's DoD, and the same blocker as Phase 0's Task 0.9, Phase 1's field
+  halves and Phase 2's audit: it needs a copy of the deployed store, which is the
+  operator's. The recipe, which writes nothing:
+
+  ```bash
+  # The comparison side is the pipeline before this phase. Put the key inside [graph],
+  # not at the end of the file — a key landing under the last section is the v0.4.1
+  # orphaned-key bug, and the audit would then compare one config with itself.
+  awk '{print} /^\[graph\]$/ {print "expansion_slots = 0"}' \
+      /etc/recuerdos-ai/recuerdos-ai.toml > /tmp/noslot.toml
+
+  recuerdos-ai recall audit --config /etc/recuerdos-ai/recuerdos-ai.toml \
+      --compare-config /tmp/noslot.toml \
+      --queries /tmp/questions.txt --user <handle>
+  ```
+
+  What to review: each query where the shipped config brings a memory into the top five
+  that the zero-slot config did not, and the row it displaced from last. Each arrival
+  should be a sentence a person would call related to the question. The failure mode to
+  look for is not a wrong memory but a *vacuous* one — a hop that fired on a name the
+  query shares with an unrelated memory ("service", "team", a surname), which the eval's
+  18 entity keys are too few to represent. That is also the case for raising
+  `expansion_slots` above 1 on a real store: this corpus cannot see a second promotable
+  hop, a field store with thousands of entities can.
+
+#### What Phase 4 inherits
+
+The gated baseline is re-recorded at the shipped default: **87.2 / 53.8 / 68.4 / 84.6**,
+abstention 100.0, p50 8.0 ms / p95 9.4 ms, 59 gated cases (74 scored, 22 informational).
+The slot is anchored at zero by code path, so a Phase 4 regression in `relational` is
+Phase 4's. Three things this phase leaves as debt rather than success: `relational` p@1 is
+0.0 and structurally unreachable by a slot; three of the `chain` kind's four zero-seed cases
+are the concrete target for Phase 6's alias/τ work (that kind's remaining 60 → 100 lives
+there, and `chain_cases_paraphrase_their_entities_so_no_hop_can_start` pins which rows must
+flip — the fourth case expects an entity-less memory, so it is nobody's seeding problem);
+and `rank_weight` 0.3 vs 0.15 is an open question this instrument cannot answer.
 
 ### Phase 4 — embedding prompts
 - Per-model with/without tables + `calibrate`: _TBD_
