@@ -1009,7 +1009,7 @@ one top-1 the Phase 2 change can lose).
 | Probe generation cost / no LLM configured | Off by default; budgeted backfill; client-supplied questions for `:direct`. |
 | Wrong aliases merge distinct concepts | Kind compatibility, calibrated τ, optional LLM confirm, `--list/--remove`, rejected pairs remembered. |
 | Prompt-table rows go stale as model families evolve | Each row cites its model card. Explicit config override. Unknown models get no prompt and an info log. |
-| Eval corpus still small (110 memories) | The §4 "and on a real store" half now exists — 18 owner-authored queries run by `scripts/field-measure.sh` on the deployed store, first reading 2026-10-18 in §17 — and it read the same direction with a much larger effect (δ, where the field reading was ~1.6× the corpus's at the same value). It is still 18 queries on one person's store, so treat the corpus as the gate and the field host as the falsifier, never the reverse. Growing it is Task 0.9's copy. |
+| Eval corpus still small (110 memories) | The §4 "and on a real store" half now exists — 18 owner-authored queries run by `scripts/field-measure.sh` on the deployed store, first reading 2026-10-18 in §17 — and it read the same direction with a much larger effect (δ, where the field reading was ~1.6× the corpus's at the same value). It is still 18 queries on one person's store, so treat the corpus as the gate and the field host as the falsifier, never the reverse. **The falsifier has now fired**, on the rerank fusion rather than on δ, and at a size (44 points) that the corpus cannot absorb by assertion: Task 0.9's copy stops being bookkeeping and becomes the deciding instrument, which means a *frozen* copy with its digest recorded, queried by a file pinned to it. |
 | Two `eval` runs need not agree | Measured floor: 0.7 recall points, 1.7 if a whole single-expectation case flips. Equal-BM25 documents (~38 of them match "project" through the category field) reorder with Tantivy segment layout. Below ~2 recall / ~1 p@1 a Δ is one case moving, not a result; re-run twice before gating on it. Root cause and candidate fixes in §17 Phase 0 and the follow-up below. |
 | A busy rerank stage looks like a slow one on the wire | Both stay `skipped`/`deadline`, deliberately (invariant 3.5: shipped SDKs parse two reason values, so a third is a breaking change). The distinction lives on the domain trace, in the `warn!` line beside `queued_ms`/`inference_ms`, and in `rerank audit`'s `skipped_busy`. `a_busy_skip_says_exactly_what_a_slow_one_says` pins the transport half so nobody "just adds a field" later. |
 | Phase 1's field halves: 1.1 measured, 1.5 still open | 1.1 read on the field host 2026-10-18 — the stage costs p50 6.7 → 306.2 ms and holds 1.6 GiB, for −0.2 MRR and nothing else across 18 real queries; the operator runs `mode = "off"` now, which was the plan's own default anyway. 1.5 has become harder rather than easier: with the stage off on the only field host, the queue has nothing to queue, so either it is measured in the few minutes with `mode = "on"` or R1 stays neither confirmed nor refuted and §17 says so. |
@@ -1018,7 +1018,7 @@ one top-1 the Phase 2 change can lose).
 
 | The remaining phases target recall failures this store may not have | **Checked, and the store has none.** The field host is 16 of 18 complete inside five before Phase 3's mechanism runs, and its two failures are not mis-ranking: quoting both expectations back at the store returns top hits at relevance 0.09 and 0.10, which is what an empty region looks like — the memories were never stored. So on this store the recall job is finished (16 of 16 answerable complete inside five), abstention on the other two is correct behaviour, and Phases 4, 6 and 7 address a failure with no field-observed instance. What remains is ordering: δ, and one fusion that declines a correct judgement. |
 | The field host is not a fixed instrument | The same shipped config read 38.9 p@1 where it had read 50.0, because six memories about this measurement work had been stored in the meantime and now outrank the older ones the `expect` substrings name. The system behaved; the ground truth went stale. Any repeated field measurement must carry a store digest, and Task 0.9's copy must be frozen rather than synced — otherwise the drift arrives looking like a regression. |
-| The eval corpus's agreement rate is not the field's | The shipped rerank fusion assumes vector+BM25 agreement is nearly always right, which the eval corpus supports and query 5 of the field files does not. Any future grid must run against a real store copy, not only `eval/cases.toml`. |
+| The eval corpus and the field host disagree about the fusion, by more than anything Phases 4–8 were written to buy | `replace` reads **−9.6 p@1 worst case on three of four grid models** on `eval/cases.toml` (reranking-plan §12) and **+44.4 on the field store** (§17 · Field host, M5), with the same binary and the same model. Both are internally consistent, so one of them is describing the wrong population: the corpus is paraphrased synthetic cases with near-tied heads, the field store is long fact-shaped memories with repeated project names. The query file may also be needle-shaped, which is what a cross-encoder is best at. This is recorded as a risk rather than resolved because the temptation to ship the big number is exactly the failure mode the gate exists for; the resolution is the frozen real corpus and a rerank grid run against a store copy, and until then the shipped strategy stands. §12's distribution printer calibrates the confidence threshold that would satisfy both. |
 
 **Follow-ups (not in this plan):**
 - **Raise `[retrieval].relevance_weight` above 0.05.** Both instruments point the same way and neither
@@ -1034,21 +1034,22 @@ one top-1 the Phase 2 change can lose).
   the export before shipping, though a store that absorbed six memories about this work in a day makes
   supersession a live shape there rather than a hypothetical. Raising it re-records `eval/baseline.json`,
   as Phases 2 and 3 did.
-- **Is the rerank stage muted rather than useless?** Query 5 of the field files is the exhibit: the
-  model scored the right memory 0.999 and the served first 0.056, and rank 4 stood, because
-  `strategy = "rrf"` at `weight = 1` may break a tie against one leg but never overrule vector+BM25
-  agreement — and on a store that repeats project names, that agreement is a lexical artifact more
-  often than the eval corpus's paraphrased cases made it. This is scripted as **M5** of
-  `scripts/field-measure.sh` (rerank `on`, `strategy = "replace"`, then `weight = 2`, each against the
-  shipped fusion at the same δ), which is also where it died: the read-back matched `[graph].weight`
-  when asked for `[rerank].weight` and refused to measure. Fixed by scoping every read to its section;
-  the run has still to happen. It carries a prediction now, so it cannot be read either way afterwards:
-  scored on its own the model's top pick was the expected memory in 15 of 18 field queries and it was
-  never confidently wrong, which would serve 83.3 p@1 where the fusion serves 77.8 (§17 · Field host).
-  `replace` near 83 means the fusion is the weakest link and 1.4 GiB buys something; `replace` at or
-  below what off buys means the eval grid was right that these scores mean less than their ordering
-  does. Read its per-query lines rather than its aggregate: the store drifted since the query file was
-  written, so part of any absolute is stale expectations, not the fusion.
+- **Was the rerank stage muted rather than useless? Asked, answered: muted, by 44 points.** Query 5 of
+  the field files was the exhibit (the model scored the right memory 0.999 and the served first 0.056,
+  and rank 4 stood, because `rrf` at `weight = 1` may break a tie against one leg but never overrule
+  vector+BM25 agreement); **M5 measured it** and the answer is larger than the hypothesis. On the same
+  store with the stage on in every cell: shipped fusion 38.9 p@1 / 54.6 MRR, `weight = 2` 44.4 / 56.9,
+  **`strategy = "replace"` 83.3 / 85.2** — eight rank-1 gains, zero losses. The count predicted from the
+  model's own scores (15 of 18, i.e. 83.3) is what came back, though on a store that had changed
+  underneath the prediction, so it is corroboration rather than proof. So `mode = "off"` stays right *at weight 1* and can
+  no longer be cited as a verdict on the stage. What blocks flipping the shipped strategy is the other
+  instrument: the eval grid had `replace` losing up to −9.6 p@1 on three of four models, and the same
+  run that produced +44 also shows the grid's defect plainly (q17's head scores 0.037/0.031/0.023 —
+  the answer in the window, the model rating everything at nothing). Reconciling them is the work now,
+  and the shape most likely to survive is not a strategy default but a **confidence gate**: trust the
+  model's order where the head's top score clears a threshold, keep the fused order where the head is
+  flat, with the threshold calibrated by §12's distribution printer rather than guessed. Until that
+  exists on a corpus larger than 18, the default stays. §17 · Field host has the full table.
 - Stemming in the keyword leg (`tests`/`testing`; reranking-plan §11).
 - Query-embedding LRU cache for repeated agent queries.
 - An approximate-NN index beyond ~100k memories (`docs/performance.md`).
@@ -2322,8 +2323,70 @@ That is a falsifiable prediction, so M5 (rerank `on`, `strategy = "replace"`, th
 is a real experiment rather than a fishing trip: if `replace` lands near 83 the reading above is
 right and the shipped fusion is the weakest link in the pipeline; if it lands at or below 77.8,
 these scores mean less than their ordering suggests and the eval grid's warning about raw-score gaps
-wins. Either way the claim "the stage buys nothing" is now too coarse — what it buys is the most
-accurate ordering measured on this store, most of which the fusion declines to use.
+wins. **It landed on 83.3** — the run is below. One honest wrinkle: the comparison point in that
+sentence (77.8) was the fused p@1 on the *pre-drift* store, so the valid test is against the same
+run's `before` column, 38.9, and the predicted absolute happened to survive the drift while the
+predicted floor did not. Even a threshold set last night rots on a live store; either way the claim
+"the stage buys nothing" is too coarse — what it buys is the most accurate ordering measured on this
+store, most of which the fusion declines to use.
+
+#### M5: the fusion is the weakest link in the pipeline, by a wide margin
+
+The run that the read-back bug cost is done, and it is not a small result. Same store, same 18
+queries, δ 0.05 throughout, **the stage on for every row** so the only difference is how its
+judgement is fused:
+
+| configuration | p@1 | MRR | recall p50 | resident |
+|---|---|---|---|---|
+| stage on, `rrf` weight 1 — the shipped fusion | 38.9 | 54.6 | 236 ms | 1.6 GiB |
+| stage on, `rrf` weight 2 | 44.4 | 56.9 | 233 ms | 1.6 GiB |
+| stage on, **`strategy = "replace"`** | **83.3** | **85.2** | 236 ms | 1.6 GiB |
+| *stage off, δ 0.05 — what the host runs today* | *38.9* | *55.7* | *6.3 ms* | *194 MiB* |
+| *stage off, δ 0.5* | *50.0* | *63.4* | *6.3 ms* | *194 MiB* |
+
+`complete@5` is 88.9 in every cell, as ever: nothing here finds anything new. **Eight queries gained
+rank 1 and none lost it** — q1, q2, q3, q4, q5, q6, q15, q16 — eight `⚑` rows, eight gains, net +8,
+which is 38.9 → 83.3 with nothing paid for it. The count predicted above from the model's own scores was
+15 of 18; the measured count is 15 of 18, on a store that had drifted since the count was taken.
+
+So the honest summary of Phase 1 and Phase 7's default, rewritten: **the cross-encoder is the most
+accurate signal in this pipeline on this store, and the shipped fusion throws away 44 points of p@1
+of it.** `mode = "off"` was the right call *at weight 1*, where the stage demonstrably changed nothing
+and cost 230 ms and 1.4 GiB; it was not a verdict on the stage, and now it cannot be cited as one.
+
+`weight = 2` is the control that makes this credible rather than a wish: raising the reranker's RRF
+weight from 1 to 2 bought exactly one query (+5.5 p@1) and moved a second top-1 from one wrong answer
+to another. So the effect is not "more reranker influence is good" — it is specifically that *reading
+the model's order* works and *voting the model in as another leg* does not, which is what the two
+strategies mean arithmetically.
+
+**What the same file says against it, in the same run.** Two of the eighteen heads are flat: q17's five
+scores are 0.037, 0.000, 0.031, 0.023, 0.002 — a query whose answer is sitting in the window and which
+the model rates as good as nothing — and q10/q11 are all 0.000. That is precisely the defect the eval
+grid recorded when `replace` lost up to −9.6 p@1 on three of its four models: *a cross-encoder's
+raw-score gaps mean nothing on some corpora, and banded raw scores reorder a near-zero head into
+noise.* The field confirms the mechanism and bounds it: `replace` wins big where the head has signal
+(16 of 18) and does nothing where it does not (2 of 18), and because the abstention floor compares
+*relevance* and not the rerank score, a flat head cannot cause a wrong abstention either way.
+
+The two instruments therefore disagree about `replace` by 44 points on one store and −9.6 on the
+corpus, and that gap is now the most important open fact in this project — larger than anything Phases
+4 through 8 were written to buy. Three readings, and only measurements separate them:
+
+- the query file is needle-shaped by construction (each `expect` names a memory whose text contains
+  the answer phrase), which is the shape a cross-encoder is best at and the shape the eval corpus's
+  paraphrased cases were built not to be;
+- the eval corpus's `chain`/paraphrase cases genuinely break `replace`, in which case the right object
+  is not a strategy default but a **confidence gate** — serve the model's order where the head's top
+  score clears a threshold, keep the fused order where the head is flat — and §12's distribution
+  printer is the instrument that calibrates such a threshold rather than guessing it;
+- or both, which is the most likely answer given that both instruments are internally consistent.
+
+**No default changes on this evidence.** The precedence rule set when the field host was built is that
+the corpus gates and the field falsifies, and 18 queries on one person's store — even this store, even
+with a prediction that landed to the decimal — is not enough to flip a shipped strategy. What it is
+enough for: the frozen real corpus stops being optional bookkeeping and becomes the thing that decides,
+and any rerank grid must be run against a real store copy rather than `eval/cases.toml` alone.
 
 #### The seat's cost has a mechanism, and it is visible in these same files
 
@@ -2538,14 +2601,15 @@ plainly: the guard refused to measure rather than reporting a difference that wa
 right direction for it to fail, but it cost a run, and the fusion question below is still unanswered
 because of my code rather than the system's behaviour.
 
-Closed by that run: the existence probe (the memories are absent, above), the δ sweep with the stage
-off (above), and the warm RSS with the stage off (above). Still owed, in the order that would change a
-decision: **M5**, which needs nothing but a re-run now that the read-back is section-scoped — it is the
-only live test of whether the stage is muted or merely expensive, and it is the last measurement that
-could justify turning the stage back on; the M1 hand review of the seat's moved rows, which the
-floorless-audit caveat above narrows but does not settle; Task 1.5 if the stage ever goes back on;
-re-anchoring queries 1–3 of the field file so they do not encode last week's answer; and Task 0.9's
-**frozen** store copy with its digest recorded, which is what turns these eighteen questions into
+Closed by the two runs: the existence probe (the memories are absent, above), the δ sweep with the
+stage off (above), the warm RSS with the stage off (above), and M5 (above), which answered the fusion
+question with a bigger number than the hypothesis that asked it. Still owed, in the order that would
+change a decision: the **frozen store copy plus a rerank grid run against it** — that is what
+separates "the corpus describes the wrong population" from "the field query file is needle-shaped",
+and it is the only measurement in this project that can flip a shipped default; the M1 hand review of
+the seat's moved rows, which the floorless-audit caveat narrows but does not settle; re-anchoring
+queries 1–3 of the field file so they do not encode last week's answer; Task 1.5 if the stage ever goes
+back on; and the same store copy feeding the corpus, which is what turns these eighteen questions into
 something a later phase can gate on instead of an anecdote about one machine that keeps changing.
 
 One caveat about `complete@5` here, because the ceiling argument above leans on it: the audit
