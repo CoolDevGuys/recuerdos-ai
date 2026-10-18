@@ -38,7 +38,7 @@ use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{
-    RankedIds, RecallRanker, RerankStrategy, ScoredMemory,
+    RankedIds, RecallRanker, RerankStrategy, ScoredMemory, apply_expansion,
 };
 use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
@@ -193,6 +193,12 @@ pub struct MemoryRecaller {
     /// `graph` is `None`.
     max_hops: usize,
     hop_limit: usize,
+    /// How many of the served results the hop may reserve a seat in
+    /// (`[graph].expansion_slots`, recall-quality-plan.md Phase 3). Also unused
+    /// while `graph` is `None` — an empty leg has nothing to promote — and `0`
+    /// makes the stage return before reading the list, which is the pre-Phase-3
+    /// pipeline by code path rather than by arithmetic.
+    expansion_slots: usize,
     /// The second-stage ranker, present only when `[rerank].mode != "off"`
     /// (reranking-plan.md Phase 4). `None` is the default and the pre-rerank
     /// behaviour: no second stage runs, and recall is byte-identical to a
@@ -228,6 +234,7 @@ impl MemoryRecaller {
         graph: Option<Arc<dyn EntityGraph>>,
         max_hops: usize,
         hop_limit: usize,
+        expansion_slots: usize,
     ) -> Self {
         Self {
             memories,
@@ -239,6 +246,7 @@ impl MemoryRecaller {
             graph,
             max_hops,
             hop_limit,
+            expansion_slots,
             reranker: None,
             rerank_mode: RerankMode::default(),
             rerank_depth: DEFAULT_RERANK_DEPTH,
@@ -293,6 +301,30 @@ impl MemoryRecaller {
         self.rerank_mode = mode;
         self.rerank_depth = depth;
         self.rerank_timeout = timeout;
+        self
+    }
+
+    /// The same pipeline with its third leg reconfigured.
+    ///
+    /// Wiring passes the graph knobs to [`new`](Self::new), so the served path
+    /// never calls this — it is the test-only mirror of `with_second_stage`, and
+    /// the only way to ask for a graph leg *and* a second stage at once, which is
+    /// the combination the slot's position in the pipeline is pinned against.
+    // *not* used by the wiring, for the reason `rank_with_legs` documents above:
+    // the constructor already takes these four, and routing the served path
+    // through here would be a change of shape for no gain.
+    #[allow(dead_code)]
+    pub fn with_graph(
+        mut self,
+        graph: Option<Arc<dyn EntityGraph>>,
+        max_hops: usize,
+        hop_limit: usize,
+        expansion_slots: usize,
+    ) -> Self {
+        self.graph = graph;
+        self.max_hops = max_hops;
+        self.hop_limit = hop_limit;
+        self.expansion_slots = expansion_slots;
         self
     }
 
@@ -463,6 +495,32 @@ impl MemoryRecaller {
         // None` and `mode = Off` return `ranked` untouched — the identity
         // path.
         let (mut ranked, rerank) = self.rerank_leg(query, ranked, now);
+
+        // The graph's reserved slots (recall-quality-plan.md Phase 3), last in the
+        // pipeline on purpose. After the floor, so a hop `[retrieval].min_relevance`
+        // refused is not served back through the side door; after the rerank leg, so
+        // a second stage cannot reorder a hop out of the seat it was given; before
+        // the truncate, because the promoted memory is meant to be *inside* what the
+        // client asked for, not appended past it. The experiment that measured this
+        // gain (§1.3) ran it before the floor; the difference is recorded in §17.
+        let promoted = apply_expansion(
+            &mut ranked,
+            &graph_hits,
+            query.limit(),
+            self.expansion_slots,
+        );
+        if promoted > 0 {
+            // Debug rather than info: this fires on ordinary relational recall, and
+            // an operator who wants to review *which* result moved reads that off
+            // `matched.graph_rank`, not off this line. It exists so "the slot never
+            // ran" and "the slot ran and changed nothing" are different facts.
+            tracing::debug!(
+                promoted,
+                slots = self.expansion_slots,
+                limit = query.limit(),
+                "the graph hop took reserved slots"
+            );
+        }
         ranked.truncate(query.limit());
 
         // Feeds Phase 5's importance decay. Best-effort: a bookkeeping
@@ -1728,6 +1786,290 @@ mod tests {
         );
     }
 
+    // --- graph expansion slots (recall-quality-plan.md Phase 3) ----------
+
+    /// The bridge-and-answer chain from Task 7.3.4's test, in the shape G1
+    /// describes: "the billing service is maintained by the Meridian team" is an
+    /// ordinary memory the indexes see and rank, and "Nadia leads the Meridian
+    /// team" is reachable *only* over the relation between them. Returns both so a
+    /// test can point at them.
+    fn bridge_and_answer(
+        fixture: &Fixture,
+        graph: &Arc<crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph>,
+    ) -> (Memory, Memory) {
+        let bridge = fixture.save(
+            &fixture.alex,
+            "the billing service is maintained by the Meridian team",
+        );
+        let answer = graph_only_memory(fixture, &fixture.alex, "Nadia leads the Meridian team");
+        graph
+            .record(
+                &fixture.alex,
+                bridge.id(),
+                &[
+                    entity("billing service", "service"),
+                    entity("Meridian team", "team"),
+                ],
+                &[rel("billing service", "maintained_by", "Meridian team")],
+                now(),
+            )
+            .unwrap();
+        graph
+            .record(
+                &fixture.alex,
+                answer.id(),
+                &[entity("Nadia", "person"), entity("Meridian team", "team")],
+                &[rel("Nadia", "leads", "Meridian team")],
+                now(),
+            )
+            .unwrap();
+        (bridge, answer)
+    }
+
+    /// A memory the indexes *do* see, repeated enough times that the answer —
+    /// which they never see — cannot outrank them on fusion alone. That is G1 as
+    /// a fixture: the slot is the only thing that can bring it into the window.
+    fn direct_notes(fixture: &Fixture, count: usize) {
+        for index in 0..count {
+            fixture.save(
+                &fixture.alex,
+                &format!("note {index} about the billing service roster"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_reserved_slot_puts_the_connected_answer_second_and_leaves_first_alone() {
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (bridge, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        let question = RecallQuery::new("who owns decisions about the billing service", 5).unwrap();
+        let closed = fixture
+            .recaller_with_graph(graph.clone() as Arc<dyn EntityGraph>)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        let open = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 1)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+
+        assert!(
+            closed.iter().all(|s| s.memory.id() != answer.id()),
+            "the fixture no longer reproduces G1: fusion itself returned the answer, \
+             so this test is not testing the slot"
+        );
+        assert_eq!(
+            open.first().map(|s| s.memory.id()),
+            closed.first().map(|s| s.memory.id()),
+            "the slot moved the top result"
+        );
+        assert_eq!(
+            open[1].memory.id(),
+            answer.id(),
+            "the chain should arrive as bridge + answer; head was {:?}",
+            contents(&open)
+        );
+        assert_eq!(
+            contents(&open)
+                .iter()
+                .filter(|c| **c == bridge.content())
+                .count(),
+            1,
+            "the bridge should appear once"
+        );
+    }
+
+    #[test]
+    fn zero_reserved_slots_leave_the_order_the_score_already_decided() {
+        // The pipeline-level anchor. A slot is a *placement*, so the list with the
+        // knob at zero is exactly the score's own order, non-increasing from the
+        // first row to the last — the property a promotion deliberately breaks, and
+        // the one the eval baseline measures at slots = 0 (`change: -0.0`).
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (_, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        let question = RecallQuery::new("who owns decisions about the billing service", 5).unwrap();
+        let closed = fixture
+            .recaller_with_graph(graph.clone() as Arc<dyn EntityGraph>)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert!(
+            closed.len() >= 3,
+            "the fixture returned too little to say anything"
+        );
+        for pair in closed.windows(2) {
+            assert!(
+                pair[0].score >= pair[1].score,
+                "slots = 0 served a list out of score order"
+            );
+        }
+
+        // And the knob is live on this fixture: one slot, and the far end of the
+        // chain arrives second — taking a seat whose row scores better than it does.
+        let open = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 1)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        assert_eq!(
+            open[1].memory.id(),
+            answer.id(),
+            "the hop did not take the slot: {:?}",
+            contents(&open)
+        );
+        assert!(
+            open[1].score <= open[2].score,
+            "the promotion rewrote the score, which it is documented not to do"
+        );
+    }
+
+    #[test]
+    fn a_slot_promotes_nothing_when_the_query_names_no_known_entity() {
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let memory = fixture.save(&fixture.alex, "User prefers pnpm as their package manager");
+        graph
+            .record(
+                &fixture.alex,
+                memory.id(),
+                &[entity("pnpm", "tool")],
+                &[],
+                now(),
+            )
+            .unwrap();
+
+        let question = query("which package manager keeps dependencies tidy");
+        let closed = fixture
+            .recaller_with_graph(graph.clone() as Arc<dyn EntityGraph>)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        let open = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 2)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+
+        assert_eq!(ids(&open), ids(&closed));
+    }
+
+    #[test]
+    fn a_category_filter_the_hop_fails_is_not_bypassed_by_a_slot() {
+        // The hop is the one route into the answer, so the graph would put it in
+        // slot 1 — but the caller asked for `decision` only, and the filter runs
+        // before the slot. A structural slot must not become a way around filters.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (bridge, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        let results = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 1)
+            .execute_untracked(
+                &fixture.alex,
+                &RecallQuery::new("who owns decisions about the billing service", 5)
+                    .unwrap()
+                    .with_categories(vec![Category::Decision]),
+            )
+            .unwrap();
+
+        assert!(
+            results
+                .iter()
+                .all(|s| s.memory.category() == &Category::Decision),
+            "a filtered memory was served: {:?}",
+            contents(&results)
+        );
+        assert!(results.iter().all(|s| s.memory.id() != answer.id()));
+        assert!(results.iter().all(|s| s.memory.id() != bridge.id()));
+    }
+
+    #[test]
+    fn the_relevance_floor_refuses_a_hop_a_slot_would_otherwise_seat() {
+        // A hop's relevance is the `GRAPH_HOP_RELEVANCE` estimate (0.35), so a
+        // floor above it deletes relational recall — which is the documented
+        // meaning of a high floor, and the slot has to agree with it rather than
+        // smuggle the hop back in.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (_, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        let question = RecallQuery::new("who owns decisions about the billing service", 5)
+            .unwrap()
+            .with_min_relevance(0.5);
+        let results = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 1)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+
+        assert!(
+            results.iter().all(|s| s.relevance >= 0.5),
+            "the floor was applied before the slot, not after"
+        );
+        assert!(results.iter().all(|s| s.memory.id() != answer.id()));
+    }
+
+    #[test]
+    fn a_limit_of_one_shows_exactly_what_it_show_before_the_slot() {
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        let question = RecallQuery::new("who owns decisions about the billing service", 1).unwrap();
+        let closed = fixture
+            .recaller_with_graph(graph.clone() as Arc<dyn EntityGraph>)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+        let open = fixture
+            .recaller_with_graph_slots(graph as Arc<dyn EntityGraph>, 2)
+            .execute_untracked(&fixture.alex, &question)
+            .unwrap();
+
+        assert_eq!(ids(&open), ids(&closed));
+    }
+
+    #[test]
+    fn the_slot_is_applied_after_the_rerank_leg_not_before_it() {
+        // The order the two post-fusion stages run in, pinned rather than assumed:
+        // the reranker reverses the head it judges (`Replace` over a fake that
+        // scores by leading digit), and the hop still lands in slot 1 of *that*
+        // list. Run before the rerank leg, the reranker would be free to bury it,
+        // which is the behaviour this phase deliberately replaced.
+        let fixture = Fixture::new();
+        let graph = fixture.graph();
+        let (_, answer) = bridge_and_answer(&fixture, &graph);
+        direct_notes(&fixture, 8);
+
+        // `Replace` because the default weight-1 RRF leg cannot fully invert a
+        // fused head — and a reversal is what makes "before or after the rerank
+        // leg" observable rather than a matter of nuance.
+        let reverse = Arc::new(FakeReranker::reversing());
+        let recaller = fixture
+            .recaller_with_reranker(reverse, RerankMode::On, 10, Duration::from_secs(5))
+            .with_graph(Some(graph as Arc<dyn EntityGraph>), 2, 50, 1);
+
+        let results = recaller
+            .execute_untracked(
+                &fixture.alex,
+                &RecallQuery::new("who owns decisions about the billing service", 5).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            results[1].memory.id(),
+            answer.id(),
+            "the hop did not take its slot in the reranked list: {:?}",
+            contents(&results)
+        );
+        assert!(
+            results[0].match_detail.rerank_rank.is_some(),
+            "the rerank leg did not run at all, so this pins nothing"
+        );
+    }
+
     // --- the rerank stage (reranking-plan.md Phase 4) -------------------
 
     use crate::memories::application::test_doubles::{
@@ -1876,6 +2218,16 @@ mod tests {
     /// The fixture's pipeline over an arbitrary ranker, for the tests that are
     /// about a ranker knob rather than about the fixture's index fakes.
     fn recaller_with(fixture: &Fixture, ranker: RecallRanker) -> MemoryRecaller {
+        recaller_with_slots(fixture, ranker, 0)
+    }
+
+    /// [`recaller_with`], with `[graph].expansion_slots` named rather than
+    /// defaulted — the anchor tests ask for a zero and mean it.
+    fn recaller_with_slots(
+        fixture: &Fixture,
+        ranker: RecallRanker,
+        expansion_slots: usize,
+    ) -> MemoryRecaller {
         MemoryRecaller::new(
             Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
             Arc::clone(&fixture.vectors) as Arc<dyn VectorIndex>,
@@ -1886,6 +2238,7 @@ mod tests {
             None,
             2,
             50,
+            expansion_slots,
         )
     }
 
@@ -2030,6 +2383,7 @@ mod tests {
             None,
             2,
             50,
+            0,
         )
         .with_reranker(reranker, mode, depth, timeout)
     }

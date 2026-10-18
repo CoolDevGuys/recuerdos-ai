@@ -120,6 +120,9 @@ impl Fixture {
             None,
             2,
             50,
+            // No slots for the fixture's two-leg recalls; the graph tests name the
+            // knob they want rather than inheriting a number here.
+            0,
         )
     }
 
@@ -135,9 +138,23 @@ impl Fixture {
     }
 
     /// A recaller whose third leg hops over `graph`.
+    ///
+    /// `expansion_slots` is deliberately not a number in here: the slot is the
+    /// knob some of these tests exist to pin, so every one of them says whether it
+    /// wants one rather than inheriting it from a shared helper.
     pub fn recaller_with_graph(
         &self,
         graph: Arc<dyn crate::memories::domain::entity_graph::EntityGraph>,
+    ) -> MemoryRecaller {
+        self.recaller_with_graph_slots(graph, 0)
+    }
+
+    /// [`Self::recaller_with_graph`] with `[graph].expansion_slots` set — the
+    /// graph leg plus the reserved slots Phase 3 gives it.
+    pub fn recaller_with_graph_slots(
+        &self,
+        graph: Arc<dyn crate::memories::domain::entity_graph::EntityGraph>,
+        expansion_slots: usize,
     ) -> MemoryRecaller {
         MemoryRecaller::new(
             Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
@@ -149,6 +166,7 @@ impl Fixture {
             Some(graph),
             2,
             50,
+            expansion_slots,
         )
     }
 

@@ -195,6 +195,7 @@ impl Memories {
             graph.clone(),
             config.graph.max_hops,
             config.graph.hop_limit,
+            config.graph.expansion_slots,
         );
         // "no reranker, no change", spelled as code: `None` skips
         // `with_reranker` entirely, so the recaller keeps its pre-Phase-4
@@ -372,6 +373,7 @@ fn assemble_recall_base(
         core.graph,
         config.graph.max_hops,
         config.graph.hop_limit,
+        config.graph.expansion_slots,
     ))
 }
 

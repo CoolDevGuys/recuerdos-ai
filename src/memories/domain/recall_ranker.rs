@@ -711,6 +711,87 @@ impl RecallRanker {
     }
 }
 
+/// Reserves the head slots a graph hop may take (recall-quality-plan.md Phase 3).
+///
+/// The hop cannot win this fight arithmetically, which is why this is a rule
+/// about *positions*. Fusion sums one term per leg, so a memory only the graph
+/// reached brings one term to a fight where any direct match brings two: it loses
+/// to it at every weight short of inverting the ranking (G1), and raising the
+/// weight measured as raising the *bridge* — the memory naming both entities, the
+/// one the indexes already love — while the answer at the end of the chain stayed
+/// outside the client's `limit` (§1.3). So the graph reserves seats instead:
+///
+/// ```text
+/// limit = 5, slots = 1, graph leg = [h]
+/// before  [direct, direct, direct, direct, direct │ h, …]
+/// after   [direct, h,      direct, direct, direct │ …]
+/// ```
+///
+/// For each slot `1..=slots`, the first memory still standing in graph-leg order
+/// at or below that slot's visibility edge moves into it. What that promises:
+///
+///  - **the top result is untouched.** Slot 0 is not on offer, so precision@1
+///    cannot move. The edge arithmetic would include index 0 when `limit` is
+///    smaller than the slot, and `.max(1)` below is what closes that.
+///  - **filters and the floor hold.** The candidate has to be in `ranked` at all,
+///    so a hop the category filter dropped or `[retrieval].min_relevance` refused
+///    is not here to be promoted.
+///  - **`slots = 0`, or no graph hits, is identity** — returned before the list
+///    is read, the same escape `apply_relevance` and `apply_rerank` make.
+///  - **it costs one visible memory.** Promoting from below the edge evicts the
+///    row that was last in the window. That is the trade, and the grid measures
+///    it: `complete@5` for `relational` and `chain` against everything else.
+///
+/// Positions are read from the list as it stands, so slot 2 sees the shift slot 1
+/// caused, and a promoted memory now sits above every later slot's edge and so
+/// cannot be promoted twice.
+///
+/// The row keeps its own `score` and `match_detail`: a slot is a decision about
+/// placement, not new evidence about the match. Which also means a client that
+/// re-sorted by `score` would undo it — `score` has always meant "how this recall
+/// ordered them", and the answer to *why is this one here* is the leg's own
+/// [`MatchDetail::graph_rank`], which this leaves pointing at the hop that found
+/// it.
+///
+/// Returns how many memories were promoted, which is what the caller logs: an
+/// operator reviewing a result list that changed needs to know the stage ran.
+pub fn apply_expansion(
+    ranked: &mut Vec<ScoredMemory>,
+    graph: &RankedIds,
+    limit: usize,
+    slots: usize,
+) -> usize {
+    if slots == 0 || graph.0.is_empty() {
+        return 0;
+    }
+
+    let mut promoted = 0;
+    for slot in 1..=slots {
+        // The visibility edge for this slot. Slot 1 wants what `truncate(limit)`
+        // would cut off; each slot already filled has pushed one more row out of
+        // the window, so the next asks one nearer. Reaching the edge is enough
+        // rather than going past it because a candidate sitting exactly on it
+        // costs nothing to promote: the row evicted from the window is the one
+        // below it, which the client never saw either.
+        let edge = limit.saturating_sub(slot).max(1);
+        let found = graph.0.iter().find_map(|id| {
+            ranked
+                .iter()
+                .position(|scored| scored.memory.id() == *id)
+                // Strictly below the slot it would take: a memory already that
+                // high is where it belongs, and this is the other half of what
+                // keeps index 0 in place however the arithmetic falls.
+                .filter(|&position| position > slot && position >= edge)
+        });
+        let Some(position) = found else { continue };
+
+        let hit = ranked.remove(position);
+        ranked.insert(slot, hit);
+        promoted += 1;
+    }
+    promoted
+}
+
 /// Descending order for a score-like number, with NaN last.
 ///
 /// `total_cmp` rather than `partial_cmp` because the `Equal` a partial
@@ -2539,6 +2620,206 @@ mod tests {
             old.id(),
             "a 2× rerank-score gap must not be inverted by a 1.25× band"
         );
+    }
+
+    // — expansion: graph hits placed by position, not by score
+    //   (recall-quality-plan.md Phase 3) —
+
+    /// Six rows, `a` first, with the graph-only candidate `hop` parked at
+    /// `position` and everything else a plain direct match. Returns the ranked
+    /// list, the graph leg (deliberately *not* in fused order: `hop` is first
+    /// there and last here, which is the whole reason the stage exists), and the
+    /// hop itself.
+    fn head_with_hop_at(position: usize) -> (Vec<ScoredMemory>, RankedIds, Memory) {
+        let direct: Vec<Memory> = (0..5).map(|_| memory()).collect();
+        let hop = memory();
+        let mut all = direct.clone();
+        all.insert(position.min(all.len()), hop.clone());
+
+        let mut ranked: Vec<ScoredMemory> = all
+            .iter()
+            .enumerate()
+            .map(|(index, m)| {
+                let graph_only = m.id() == hop.id();
+                ScoredMemory {
+                    memory: m.clone(),
+                    // A score that says "the leg order", so a move is visible as
+                    // a position change and not as a score change.
+                    score: 0.1 - index as f32 * 0.01,
+                    relevance: if graph_only { GRAPH_HOP_RELEVANCE } else { 0.9 },
+                    rerank_score: None,
+                    match_detail: MatchDetail {
+                        vector_rank: (!graph_only).then_some(index + 1),
+                        bm25_rank: (!graph_only).then_some(index + 1),
+                        graph_rank: graph_only.then_some(1),
+                        rerank_rank: None,
+                    },
+                }
+            })
+            .collect();
+        // Keep the list's own order (the fixture is already best-first).
+        ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+        (ranked, RankedIds(vec![hop.id()]), hop)
+    }
+
+    #[test]
+    fn a_slot_moves_the_hop_into_the_window_the_client_would_otherwise_see() {
+        // The phase's whole claim, at the smallest size that shows it: the hop is
+        // below `limit`, and after the stage it is second.
+        let (mut ranked, leg, hop) = head_with_hop_at(5);
+        let before = ordered(&ranked);
+
+        assert_eq!(apply_expansion(&mut ranked, &leg, 5, 1), 1);
+
+        assert_eq!(ordered(&ranked)[1], hop.id(), "the slot is where it said");
+        assert_eq!(
+            ordered(&ranked)[0],
+            before[0],
+            "the top result is not on offer"
+        );
+        // Six candidates, five visible: promoting one from outside evicts exactly
+        // the row that was last in the window — the trade, stated as a count.
+        assert_eq!(ranked.len(), before.len(), "the stage must not duplicate");
+        assert_eq!(ordered(&ranked)[5], before[4]);
+    }
+
+    #[test]
+    fn no_number_of_slots_touches_index_zero() {
+        // `limit < slot` is the case where "at or below the visibility edge"
+        // arithmetic reaches position 0 on its own. p@1 is the metric this phase
+        // promises cannot move, at every limit and every legal slot count.
+        for limit in 0..=6 {
+            for slots in 1..=4 {
+                let (mut ranked, leg, _) = head_with_hop_at(3);
+                let top = ordered(&ranked)[0];
+                apply_expansion(&mut ranked, &leg, limit, slots);
+                assert_eq!(
+                    ordered(&ranked)[0],
+                    top,
+                    "limit {limit}, slots {slots} moved the top result"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_hop_the_edge_reaches_only_reordered_the_window_it_stayed_in() {
+        // Sitting exactly on the edge costs nothing to promote: the row removed
+        // was itself inside the window, so nothing visible is traded away. Worth a
+        // test because it is the boundary `limit − slot` selects, so a reader
+        // should know which way it falls.
+        let (mut ranked, leg, hop) = head_with_hop_at(4);
+        let before = ordered(&ranked);
+
+        assert_eq!(apply_expansion(&mut ranked, &leg, 5, 1), 1);
+
+        let after = ordered(&ranked);
+        assert_eq!(after[1], hop.id());
+        assert!(
+            before[..5].iter().all(|id| after[..5].contains(id)),
+            "a hop already in the window must not push one of its rows out"
+        );
+        assert_eq!(after[5], before[5], "the invisible rows simply slid down");
+    }
+
+    #[test]
+    fn a_hop_already_inside_the_head_stays_put() {
+        // Not a no-op-by-accident: the filter is "below the slot it would take",
+        // so a memory the legs already ranked fourth is left alone — the stage
+        // adds recall, it does not shuffle what ranks well.
+        let (mut ranked, leg, hop) = head_with_hop_at(2);
+        let before = ordered(&ranked);
+
+        assert_eq!(apply_expansion(&mut ranked, &leg, 5, 1), 0);
+        assert_eq!(ordered(&ranked), before);
+        assert!(
+            ranked.iter().any(|s| s.memory.id() == hop.id()),
+            "and it is still there, merely not promoted"
+        );
+    }
+
+    #[test]
+    fn slots_fill_in_graph_order_and_never_promote_the_same_hop_twice() {
+        // Two hops, one below the edge and one inside the head: slot 1 takes the
+        // first in leg order, and slot 2 must not re-pick the winner — it either
+        // finds a second hop below its own edge or leaves the list alone.
+        let (mut ranked, leg, hop) = head_with_hop_at(9);
+        let before = ordered(&ranked);
+
+        assert_eq!(apply_expansion(&mut ranked, &leg, 5, 2), 1);
+        let after = ordered(&ranked);
+        assert_eq!(after[1], hop.id());
+        assert_eq!(
+            after.iter().filter(|id| **id == hop.id()).count(),
+            1,
+            "a promoted hop appeared twice"
+        );
+        // Nothing else moved except by the one insertion.
+        let without_hop: Vec<_> = before
+            .iter()
+            .copied()
+            .filter(|id| *id != hop.id())
+            .collect();
+        let after_without: Vec<_> = after.iter().copied().filter(|id| *id != hop.id()).collect();
+        assert_eq!(after_without, without_hop);
+    }
+
+    #[test]
+    fn zero_slots_or_an_empty_leg_return_before_reading_the_list() {
+        // The anchor: `slots = 0` is the pipeline before this phase, bit for bit —
+        // scores included, which a re-sort would have left alone anyway, so the
+        // fingerprint is deliberately the whole row rather than the ids.
+        let fingerprint = |list: &[ScoredMemory]| {
+            list.iter()
+                .map(|s| (s.memory.id(), s.score.to_bits()))
+                .collect::<Vec<_>>()
+        };
+
+        let (mut ranked, leg, _) = head_with_hop_at(5);
+        let untouched = fingerprint(&ranked);
+
+        assert_eq!(apply_expansion(&mut ranked, &leg, 5, 0), 0);
+        assert_eq!(fingerprint(&ranked), untouched, "slots = 0 touched it");
+
+        assert_eq!(apply_expansion(&mut ranked, &RankedIds::default(), 5, 3), 0);
+        assert_eq!(fingerprint(&ranked), untouched, "an empty leg touched it");
+    }
+
+    #[test]
+    fn a_promotion_leaves_the_score_and_the_provenance_of_its_row_alone() {
+        // The slot is placement, not evidence: nothing is rewritten, so a client
+        // reading `matched.graph_rank` still learns which leg found it, and a
+        // client re-sorting by score would undo the slot — the documented
+        // consequence of not inventing a number to represent it.
+        let (mut ranked, leg, hop) = head_with_hop_at(5);
+        let before = ranked
+            .iter()
+            .find(|s| s.memory.id() == hop.id())
+            .unwrap()
+            .match_detail;
+        let score_before = ranked
+            .iter()
+            .find(|s| s.memory.id() == hop.id())
+            .unwrap()
+            .score;
+
+        apply_expansion(&mut ranked, &leg, 5, 1);
+
+        let moved = ranked.iter().find(|s| s.memory.id() == hop.id()).unwrap();
+        assert_eq!(moved.match_detail, before);
+        assert_eq!(moved.match_detail.graph_rank, Some(1));
+        assert_eq!(moved.score, score_before);
+    }
+
+    #[test]
+    fn slots_wider_than_the_list_are_harmless() {
+        // `limit` and `slots` come from a request and a config file, so the
+        // combinations that look nonsensical must not panic or lose a row.
+        let (mut ranked, leg, hop) = head_with_hop_at(1);
+        let rows = ranked.len();
+        apply_expansion(&mut ranked, &leg, 1, 8);
+        assert_eq!(ranked.len(), rows);
+        assert!(ranked.iter().any(|s| s.memory.id() == hop.id()));
     }
 
     #[test]
