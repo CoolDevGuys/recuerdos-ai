@@ -333,6 +333,13 @@ pub struct AuditSummary {
     /// cannot be compared to another store's.
     pub rerank_candidates_low: Option<usize>,
     pub rerank_candidates_high: Option<usize>,
+    /// Wall clock per rerank call, end to end.
+    ///
+    /// In a run that used the deployment's deadline this includes whatever the
+    /// call spent waiting for a session, so it is the number the *request* paid
+    /// and not the number to size `[rerank].timeout_ms` against — the two halves
+    /// below are that. In the deadline-free replay this command runs today there is
+    /// no wait to fold in, and the two agree.
     pub rerank_ms_p50: Option<f64>,
     pub rerank_ms_p95: Option<f64>,
     /// The same latency again, split into waiting for a session and judging.
@@ -1327,10 +1334,13 @@ pub fn print_human(report: &AuditReport) {
             summary.rerank_calls
         ),
     }
-    // The latency above, in the two halves a remedy is chosen by. Printed even
-    // when it is empty, because the absence is the finding: an operator looking
-    // for the queue needs to be told this replay could not have one, rather than
-    // concluding from a missing line that the queue was short.
+    // The latency above, in the two halves a remedy is chosen by. Printed when a
+    // run has a split, and explained when it does not *and* ran calls, because the
+    // absence is the finding: an operator looking for the queue needs to be told
+    // this replay could not have one, rather than concluding from a missing line
+    // that the queue was short. When no call ran at all the line above already
+    // says so, and blaming "no deadline" there would be a true sentence about the
+    // wrong cause.
     match (
         summary.rerank_queued_ms_p50,
         summary.rerank_queued_ms_p95,
@@ -1342,10 +1352,11 @@ pub fn print_human(report: &AuditReport) {
              (queue high and inference low is `[rerank].max_concurrency`, not `timeout_ms`)",
             queued_p50, queued_p95, inferred_p50, inferred_p95
         ),
-        _ => println!(
+        _ if summary.rerank_calls > 0 => println!(
             "   split: not measured — this replay ran with no deadline, so no call had a \
              session to wait for (the daemon's own log reports both halves per request)"
         ),
+        _ => {}
     }
     // The pair a config change is judged on: the same queries, the same store,
     // wall clock per column. The embedder is in both numbers, so the *difference*
