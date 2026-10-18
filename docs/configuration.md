@@ -92,6 +92,21 @@ with its default and an explanatory comment. Highlights:
   the eval with nothing else moving, and is deliberately near-tie-sized; `0.0`
   gives back ranking by the legs alone. [Retrieval](#retrieval) carries the
   arithmetic of what each part of the accepted range can and cannot overrule.
+- `[graph].expansion_slots` defaults to `1` — one of the results you ask for is
+  reserved for the hop. It exists because fusion is arithmetic the hop loses: a
+  memory reached only over a relation brings one reciprocal-rank term where a direct
+  match brings two, so it cannot outrank that match at any weight, and raising
+  `[graph].rank_weight` lifts the *bridge* sentence while the answer at the end of
+  the chain stays outside your `limit`. A slot reserves a seat instead: the
+  best-connected memory you would otherwise never see is shown second, so a
+  relational query returns the chain rather than only the bridge. Your top result is
+  never moved, filters and `[retrieval].min_relevance` still decide what is eligible
+  at all, and each seat costs one of the results that would have come last. That
+  trade measured **+28.6 points of `complete@5` on relational queries** with
+  precision@1 unchanged and no other case kind regressing; a second slot bought
+  nothing further, so `2` is available but not the default, and `0` restores the
+  pipeline where only the indexes place a result. Nothing happens at all when a query
+  names no entity the store knows — which, because seeds are exact, is most queries.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation

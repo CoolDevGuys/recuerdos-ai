@@ -364,6 +364,18 @@ rank_weight = 0.3
 # leapfrog a strong direct match, while still outranking weaker ones (and
 # staying in the top-k recall is measured over). 0 disables the cap.
 unanchored_floor = 3
+# How many of the results you ask for the hop may reserve a seat in. The hop
+# loses on arithmetic — a memory it alone reached brings one fusion term where a
+# direct match brings two — so it cannot win a rank; this gives it a place
+# instead. With 1, the best-connected memory you would otherwise not see is
+# shown second, so a relational query returns the chain rather than only the
+# bridge fact. The first result is never touched, filters and min_relevance
+# still decide what is eligible, and each slot costs one of the results that
+# would have been last. Measured: relational complete@5 57.1% -> 85.7%,
+# precision@1 unchanged, nothing else regressing; a second slot bought nothing
+# further. 0 gives back the pipeline as v0.4 shipped it, where only the indexes place
+# a result.
+expansion_slots = 1
 
 [graph.backfill_budget]
 # Bounds one `recuerdos-ai graph backfill --relations` pass, so giving an

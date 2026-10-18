@@ -408,6 +408,34 @@ pub struct GraphConfig {
     /// only by a relation hop cannot leapfrog a strong direct match, while
     /// still outranking weaker ones. `0` disables the cap.
     pub unanchored_floor: usize,
+    /// How many of the results the client asked for the hop may reserve a seat in
+    /// (recall-quality-plan.md Phase 3).
+    ///
+    /// The two knobs above are about how much the hop *counts* in fusion, and
+    /// fusion is arithmetic the hop loses: it brings one reciprocal-rank term to a
+    /// fight where a direct match brings two, so a memory reachable only over a
+    /// relation loses to that match at any weight short of inverting the ranking.
+    /// Reserving slots is the structural alternative — the best-connected memory
+    /// the client would otherwise never see moves into slot `s`, never slot 0, so
+    /// an agent gets the whole chain (the bridge fact *and* the answer at the end
+    /// of it) rather than the bridge alone.
+    ///
+    /// **`1`** is the grid's choice (plan §17). It buys the whole measured gain —
+    /// `complete@5` 57.1 → 85.7 on `relational` and 0 → 100 on the one `chain` case
+    /// whose query names a stored entity — with precision@1 unmoved (it cannot move:
+    /// slot 0 is not on offer) and no other case kind losing anything. A second slot
+    /// bought nothing further on the eval corpus, which has one promotable hop per
+    /// affected query, while costing a second visible row on every recall that does
+    /// promote; `0` is the pipeline as it shipped before Phase 3 and remains the
+    /// setting for a deployment that would rather keep the last result the indexes
+    /// chose.
+    ///
+    /// Validated `0..=3`. Above three the head of every list is chosen by the hop
+    /// rather than by the indexes, which is a different retrieval system rather
+    /// than a stronger version of this one. Inert while `[graph].enabled` is false,
+    /// and while a query names no entity the store knows — which, measured, is every
+    /// `chain` case but one in this project's own eval corpus.
+    pub expansion_slots: usize,
     /// Bounds one `graph backfill --relations` pass (Task 7.3.5), reusing
     /// the same budget shape as consolidation: an existing corpus gains
     /// relations a bounded number of model calls at a time, resuming where
@@ -443,6 +471,10 @@ impl Default for GraphConfig {
             // this eval, where such hits do not happen to take #1.
             rank_weight: 0.3,
             unanchored_floor: 3,
+            // One reserved seat: the hop is on by default, and since Phase 3 so is
+            // the slot that lets a reached memory be *seen* (see the field docs for
+            // what the grid measured).
+            expansion_slots: 1,
             backfill_budget: ConsolidationBudgetConfig::default(),
         }
     }
@@ -579,6 +611,16 @@ impl Default for RerankConfig {
 }
 
 const AUTH_MODES: &[&str] = &["api-key", "none"];
+
+/// The largest `[graph].expansion_slots` a config may ask for
+/// (recall-quality-plan.md Phase 3).
+///
+/// Not a performance limit — the step is a scan over a list already truncated to
+/// the caller's `limit`. It is the limit of what this phase measured: each slot
+/// hands the graph hop one result the indexes did not rank, so at four the head of
+/// a `limit = 5` recall is mostly the hop's choice, a pipeline nothing here has
+/// grid-measured and no operator should get by typographical accident.
+const MAX_GRAPH_EXPANSION_SLOTS: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -901,6 +943,17 @@ impl AppConfig {
                 issues.push(
                     "[graph].hop_limit is 0 — the graph leg would return nothing".to_string(),
                 );
+            }
+            // Not "is it silly" but "is it the pipeline the docs describe": above
+            // three, most of the head is placed by the hop rather than ranked by
+            // the indexes, which no grid here has measured.
+            if self.graph.expansion_slots > MAX_GRAPH_EXPANSION_SLOTS {
+                issues.push(format!(
+                    "[graph].expansion_slots {} is out of range 0..={MAX_GRAPH_EXPANSION_SLOTS} \
+                     — each slot gives the graph hop a result the indexes did not rank, \
+                     so the head stops being theirs",
+                    self.graph.expansion_slots
+                ));
             }
             // Negatives *or* NaN, either of which would make the graph leg
             // subtract from or corrupt a memory's fused score.
@@ -1359,6 +1412,72 @@ mod tests {
                     .any(|m| m.contains("[retrieval].similarity_baseline")),
                 "{:?}",
                 err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn expansion_slots_defaults_to_the_slot_the_grid_chose_and_is_read_from_env() {
+        // One, not zero: what the slot earns is in the field docs and §17, and the
+        // literal here is what turns a quiet edit of that decision into a reviewable
+        // change of behaviour. The env form is what the grid drives its cells
+        // through, so the knob a measurement runs on must be the knob that ships.
+        Jail::expect_with(|_jail| {
+            let config = AppConfig::load(None).expect("defaults must be valid");
+            assert_eq!(config.graph.expansion_slots, 1);
+            Ok(())
+        });
+
+        Jail::expect_with(|jail| {
+            jail.create_file("recuerdos-ai.toml", "[graph]\nexpansion_slots = 2\n")?;
+            assert_eq!(
+                AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                    .unwrap()
+                    .graph
+                    .expansion_slots,
+                2
+            );
+
+            jail.set_env("RECUERDOS_AI_GRAPH__EXPANSION_SLOTS", "1");
+            assert_eq!(
+                AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                    .unwrap()
+                    .graph
+                    .expansion_slots,
+                1
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn too_many_expansion_slots_is_refused_rather_than_clamped() {
+        // Four or more hands most of a `limit = 5` head to the hop. That is a
+        // different retrieval system, not a stronger version of this one, and it
+        // has never been grid-measured here — so it is a refusal, not a clamp.
+        Jail::expect_with(|jail| {
+            for value in ["4", "9", "100"] {
+                jail.create_file(
+                    "recuerdos-ai.toml",
+                    &format!("[graph]\nexpansion_slots = {value}\n"),
+                )?;
+                let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+                assert!(
+                    err.0.iter().any(|m| m.contains("[graph].expansion_slots")),
+                    "{value} was refused for something else: {:?}",
+                    err.0
+                );
+            }
+            // Three is the top of the range, and legal: the grid gets to measure
+            // it without editing the schema.
+            jail.create_file("recuerdos-ai.toml", "[graph]\nexpansion_slots = 3\n")?;
+            assert_eq!(
+                AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
+                    .unwrap()
+                    .graph
+                    .expansion_slots,
+                3
             );
             Ok(())
         });

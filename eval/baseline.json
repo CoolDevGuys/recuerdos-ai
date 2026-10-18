@@ -1,5 +1,5 @@
 {
-  "recall_at_k": 83.33333333333334,
+  "recall_at_k": 87.17948717948718,
   "precision_at_1": 53.84615384615385,
   "cases": 59,
   "by_kind": {
@@ -12,15 +12,15 @@
     "nl-category": 66.66666666666666,
     "nl-question": 85.71428571428571,
     "paraphrase": 100.0,
-    "relational": 57.14285714285714,
+    "relational": 85.71428571428571,
     "statement": 75.0,
     "subcategory-filter": 100.0,
     "tag-filter": 100.0
   },
-  "mrr": 66.63461538461539,
-  "complete_at_k": 80.76923076923077,
-  "latency_ms_p50": 8.554122000000001,
-  "latency_ms_p95": 10.364048,
+  "mrr": 68.39743589743588,
+  "complete_at_k": 84.61538461538461,
+  "latency_ms_p50": 8.036616,
+  "latency_ms_p95": 9.442321999999999,
   "precision_at_1_by_kind": {
     "category-filter": 100.0,
     "current-fact": 0.0,
@@ -46,7 +46,7 @@
     "nl-category": 50.0,
     "nl-question": 85.71428571428571,
     "paraphrase": 100.0,
-    "relational": 57.14285714285714,
+    "relational": 85.71428571428571,
     "statement": 75.0,
     "subcategory-filter": 100.0,
     "tag-filter": 100.0
