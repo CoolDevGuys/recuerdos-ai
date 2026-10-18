@@ -2770,6 +2770,37 @@ RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
     --queries queries.toml --user <handle> --limit 5
 ```
 
+#### The reranker's own score says when to believe it — measured on the frozen copy
+
+The confidence gate in §16 was a design sketch, and the thing it needed was a number: how separated are
+the cross-encoder's head scores when its top pick is right from when it is wrong? Extracting the after-side
+rerank scores from the replay above answers it for this store, all 18 queries:
+
+| the model's top-1 was… | count | its score | range |
+|---|---|---|---|
+| the expected memory | 15 | median **0.998** | **0.958 – 1.000** |
+| not the expected memory | 3 | — | **0.000 – 0.037** |
+
+**The two sets do not overlap, and not narrowly: the worst confident case is 0.958 and the best wrong one
+is 0.037.** Any threshold in that gap separates them on this store. The three wrong ones are exactly the
+three known cases — the two questions whose memories do not exist (all five candidates 0.000–0.001) and
+query 17's flat head (0.037 over 0.031) — so what the head is doing is not "occasionally wrong" but
+**"unsure, and saying so in its own scores"**.
+
+One thing the numbers argue *against*, worth recording because it is the obvious next idea and it is
+wrong: the **margin** between first and second is a useless signal here. When the model is right, the
+margin ranges from +0.001 (q12, q13 — where both top rows scored ≈ 1.0 because both are genuinely about
+the question) to +0.995. The **level** separates; the gap does not. A gate built on "if the model has a
+clear winner" would fire almost everywhere and help nowhere; a gate built on "if the model thinks
+anything here is an answer at all" is the one that means something.
+
+What this does not do: settle the corpus conflict. It is 18 heads from one store, two of which are
+questions with no answer in the store. The claim it supports is narrow and useful — *on this store, the
+reranker's score level is a reliable confidence signal, and the flat-head regime the eval grid complained
+about is detectable before it reorders anything*. What would make it a shippable threshold is the same
+extraction on the corpus (reranking-plan §12's distribution printer, at the new δ) plus a couple more
+stores, because a threshold tuned on one person's bimodality is a guess wearing a decimal point.
+
 ### Phase 4 — embedding prompts
 
 **No measurement taken; the phase is stopped as written.** Nothing this project has measured runs a

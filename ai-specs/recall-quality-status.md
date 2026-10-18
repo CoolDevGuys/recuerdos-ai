@@ -173,8 +173,20 @@ grid can be re-run against — one now exists locally, see §7), a **rerank grid
 (the published fusion choice was made at 0.05, so the head the stage sees has since changed), and the
 shape most likely to survive both readings is not a strategy default at all but a **confidence gate**:
 serve the model's order where the head's top score clears a threshold, keep the fused order where the
-head is flat — with the threshold calibrated by the distribution printer in reranking-plan §12 rather
-than guessed.
+head is flat.
+
+The first calibration data for that gate exists, extracted from the frozen-copy replay. On the real
+store, the reranker's head scores are **bimodal and non-overlapping**: when its top-1 was the expected
+memory (15 of 18) its score was **0.958–1.000**; when it was not (3 of 18) it was **0.000–0.037**. Any
+threshold between those ranges separates them on this store, and the three misses are precisely the two
+unanswerable questions plus the one flat head — the model is not occasionally wrong so much as
+occasionally *unsure, and saying so in its own scores*.
+
+Two caveats attached to that, both load-bearing. The **margin** between first and second is not the
+signal (when the model is right, the margin runs from +0.001 to +0.995 — a "clear winner" gate would fire
+almost everywhere and help nowhere; the *level* is what separates). And 18 heads from one store is
+calibration data, not a threshold: a number tuned on one person's bimodality would be a guess wearing a
+decimal point, which is why the corpus side of the same extraction is still owed before anything ships.
 
 ## 5. Phases 4–7: stopped as written, with one live candidate among them
 
@@ -206,7 +218,9 @@ documented with its real-store numbers, and there is nothing left in it that nee
    operator's config and query file are in their run bundle, and the field side of the disagreement
    replays locally to the decimal (§2b). What separates the two readings now is measurement, not access —
    specifically the rerank-score distribution on both instruments, which is what a confidence threshold
-   would have to be calibrated on.
+   would have to be calibrated on. The store side is done (§4: 0.958–1.000 when the model is right,
+   0.000–0.037 when wrong, no overlap); the corpus side is what a threshold still needs before anything
+   ships on it.
 2. **Task 0.9's real corpus.** The store copy exists (§7) with its digest recorded; what it needs is
    ~40 query/expect pairs and the existing 18 re-anchored — three of them encode last week's answer,
    which is why field absolutes moved between runs. This is also the only way to learn whether the one
