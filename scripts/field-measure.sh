@@ -208,8 +208,10 @@ echo "   binary   $RUNNING   store $STORE   user $USER_HANDLE ✓"
 # The store is read from disk, so an audit measures the new binary whatever the
 # service is running. RSS and the queue question are not like that: they are
 # properties of the live process, so say out loud when it is still the old one.
+LISTEN=$(awk '/^server/{s=1;next} /^[a-z]/{s=0} s && $1=="listen"{print $2}' "$OUT/00-config.txt" | head -1)
+# A bind address of 0.0.0.0 is where the process listens, not where you reach it.
+LISTEN=${LISTEN/0.0.0.0/127.0.0.1}
 if [ "$IS_CONTAINER" = 0 ] && command -v curl >/dev/null 2>&1; then
-    LISTEN=$(awk '/^server/{s=1;next} /^[a-z]/{s=0} s && $1=="listen"{print $2}' "$OUT/00-config.txt" | head -1)
     LIVE=""
     [ -n "$LISTEN" ] && LIVE=$(curl -fsS --max-time 3 "http://$LISTEN/version" 2>/dev/null \
         | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)
@@ -231,18 +233,67 @@ if [ "$IS_CONTAINER" = 1 ] && [ -n "${RUNNING_IMG:-}" ] && [ "$RUNNING_IMG" != "
 fi
 sed -n '/^retrieval/,/^server/p' "$OUT/00-config.txt" | head -22
 
+# ── 01 · what you actually have stored ───────────────────────────────────────
+# "I don't remember what I stored" is the normal state, and the service can answer
+# it: GET /v1/memories/export is a read-scope route that returns every memory,
+# grouped by category, with dates and tags. No model call, no writes. It lands one
+# directory above $OUT on purpose — your memories' text should not ride along in the
+# tarball you hand to somebody else.
+PRIV="$(dirname "$OUT")/field-private"
+DIGEST="$PRIV/memories.md"
+mkdir -p "$PRIV" && chmod 700 "$PRIV"
+KEY="${KEY:-${RECUERDOS_AI_API_KEY:-}}"
+if [ -z "$KEY" ] && [ -t 0 ]; then
+    printf 'read-scope API key, for the store listing (empty to skip): '; read -rs KEY; echo
+fi
+if [ -z "$KEY" ]; then
+    echo "── 01 · no key, so no listing of your own store. Not fatal: expect is optional."
+    echo "   Get the listing whenever convenient:"
+    echo "     curl -s -H \"Authorization: Bearer \$KEY\" \\"
+    echo "       \"http://${LISTEN:-127.0.0.1:7070}/v1/memories/export?format=markdown\" > memories.md"
+elif curl -fsS --max-time 60 -H "Authorization: Bearer $KEY" \
+        "http://${LISTEN:-127.0.0.1:7070}/v1/memories/export?format=markdown" > "$DIGEST.tmp" 2>/dev/null; then
+    mv "$DIGEST.tmp" "$DIGEST" && chmod 600 "$DIGEST"
+    echo "── 01 · your store as it sees itself → $DIGEST"
+    awk '/^## /{if(c)printf "   %-22s %s\n", c, n; c=substr($0,4); n=0; next}
+         /^- /{n++} END{if(c)printf "   %-22s %s\n", c, n}' "$DIGEST"
+    echo "   $(grep -c '^- ' "$DIGEST") memories. Read it for five minutes; the questions write"
+    echo "   themselves once you can see what you have."
+else
+    rm -f "$DIGEST.tmp"
+    echo "── 01 · could not read /v1/memories/export (daemon stopped, wrong port, or the key"
+    echo "   has no read scope). Continuing without it — expect is optional, see below."
+fi
+
 # ── the query file: the measurement is only as good as these ─────────────────
 QUERIES="$OUT/queries.toml"
 if [ ! -s "$QUERIES" ]; then
   cat > "$QUERIES" <<'TPL'
-# Questions you would really ask your own memory service, in the TOML form so each
-# one can say what should come back. `expect` is a SUBSTRING of the memory that
-# ought to be first — write it from the memory's wording, not the query's.
-# 12–20 is enough to see a pattern; a handful will tell you almost nothing.
-# Fill this in, then re-run this script. It refuses to measure an unfilled template.
+# Questions you would really ask your own memory service, phrased the way you would
+# actually type them.
+#
+#   text    the question.
+#   expect  OPTIONAL — a distinctive substring copied from the memory that ought to
+#           come first. Precision is scored only on queries that carry one, so the
+#           more you fill in the sharper the δ comparison gets. A query you cannot
+#           judge is worth more empty than wrong, and for M1 (the reserved seat) no
+#           expect is needed at all: that review asks whether the arrival is related
+#           to the question, which you can see for yourself.
+#
+# Two passes are the intended way, not a mistake. Run once with `text` only, read the
+# memories the audit prints back — recognition is much easier than recall, and the
+# printed answers are your own sentences — then go back and add `expect` where you now
+# recognise what should have won, and add the questions you thought of while reading.
+#
+# One caveat, because it is the point of the whole exercise: do not mark the current
+# top result as correct just because it is sitting there. That would define the
+# pipeline as always right and measure nothing. Add an expect only for a memory you
+# would have found yourself.
+#
+# 12–20 questions is enough to see a pattern; three tells you almost nothing.
+# Delete this scaffolding when done — the script only refuses on the marker below.
 [[query]]
-text = "REPLACE ME: a relational question naming one thing you store — who owns X, what does X run on, what does X require"
-expect = "a distinctive substring of the answer"
+text = "REPLACE ME"
 TPL
   echo "── wrote $QUERIES — fill it in with your own questions, then run this script again."
   exit 2
@@ -344,4 +395,7 @@ echo
 TARBALL="$HOME/field-$(date +%Y%m%d-%H%M).tar.gz"
 tar czf "$TARBALL" -C "$OUT" .
 echo "done. Everything is in $OUT — hand me $(basename "$TARBALL") (or just its .txt files)"
-echo "and I will write the numbers into plan §17 and tick only what they support."
+echo "note: the .txt audit outputs quote your memories; the .json one carries ids, ranks and"
+echo "scores only. If you would rather not share the sentences, send the .json and say which"
+echo "arrivals you judged unrelated — the ranks are the part I need."
+echo "I will write the numbers into plan §17 and tick only what they support."
