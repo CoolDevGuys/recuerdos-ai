@@ -1196,6 +1196,29 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         println!("  batch      {}", rerank.batch_size);
     }
 
+    // The third leg decides which relational memories are reachable at all, and
+    // since Phase 3 it can also reserve a seat in the answer — so its state belongs
+    // here for the same reason retrieval's and the rerank stage's do: a deployment
+    // where the hop places nothing and one where it holds a slot are different
+    // systems, and neither is visible without opening the file.
+    let graph = &config.graph;
+    println!("\ngraph");
+    println!("  enabled    {}", graph.enabled);
+    if graph.enabled {
+        println!(
+            "  hops       {} (limit {})",
+            graph.max_hops, graph.hop_limit
+        );
+        println!(
+            "  weight     {} (unanchored floor {})",
+            graph.rank_weight, graph.unanchored_floor
+        );
+        // Printed at zero too: `0` means the hop competes for rank and nothing
+        // else, which is the pre-Phase-3 pipeline and an effective state an
+        // operator comparing two deployments needs to see.
+        println!("  expansion_slots {}", graph.expansion_slots);
+    }
+
     println!("\nserver");
     println!("  listen     {}:{}", config.server.host, config.server.port);
     let mut transports = Vec::new();
