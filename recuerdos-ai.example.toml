@@ -223,10 +223,10 @@ min_relevance = 0.25
 #
 # 0.05 is the default: what the calibration grid earned on the eval set (+3.8
 # precision@1, +2.7 MRR, with recall, completeness and "no match" answers
-# unmoved, and no case losing its top hit). That is a near-tie-sized influence —
-# enough for the better match to win the calls the two index legs tie and the
-# calls that turn on a few days of age, not enough to overrule a rank gap of
-# four or more.
+# unmoved, and no case losing its top hit). It is a near-tie-sized influence:
+# even the largest relevance gap at 0.05 reverses rank 1 against rank 4 and stops
+# there, so the two index legs' disagreement survives everything except its
+# closest calls.
 #
 # 0.0 switches the stage off and restores the order recall shipped before this
 # setting existed. Larger values were measured and deliberately NOT shipped as

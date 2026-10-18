@@ -86,6 +86,12 @@ with its default and an explanatory comment. Highlights:
   62.5%. The floor caps a memory *only* the graph found so it can't leapfrog
   a strong direct match. Both are inert when a query surfaces no graph hits,
   so non-relational recall is unaffected.
+- `[retrieval].relevance_weight` defaults to `0.05` — after the index legs are
+  fused, how well a memory matches competes with how new it is, as a bounded
+  multiplier `1 − weight × (1 − relevance)`. It earned **+3.8 precision@1** on
+  the eval with nothing else moving, and is deliberately near-tie-sized; `0.0`
+  gives back ranking by the legs alone. [Retrieval](#retrieval) carries the
+  arithmetic of what each part of the accepted range can and cannot overrule.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
 
 ## Validation
@@ -305,12 +311,48 @@ The full-text (BM25) index is model-independent and is not touched.
 hybrid                 = true
 default_limit          = 8
 recency_half_life_days = 90
+relevance_weight       = 0.05
 ```
 
 `recency_half_life_days` tunes how much a memory's age discounts it.
 Recency is a *bounded* multiplier — it can reorder comparably relevant
 results but never bury a far more relevant old memory. See the reasoning
 in `src/memories/domain/recall_ranker.rs`.
+
+`relevance_weight` tunes the other side of that sentence: whether *how well a
+memory matches* is allowed to compete with how new it is. A recall score is
+`(rank evidence) × recency × quality × affinity`, where
+`affinity = 1 − relevance_weight × (1 − relevance)`, and `relevance` is the `0..1`
+number every result reports — measured from what the indexes actually matched,
+which is also what `[retrieval].min_relevance` thresholds.
+
+The default, `0.05`, is what the calibration grid earned: precision@1 50.0 → 53.8
+and MRR 63.9 → 66.6 on the eval set, with recall, completeness and abstention
+unmoved and no case losing its top hit. That is a near-tie-sized influence: a
+maximum relevance gap at `0.05` reverses rank 1 against rank 4 and stops there
+(reversing rank 1 against rank 5 needs `0.062`), which is the legs' disagreement
+surviving everything except their closest calls. Set `0.0` to switch the stage off
+entirely (that is a different code path, not a small weight) and get back the
+order recall shipped before this setting existed.
+
+The value is a *spread*, so it is worth knowing what a larger one buys and what
+it costs. At `0.2`, a relevance gap of `0.06` is worth 1.2% of a score — enough
+to win a pair a week of age apart, and also enough to overrule the two legs
+disagreeing by ten ranks (14.8%). Where the line sits is arithmetic rather than
+taste, and the accepted range runs to `0.5`, at which relevance overrules any rank
+gap a result list contains: ranking by relevance, with the indexes demoted to a
+suggestion. The grid measured `0.2` through `0.5` and shipped none of them,
+because that corpus favours relevance partly by construction — its expected
+memories are the topically nearest ones. Confirm a larger value on your own
+memories before trusting it:
+
+```bash
+recuerdos-ai recall audit --config tuned.toml --compare-config deployed.toml \
+    --queries questions.txt
+```
+
+It writes nothing (the daemon may stay running) and prints which results moved and
+what the change cost.
 
 `default_limit` applies when a search omits `limit`; requests are capped
 at 50 regardless.

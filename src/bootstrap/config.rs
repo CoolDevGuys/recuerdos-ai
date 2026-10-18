@@ -322,9 +322,10 @@ pub struct RetrievalConfig {
     /// `score ×= 1 − δ·(1 − relevance)`, so δ is the spread relevance is allowed
     /// across. `0.05` — the shipped default, the grid's choice — lets a better
     /// match win the calls the legs tie and the calls that turn on a few days of
-    /// age, and cannot overrule a rank gap of four or more. `0.0` switches the
-    /// stage off (a different code path, not a small weight) and restores the
-    /// order recall shipped before this knob existed.
+    /// age; even its maximum relevance gap reverses rank 1 against rank 4 and
+    /// stops there (rank 5 would need 0.062). `0.0` switches the stage off (a
+    /// different code path, not a small weight) and restores the order recall
+    /// shipped before this knob existed.
     ///
     /// Not the floor, and not a knob on it: `min_relevance` still decides what is
     /// returned at all. The range `0.0..=0.5` is deliberately generous at the top

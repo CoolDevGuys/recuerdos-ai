@@ -100,8 +100,8 @@
 //! rather than a wide band. What keeps it honest is the grid, and the grid chose
 //! [`DEFAULT_RELEVANCE_WEIGHT`] = 0.05 on the age-aware eval: precision@1
 //! 50.0 → 53.8, MRR 63.9 → 66.6, everything else unmoved, no case losing its top
-//! hit. That is a near-tie-sized influence — enough to beat several days of age
-//! and an adjacent-rank difference, not enough to leapfrog four ranks or more.
+//! hit. That is a near-tie-sized influence: the maximum relevance gap at 0.05
+//! reverses rank 1 against rank 4 and no further (rank 5 would need 0.062).
 //! The curve rose all the way to the ceiling (+9.6 p@1 at 0.2, +17.3 at 0.5) with
 //! nothing regressing, and the larger values were left unshipped because this
 //! corpus rewards relevance partly by construction — its expected memories are
