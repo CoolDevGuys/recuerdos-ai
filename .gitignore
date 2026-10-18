@@ -20,3 +20,11 @@ sdk/python/build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Private store copies and field-measurement bundles. A store copy *is* someone's
+# memories, and the field bundles quote them in their .txt audit outputs, so neither
+# belongs in git history: what gets committed is the digest and the transcription of
+# the aggregate numbers (plan §17). The tarballs live here locally and are ignored.
+eval/*.tar.gz
+eval/store-*/
+eval/field-*/
