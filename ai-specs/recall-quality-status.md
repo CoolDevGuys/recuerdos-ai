@@ -98,6 +98,16 @@ that are not in the store: quoted back at the index, `"Radeon 8060S Graphics"` t
 honest denominator is 16 answerable questions, and **16 of 16 are complete inside five**. The plan's
 canonical "recall failures" were absences.
 
+**And the readings reproduce off the host.** Both headline results were replayed by the maintainer from
+the frozen tarball, on different hardware, in Docker, with the *query-side embedder swapped* for our own
+ONNX implementation of the same model (the operator's config points at an `openai-compat` endpoint that
+does not exist here): the δ ladder read **38.9 → 50.0 p@1, 55.7 → 63.4 MRR, top-1 moved on 3/18** and
+M5 read **38.9 → 83.3 p@1, 54.6 → 85.2 MRR, top-1 moved on 8/18** — identical to the host's numbers to
+the decimal, same queries moved. Latency did not and could not: base recall 16.2 ms vs 6.3 ms, the stage
+89 ms vs 229 ms, on different silicon. What that buys is *repeatability*, not generalisation: one store,
+eighteen questions, and the corpus's opposite verdict on the fusion still stands unrebutted. What it also
+buys is that the owed measurement stopped being someone else's errand — see §6.
+
 ### 2c · What a recall costs, warm
 
 | configuration | recall p50 | recall p95 | resident |
@@ -192,8 +202,12 @@ documented with its real-store numbers, and there is nothing left in it that nee
 ## 6. Still open, ordered by how much it could change
 
 1. **The 44-point disagreement about `replace`** — §2d versus the grid. Larger than anything Phases
-   4–8 were written to buy. Needs the frozen copy in the harness.
-2. **Task 0.9's real corpus.** A store copy now exists (§7) with its digest recorded; what it needs is
+   4–8 were written to buy, and **no longer blocked on anyone's convenience**: the frozen copy is here, the
+   operator's config and query file are in their run bundle, and the field side of the disagreement
+   replays locally to the decimal (§2b). What separates the two readings now is measurement, not access —
+   specifically the rerank-score distribution on both instruments, which is what a confidence threshold
+   would have to be calibrated on.
+2. **Task 0.9's real corpus.** The store copy exists (§7) with its digest recorded; what it needs is
    ~40 query/expect pairs and the existing 18 re-anchored — three of them encode last week's answer,
    which is why field absolutes moved between runs. This is also the only way to learn whether the one
    failure class the corpus still shows (`vocab-gap`, recall 14.3%) exists outside synthetic cases,
@@ -220,19 +234,32 @@ numbers and this file describe the same state.
 **These two files are private and are not in git** — a store copy *is* someone's memories, and the
 measurement bundles quote them in their `.txt` audits. They are matched by `.gitignore`; what is
 committed from them is this digest and the aggregates above. Anyone reproducing §2b needs the copy from
-its owner, not from the repository.
+its owner, not from the repository. Extract the tarball whole — it is a cold copy of a live SQLite file,
+so `recuerdos-ai.db`, `-wal` and `-shm` must come out together.
 
-To replay a knob change against it locally:
+The recipe that was actually used, including the one substitution required (the operator's config points
+`[embeddings]` at an `openai-compat` endpoint on their own box, so the query side has to be re-pointed at
+the built-in provider — same model name, different implementation):
 
 ```bash
-tar xzf eval/store-2026-10-18.tar.gz -C /tmp/frozen
-RECUERDOS_AI_STORAGE__PATH=/tmp/frozen recuerdos-ai recall audit \
-    --config a.toml --compare-config b.toml \
-    --queries questions.txt --user <handle> --limit 5
+mkdir -p eval/store-frozen && tar xzf eval/store-2026-10-18.tar.gz -C eval/store-frozen
+# configs and queries.toml come from the run bundle, unedited
+docker compose run --rm -T dev sh -lc '
+  export RECUERDOS_AI_STORAGE__PATH=/app/eval/store-frozen
+  export RECUERDOS_AI_EMBEDDINGS__PROVIDER=local
+  export RECUERDOS_AI_EMBEDDINGS__MODEL=bge-small-en-v1.5
+  export RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models RECUERDOS_AI_MODEL_CACHE=/models
+  recuerdos-ai recall audit \
+      --config /app/eval/store-frozen/base.toml \
+      --compare-config /app/eval/store-frozen/delta05.toml \
+      --queries /app/eval/store-frozen/queries.toml --user <handle> --limit 5'
 ```
 
-`recall audit` writes nothing, so it can also be run against a live daemon. Note when reading its
-output that the ids it prints are the **last eight characters** of the memory UUIDs.
+Both replays ran against the *unmodified* operator configs; nothing about the audit needed adapting
+beyond the env above. `recall audit` writes nothing, so it can equally be run against a live daemon.
+Two things to know when reading its output: the ids are the **last eight characters** of the memory
+UUIDs, and the audit applies **no client floor** — it shows rows below `min_relevance` on purpose, so a
+`complete@5` from an audit is not what a client saw.
 
 ## 8. What the instrument changes about the method
 

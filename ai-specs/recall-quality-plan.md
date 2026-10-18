@@ -2714,6 +2714,62 @@ for the seat to gain" into "there was nothing inside the window for the seat to 
 floor refuses is unreachable by the slot anyway" — which is still the right design (the slot runs
 after the floor, deliberately), but it is a narrower claim than the table reads.
 
+#### The field readings reproduce off the host — and that changes what they are worth
+
+The honest label on everything above was *one machine, one person's store, numbers that drift while you
+watch them*. The frozen copy answers the drift part and most of the first part. Both headline readings
+were replayed by the maintainer, on different hardware, from the tarball alone:
+
+```
+store:  eval/store-2026-10-18.tar.gz (sha256 b20fda44…), extracted whole — .db, -wal and -shm together
+queries: queries.toml from the operator's own run bundle, unedited
+config:  the operator's own base.toml / delta05.toml / on.toml / replace.toml, unedited, with
+         RECUERDOS_AI_STORAGE__PATH pointed at the extracted copy
+hardware: Docker on Apple Silicon, not the Strix Halo host
+embedder: NOT the same code path — the operator's [embeddings].provider is openai-compat at
+         http://localhost:8083, which does not exist here, so the replay switched to the built-in
+         local provider (fastembed ONNX) with the same model name, bge-small-en-v1.5. The stored
+         vectors in the copy were produced by their server; only the query side is ours.
+reranker: bge-reranker-base, freshly downloaded into /models for the run
+```
+
+| replay | aggregate read on the host | aggregate read here |
+|---|---|---|
+| δ 0.05 → 0.5, stage off | p@1 38.9 → 50.0 · MRR 55.7 → 63.4 · complete@5 88.9 → 88.9 · top-1 moved 3/18, mean displacement 0.59 | **identical**, to the decimal |
+| rrf weight 1 → `replace`, stage on | p@1 38.9 → 83.3 · MRR 54.6 → 85.2 · complete@5 88.9 · top-1 moved 8/18, mean displacement 1.19 | **identical**, to the decimal |
+
+**Latency did not reproduce and was never going to**: base recall read p50 16.2 ms here against 6.3 ms
+there, and the rerank stage p50 89 ms against 229 ms — different CPUs, different memory bandwidth, and a
+different embedder implementation on the query path. Nothing in this section's *quality* numbers depends
+on timing, and the two are kept apart accordingly.
+
+Three things follow, and one of them was not expected:
+
+- **The quality readings are a property of the store and the configuration, not of the box.** Same copy,
+  different machine, different embedding implementation for the query side, same numbers — including which
+  queries moved. Reproducibility was not assumed anywhere before this; it is now a measured fact about the
+  instrument.
+- **The owed measurement is no longer the operator's to give.** "Run a rerank grid against a real store
+  copy" has been written into §16 as the thing that must happen before the fusion default can change, and
+  it always read as blocked on someone's convenience. With the copy and their query file in hand, it is a
+  local command. The blocker was the data, and the data arrived.
+- **What this does *not* buy: generalisation.** It is still one store and eighteen questions. Reproduction
+  says the effect is real and repeatable; it says nothing about whether it is typical. The corpus side of
+  the disagreement (reranking-plan §12: `replace` losing up to −9.6 p@1 on three of four models) is
+  unrefuted by this, and the two readings are still in open conflict — now on a frozen store whose state
+  nobody can accidentally change mid-experiment, which is the only part that got fixed.
+
+Reproducing it, if you have the copy from its owner:
+
+```bash
+mkdir -p eval/store-frozen && tar xzf eval/store-2026-10-18.tar.gz -C eval/store-frozen
+RECUERDOS_AI_STORAGE__PATH=/app/eval/store-frozen \
+RECUERDOS_AI_EMBEDDINGS__PROVIDER=local RECUERDOS_AI_EMBEDDINGS__MODEL=bge-small-en-v1.5 \
+RECUERDOS_AI_EMBEDDINGS__CACHE_DIR=/models \
+  recuerdos-ai recall audit --config on.toml --compare-config replace.toml \
+    --queries queries.toml --user <handle> --limit 5
+```
+
 ### Phase 4 — embedding prompts
 
 **No measurement taken; the phase is stopped as written.** Nothing this project has measured runs a
