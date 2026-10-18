@@ -448,11 +448,20 @@ score'      = score × affinity(relevance)
 - For a symmetric tie (equal rank evidence), the comparison becomes
   `recency_a·quality_a·affinity_a` vs the same for `b`. Relevance now competes with
   age instead of being ignored. With δ = 0.2, a relevance gap of 0.06 is worth
-  ≈ 1.3%, and one day of age (90-day half-life) ≈ 0.77%. The grid decides how much
-  weight relevance deserves.
-- Bounded by construction: affinity ∈ `[1 − δ, 1]`. With δ ≤ 0.5 it cannot reverse
-  a large rank gap (rank 1 vs rank 10 on one leg ≈ 13% apart). The module docs
-  carry the arithmetic (invariant 3.7).
+  1.2% of a score. *(First written as "≈ 1.3% against one day of age ≈ 0.77%",
+  which compares against the raw half-life: the recency multiplier is
+  `MULTIPLIER_FLOOR`-bounded, so a day is 0.15% of a score and three days 0.46%.
+  The pinned exchange-rate test therefore uses three days — at one day both
+  candidate δ values let relevance win and the test proves nothing. §17, Phase 2.)*
+  The grid decides how much weight relevance deserves.
+- Bounded by construction: affinity ∈ `[1 − δ, 1]`. *(This bullet originally claimed
+  that with δ ≤ 0.5 affinity cannot reverse a large rank gap — "rank 1 vs rank 10 on
+  one leg ≈ 13% apart". It can. δ is a spread, and the maximum relevance gap, 0
+  against 1, reverses a gap of r ranks once δ > 1 − 61/(60 + r): 0.047 at rank 4,
+  0.129 at rank 10, 0.238 at rank 20 — δ = 0.5 reverses anything nearer than ~62
+  ranks. So the bound is not what keeps relevance from becoming the primary key;
+  the grid is, which is why §17 ships 0.05 rather than the top of the range.)* The
+  module docs carry the table (invariant 3.7).
 
 ### Tasks
 
@@ -503,10 +512,16 @@ score'      = score × affinity(relevance)
   pre-change build over the existing recaller fixtures (the anchor).
 - Exact symmetric tie (v1/k2 vs v2/k1), equal ages → the higher-relevance memory
   first.
-- Same tie with a 1-day age gap: at δ = 0.2 relevance wins for a 0.06 gap; at
-  δ = 0.05 recency wins. Both pinned, which documents the trade.
-- Bound: at δ = 0.5, a memory 5 ranks lower on both legs never overtakes, whatever
-  its relevance (arithmetic pinned).
+- Same tie with an age gap: at δ = 0.2 relevance wins for a 0.06 gap; at δ = 0.05
+  recency wins. Both pinned, which documents the trade. *(Measured at a three-day
+  gap: with the floored recency band, a one-day gap lets relevance win at both δ
+  values and the test proves nothing.)*
+- Bound: how far relevance can overrule rank evidence — a nine-rank gap survives the
+  maximum relevance gap at δ = 0.05 and 0.10, and does not at 0.20 and 0.50, which
+  brackets the documented reversal threshold of 0.129. *(Written as "at δ = 0.5 a
+  memory 5 ranks lower never overtakes, whatever its relevance", which the formula
+  contradicts — at δ = 0.5 it does. §17 Phase 2 carries the arithmetic and the test
+  that replaced it, `how_far_relevance_can_overrule_a_rank_gap`.)*
 - Graph-only hit (relevance = `GRAPH_HOP_RELEVANCE`) under δ > 0: penalised exactly
   as the formula says. Phase 3's slot is unaffected (structural).
 - NaN relevance cannot panic the sort.
@@ -514,11 +529,24 @@ score'      = score × affinity(relevance)
 
 ### Definition of Done
 
-- [ ] `just check-native` passes.
+- [x] `just check-native` passes — 997 tests (17 new, the 11 `--ignored` ONNX ones
+      still hand-run), clippy `-D warnings` clean, boundaries clean. `eval` green and
+      `sdk-test` skipped: nothing on the wire changed, only a CLI report section and
+      a config key.
 - [ ] Grid table (eval and `recall audit`) pasted in §17. Chosen δ and rationale in
-      the doc comments.
-- [ ] §4 gate holds at the chosen δ. Otherwise the default stays 0.0 and §17 says why.
-- [ ] Baseline re-recorded at the chosen default.
+      the doc comments. **Half met.** The eval grid, its gated re-read, the chosen
+      δ = 0.05 and the reasoning are in §17, in `DEFAULT_RELEVANCE_WEIGHT`, the
+      config field, the example file and `docs/configuration.md`. The `recall audit`
+      half is not met and is not approximated: it needs a copy of the deployed store
+      plus the operator's `expect` file. §17 records the command and what to read
+      off it.
+- [x] §4 gate holds at δ = 0.05: p@1 +3.8 (needs ≥ +2), MRR +2.7, recall@5 ±0, no
+      `by_kind` regression, abstention 100.0. Caveat on one row — the +5 ms latency
+      limit is measured at eval scale (+0.5 ms) and only *argued* at 20k: `scripts/
+      bench.sh 20000` was not re-run. Recorded in §17 rather than waved through.
+- [x] Baseline re-recorded at the chosen default: p@1 50.0 → 53.85, MRR 63.9 →
+      66.63, recall@5/complete@5/every other kind identical, and `just eval-native`
+      reads `change: -0.0` four times.
 
 ---
 
@@ -956,7 +984,9 @@ one top-1 the Phase 2 change can lose).
 | Risk | Mitigation |
 |---|---|
 | Age-aware eval moves every baseline number | Expected and recorded (0.8). All later phases compare against the new baseline only. |
-| Affinity lets relevance override real rank evidence | Bounded band (δ ≤ 0.5), arithmetic pinned, smallest δ on the plateau chosen. |
+| Affinity lets relevance override real rank evidence | The band's *bound* is not the protection — δ = 0.5 reverses any gap nearer than ~62 ranks (§17, Phase 2), so the protection is the chosen value: δ = 0.05, whose maximum relevance gap stops between rank 4 and rank 5. Pinned arithmetically (`how_far_relevance_can_overrule_a_rank_gap`), and `0.0` remains a different code path for anyone who wants none of it. |
+| Phase 2's default was chosen on a corpus that favours relevance by construction | True of the instrument, and the reason the shipped value is the smallest that clears §4 rather than the largest that scores. The larger δ values (0.2–0.5) are recorded as measured-but-unshipped, and the falsifier — `recall audit` with the operator's `expect` file — is spelled out in §17 as owed. If it holds there, raising the default is a release note, not a config edit. |
+| `scripts/recall-grid.sh`'s absolute columns include the informational cases since Task 0.7, so they no longer match the gated baseline | Phase 0's grid table (83.3 reference) and Phase 2's (75.8) are not the same measurement, and a reader who assumes they are will mis-read both. Phase 2's entry records both readings and the `-- --baseline … --max-drop 100` invocation that produces the gated one; the script itself is a follow-up below. |
 | Expansion slot surfaces an irrelevant neighbour at #2 | Only when the query names a known entity, never at #1, only memories that passed filters and the floor; `recall audit` hand review. |
 | Probe noise passes the floor | Separate calibrated probe baseline (5.4); negatives in the gate. |
 | Probe generation cost / no LLM configured | Off by default; budgeted backfill; client-supplied questions for `:direct`. |
@@ -996,6 +1026,20 @@ one top-1 the Phase 2 change can lose).
 - `RerankTrace::Applied::complete`: the one field an `applied_partial` counter would
   need, and no reader for it until the audit above exists. A partial leg is visible
   today as `judged` below the requested depth, on the wire and in the trace.
+- `scripts/recall-grid.sh` should render the gated reading by default. Its awk takes
+  the bare summary line, which since Task 0.7 marks 21 cases `*` informational is not
+  the subset `eval/baseline.json` gates on — so a row that reads "recall 75.8" beside
+  Phase 0's "83.3" is a change in instrument, not a regression. Passing
+  `-- --baseline eval/baseline.json --max-drop 100` already puts the gated
+  `baseline … now: …` lines in each cell's output; parsing them and printing a
+  gated column next to the wide one is a day's care, and it removes a trap for every
+  later phase's grid.
+- Port or delete `ai-specs/experiments/recall-accuracy-2026-10-17.patch`. It no
+  longer applies (`git apply --check` fails at `memory_recaller.rs:427` — it predates
+  Phase 1's deadline plumbing and Phase 2's affinity stage), which makes it a trap
+  for anyone reaching for the `RA_EXP_FUSE=tiebreak` reference row Phase 2's Task 2.6
+  asked for. Either re-cut it against the current recaller or drop it and let §1.3's
+  recorded numbers stand alone; a tracked patch nobody can apply is worse than either.
 - `scopes_are_carried_from_the_key_that_authenticated` is load-sensitive: one 401 in
   a full-suite run under CPU contention, 5/5 isolated, suite green every other time.
   Worth making deterministic before it is mistaken for product fallout — same class
@@ -1010,8 +1054,9 @@ Fill in as phases complete. Paste raw command output, not summaries.
 
 ### Environment
 - Eval embedder: `bge-small-en-v1.5` (default config = field host's embedder as of 2026-10-17).
-- Field host config summary: _TBD_ — blocked with the rest of Task 0.9, and with
-  Phase 1's 1.1 and 1.5 for the same reason: the host is the operator's.
+- Field host config summary: _TBD_ — blocked with the rest of Task 0.9, with
+  Phase 1's 1.1 and 1.5, and with Phase 2's `recall audit` half, all for the same
+  reason: the host is the operator's.
 - Rerank models: the container's `/models` volume holds all four shipped rerankers
   (4.6 GB), so the `--ignored` ONNX tests run here without a download. No CI job runs
   ignored tests, so they are run by hand when the files under them change.
@@ -1570,7 +1615,217 @@ load-sensitive and unrelated to anything in this phase (no code path touched her
 in its stack); recorded so the next failure is not read as Phase 1 fallout.
 
 ### Phase 2 — relevance affinity
-- δ grid (eval + audit): _TBD_ · chosen δ and rationale: _TBD_
+
+**Shipped default: `[retrieval].relevance_weight = 0.05`.** Affinity is a third
+bounded multiplier on the fused score, `score ×= 1 − δ·(1 − relevance)`, applied
+between the legs' fusion and the floor: it can change what comes first among what
+was returned and cannot change what was returned.
+
+#### The anchor first (δ = 0)
+
+Before the default moved, the knob at zero was checked to be nothing at all:
+`eval --baseline` reported `change: -0.0` on all four gated metrics against the
+Phase 1 baseline (83.3 / 50.0 / 63.9 / 80.8), and the full suite passed with **not
+one pre-existing test edited** — the 980 carried through, 13 new ones beside them
+at that moment, the phase closing at 997 with 17. That is the "knob at zero, no
+change" rule kept by code path rather than by arithmetic: `apply_relevance` returns
+before reading the list.
+
+#### The δ grid (Task 2.6)
+
+`scripts/recall-grid.sh`, one `eval` process per cell, δ swept through
+`RECUERDOS_AI_RETRIEVAL__RELEVANCE_WEIGHT`. Two readings per row, because the
+script's columns are not what `eval/baseline.json` gates on: the script renders the
+*bare* summary — every case, including the 21 marked `*` informational at Task 0.7 —
+while the baseline gates on 52. Phase 0's grid prints 83.3 in the same column
+because those 21 cases did not exist yet, so the two tables are not comparable.
+The gated reading below comes from passing the gate through the grid itself
+(`-- --baseline eval/baseline.json --max-drop 100`).
+
+Gated, against the Phase 1 baseline — the subset the §4 gate is written for:
+
+| δ | recall@5 | precision@1 | MRR | complete@5 | abstention |
+|---|---|---|---|---|---|
+| **0** — the recorded baseline | 83.3 | 50.0 | 63.9 | 80.8 | 100.0 |
+| **0.05 — shipped** | 83.3 | **53.8** (+3.8) | **66.6** (+2.7) | 80.8 | 100.0 |
+| 0.1 | 83.3 | 53.8 (+3.8) | 66.6 (+2.7) | 80.8 | 100.0 |
+| 0.2 | 83.3 | 59.6 (+9.6) | 69.8 (+5.9) | 80.8 | 100.0 |
+| 0.3 | 84.0 (+0.6) | 63.5 (+13.5) | 72.2 (+8.3) | 80.8 | 100.0 |
+| 0.5 | 84.0 (+0.6) | 67.3 (+17.3) | 74.3 (+10.4) | 80.8 | 100.0 |
+
+`eval --baseline` prints one line per regressed kind and printed none at any δ, so
+the gate's "no kind drops by > 5" row holds across the whole curve rather than
+merely not being violated on average.
+
+The script's own table (all 80 cases; the p50/p95 column is the latency reading).
+The grid was run twice and the four accuracy columns came out identical both
+times; the latency columns moved ±0.6 ms, which is the box and not the knob:
+
+```
+cell           recall    p@1 complete    MRR │   p50/p95  abst │ Δrecall  Δp@1 Δcomp ΔMRR
+────────────────────────────────────────────────────────────────────────────────────────────
+delta-0          75.8   42.5     72.6   56.5 │  8.5/10.2 100.0 │   reference
+delta-005        75.8   45.2     72.6   58.7 │  8.7/10.7 100.0 │     +0.0   +2.7   +0.0  +2.2
+delta-01         77.2   45.2     74.0   59.2 │  8.7/11.0 100.0 │     +1.4   +2.7   +1.4  +2.7
+delta-02         77.2   50.7     74.0   62.2 │  9.0/10.4 100.0 │     +1.4   +8.2   +1.4  +5.7
+delta-03         77.6   54.8     74.0   64.9 │  9.0/10.7 100.0 │     +1.8  +12.3   +1.4  +8.4
+delta-05         77.6   57.5     74.0   66.6 │  9.0/11.0 100.0 │     +1.8  +15.0   +1.4 +10.1
+```
+
+**Which cases.** At δ = 0.05 exactly two gated cases gained their top hit and none
+lost one — both of them the sentence this phase was opened for, "a newer, weaker
+memory sitting on the one that answered better":
+
+```
+near-miss: cursor pagination why      · → ✓
+nl-category: how reviews move         · → ✓
+```
+
+δ = 0.2 adds `statement: many exports in one file`, `statement: nervous about
+shipping`, `nl-category: setting up my machine`, and two informational `alias`
+cases. Everything the curve buys is movement *within* the head: complete@5 never
+moves, because affinity cannot surface a memory the legs never returned.
+
+**Why 0.05 and not 0.2.** Task 2.6 asks for "the smallest δ on the gain plateau",
+and there is no plateau to point at: p@1 climbs monotonically to the ceiling of the
+validated range (+3.8, +3.8, +9.6, +13.5, +17.3) with nothing regressing anywhere.
+So the instruction is applied as its conservative reading — the smallest δ that
+clears the §4 gate — and the choice is recorded rather than dressed up. The bigger
+values were measured and left unshipped for three reasons:
+
+1. **The eval favours relevance partly by construction.** Its expected memory is
+   the topically nearest one, so a curve driven by a relevance multiplier is
+   rewarded by the corpus's own shape. A monotone line is weak evidence about a δ
+   large enough to matter, and the instrument that could falsify it — `recall
+   audit` over a real store with the operator's `expect` file — is the half of this
+   phase that is blocked.
+2. **At 0.2 relevance outranks the indexes rather than voting among them.** δ is a
+   spread; 0.2 is a 20% spread against the 14.8% that separates rank 1 from rank 10
+   on a leg, so the maximum relevance gap overrules that disagreement. That is a
+   different pipeline from the one the project documents, and a different promise to
+   every deployment already running.
+3. **The evidence only covers near-ties.** Two gated cases at 0.05, five at 0.2, all
+   of them the same shape. Nothing here says anything about the behaviour of a
+   relevance-dominated ranking on a messy real store.
+
+**§4 gate at δ = 0.05.** p@1 +3.8 (needs ≥ +2) ✓ · MRR +2.7, no drop ✓ · recall@5
+±0 (needs ≤ 1) ✓ · no `by_kind` regression printed ✓ · abstention 100.0 ✓ ·
+latency: eval p95 10.2 → 10.7 ms between the grid's own δ = 0 and δ = 0.05 cells,
+inside the +5 ms row; **`scripts/bench.sh 20000` was not re-run** (see "Not
+measured").
+
+**Baseline re-recorded** (DoD, at the shipped default). `eval/baseline.json` moves
+p@1 50.0 → 53.85 and MRR 63.9 → 66.63, `near-miss` p@1 42.9 → 57.1 and
+`nl-category` p@1 37.5 → 50.0; recall@5, complete@5 and every other kind identical,
+and `just eval-native` now reads `change: -0.0` four times. Its latency fields also
+moved (p50 7.92 → 8.55, p95 9.03 → 10.36), which is *more* than the knob accounts
+for: the grid's δ = 0 cell measured p95 10.2 on this machine that day, so ≈1.2 ms
+of that is the box. `compare()` does not gate on latency, so this is a note for
+whoever reads the file next rather than a bar quietly raised.
+
+#### Tests added (17)
+
+| test | pins |
+|---|---|
+| `a_nan_score_cannot_break_the_ordering` | the comparator is total: every row survives, real scores keep their order, the NaN arrives last — and does so whatever the input order |
+| `zero_weight_leaves_the_fused_order_and_scores_bit_identical` | δ = 0 leaves ids, score bits and relevance bits alone, with relevance deliberately pointed against the tie-breaks |
+| `affinity_spans_exactly_the_band_the_module_docs_promise` | `[1 − δ, 1]` at three δ values over out-of-range relevance too, the two ends exact, monotone between |
+| `a_nan_weight_switches_affinity_off_rather_than_poisoning_every_score` | a δ that escaped config validation changes nothing instead of multiplying the whole list into NaN |
+| `an_exact_symmetric_tie_goes_to_the_more_relevant_memory` | v1/k2 against v2/k1 with equal ages: the better match wins, in both assignments, so it is relevance and not the id tie-break |
+| `relevance_and_age_are_worth_this_much_against_each_other` | the exchange rate both ways — Δr = 0.06 beats three days at δ = 0.2 and loses them at 0.05 |
+| `how_far_relevance_can_overrule_a_rank_gap` | a nine-rank gap survives the maximum relevance gap at δ = 0.05/0.10 and not at 0.20/0.50, bracketing the documented 0.129 |
+| `a_graph_only_hit_is_penalised_exactly_as_the_formula_says` | a hop's estimated relevance is taxed by `δ·(1 − 0.35)` like any other, before Phase 3 gives it a slot |
+| `a_nan_relevance_costs_the_row_its_number_not_the_request` | NaN relevance → NaN score → that row last, and the request answered |
+| `the_rerank_leg_is_added_inside_affinity_not_on_top_of_it` | the two stages commute: δ-then-rerank and rerank-then-δ give the same numbers when they disagree about which memory wins |
+| `a_zero_weight_rerank_leg_leaves_an_affinity_ordered_list_alone` | "turn the reranker off" and "turn relevance off" stay separate escapes |
+| `relevance_weight_defaults_to_the_value_the_ranker_shares` | the shipped default is the grid's 0.05, and config and ranker read one constant so the report, the field docs and the ranker cannot drift |
+| `relevance_weight_is_read_from_file_and_env` | the file form, and the env form the grid drives itself through |
+| `relevance_weight_outside_the_range_is_rejected` | 0.51, 2.0 and −0.1 are refusals with the key named, not clamp-worthy typos |
+| `a_nan_relevance_weight_is_refused_rather_than_read_as_off` | TOML's `nan` does not become a config line that reads as a number and behaves as nothing |
+| `every_off_spelling_of_the_relevance_weight_runs_the_same_recall` | 0.0, −0.1 and NaN produce the identical list bit for bit through the whole pipeline |
+| `a_relevance_weight_discounts_every_result_by_exactly_its_relevance` | through the pipeline: every score is the fused one times `1 − δ·(1 − relevance)`, relevance untouched, no row added or dropped, order by the discounted number — at the shipped default as well as 0.2 |
+
+#### Deviations from the task text (all deliberate, none silent)
+
+- **2.2 — the relevance key does not go in the canonical comparator.** The task
+  adds relevance as `sort_ranked`'s second key; done there it would also re-decide
+  the exact ties that exist *today*, at δ = 0, in a corpus whose exact ties are its
+  own noise floor — which breaks this phase's anchor test on the way in. The
+  relevance key therefore lives in `apply_relevance`'s own comparator
+  (`sort_ranked_with_relevance`), which only runs when δ > 0. The canonical
+  comparator did get the part of 2.2 that is a pure safety fix: `f32::total_cmp`
+  instead of `partial_cmp(…).unwrap_or(Equal)`, wrapped so a NaN sorts *last*
+  (a total order puts a positive NaN's bit pattern above `+infinity`, so compared
+  bare, the score that could not be computed would win the list).
+- **2.6 — the "bound" test as written is arithmetically false, so it is not
+  pinned.** "At δ = 0.5, a memory 5 ranks lower on both legs never overtakes,
+  whatever its relevance" is the opposite of what the formula does: the maximum
+  relevance gap (0 against 1) reverses an r-rank gap once δ > 1 − 61/(60 + r), which
+  is 0.047 at rank 4, 0.129 at rank 10, 0.238 at rank 20 — and δ = 0.5 reverses
+  anything nearer than ~62 ranks. So the bound is not the safety property and the
+  pinned test is the honest one (`how_far_relevance_can_overrule_a_rank_gap`), with
+  the module docs carrying the table and saying out loud that the top of the range
+  is a measuring stick. The same error was in §9's design bullet ("with δ ≤ 0.5 it
+  cannot reverse a large rank gap") and is corrected there.
+- **The design note's exchange rate ignored the floored band.** "A relevance gap of
+  0.06 is worth ≈1.3%, and one day of age ≈0.77%" reads recency's raw half-life; the
+  multiplier is `MULTIPLIER_FLOOR`-bounded, so a day is 0.15% of a score and three
+  days 0.46%. The pinned exchange-rate test therefore uses a **three-day** gap: at
+  one day both δ values come out the same way and the test proves nothing. The
+  module docs carry the corrected rate and the asymmetry it implies (for the
+  day-apart memories a personal store competes with, δ does more per point than the
+  rank gaps suggest).
+- **2.1 — `apply_relevance` takes `&mut [ScoredMemory]`, not `&mut Vec<ScoredMemory>`.**
+  It needs no `mem::take` (unlike `apply_rerank`'s `Replace` branch), and a slice is
+  the widest thing the caller can hand it.
+- **2.6 — no plateau, so no literal reading.** Recorded above under "Why 0.05 and
+  not 0.2": the curve is monotone to the ceiling, and "smallest δ that clears the
+  gate" is the interpretation taken.
+- **2.6 — the `RA_EXP_FUSE=tiebreak` reference row could not be measured.**
+  `ai-specs/experiments/recall-accuracy-2026-10-17.patch` no longer applies
+  (`git apply --check` fails at `memory_recaller.rs:427`; it predates Phase 1's
+  deadline plumbing and Phase 2's affinity stage). Porting it is a §16 follow-up.
+  It would not change the choice: the pure-tiebreak variant sits between δ = 0 and
+  δ = 0.05 by construction, and both are measured.
+
+#### Not measured (blocked, and deliberately not approximated)
+
+- **`recall audit` on a real store with the operator's `expect` file** — the second
+  instrument in Task 2.6 and in every §4 gate. Same blocker as Task 0.9 and Phase
+  1's field halves: it needs a copy of the deployed store, which is the operator's.
+  The recipe, which writes nothing and works with the daemon running:
+
+  ```bash
+  # Put the knob inside [retrieval], not at the end of the file: a key that lands
+  # under the last section in the file is the v0.4.1 orphaned-key bug, and the
+  # audit would then compare the same config with itself.
+  awk '{print} /^\[retrieval\]$/ {print "relevance_weight = 0.05"}' \
+      /etc/recuerdos-ai/recuerdos-ai.toml > /tmp/affinity.toml
+  # (no [retrieval] header in that file? then
+  #  printf '[retrieval]\nrelevance_weight = 0.05\n' >> /tmp/affinity.toml)
+
+  recuerdos-ai recall audit --config /tmp/affinity.toml \
+      --compare-config /etc/recuerdos-ai/recuerdos-ai.toml \
+      --queries /tmp/questions.txt --user <handle>
+  ```
+
+  What to read: **no query whose `expect` was at rank 1 loses it** (§4's last row),
+  and how many queries gain rank 1. Repeat at 0.2 and 0.5 — if the eval's curve
+  holds on real memories with real expectations, the case for a higher default
+  becomes real, and it should be raised in a release note rather than silently.
+- **`scripts/bench.sh 20000 500`** for the §4 latency row. The added work is one
+  multiply per returned candidate plus a re-sort of a list already truncated to
+  `limit`; the eval's own p95 moved +0.5 ms at the shipped δ. Recorded as unmeasured
+  rather than reasoned away, and it is the only §4 row Phase 2 does not close.
+
+#### Consequence for the phases after this one
+
+Phase 3's graph slot now sits *after* affinity, so a hop inserted into the head
+enters a list whose order relevance already had a vote on — but its relevance is
+`GRAPH_HOP_RELEVANCE` (0.35), so at the shipped δ a hop is taxed 3.25% and the slot
+remains the structural thing Phase 3 designs, not an arithmetic accident. Phase 4's
+grids inherit the new baseline; anything that reads Phase 0's grid numbers off this
+file should read the "two readings" note above first.
 
 ### Phase 3 — graph expansion
 - slots × δ × rank_weight grid: _TBD_ · `complete@5` relational/chain: _TBD_ · hand review: _TBD_
