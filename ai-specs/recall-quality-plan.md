@@ -2298,6 +2298,40 @@ would settle whether the latency has a purpose is one config line and the same q
 This does not undo the `mode = "off"` decision. At weight 1 the stage demonstrably does not pay for
 300 ms, so off is right as configured; what is open is whether some *other* fusion makes it pay.
 
+#### Scored by itself, the reranker beat the order it was put into
+
+The `after` side of `m2-005-vs-05.txt` carries the model's own score per line, which makes it
+possible to ask what the stage's judgement alone would have served. **Its highest-scoring memory
+was the expected one in 15 of 18 queries**, and there is no query where it put something at 0.9+
+that was not the answer: the two cells it scored 0.000 across the board (q10, q11) are the two with
+nothing relevant in the window, and its single disagreement (q17, where the expected memory took
+0.031 against 0.037) sits entirely under 0.04 — noise, not a confident dissent. Serving by the
+model's argmax would read **83.3 p@1 against the fused 77.8**, gaining q5 and q15 and losing q17.
+
+That is a falsifiable prediction, so M5 (rerank `on`, `strategy = "replace"`, then `weight = 2`)
+is a real experiment rather than a fishing trip: if `replace` lands near 83 the reading above is
+right and the shipped fusion is the weakest link in the pipeline; if it lands at or below 77.8,
+these scores mean less than their ordering suggests and the eval grid's warning about raw-score gaps
+wins. Either way the claim "the stage buys nothing" is now too coarse — what it buys is the most
+accurate ordering measured on this store, most of which the fusion declines to use.
+
+#### The seat's cost has a mechanism, and it is visible in these same files
+
+Four lines in each δ file carry **no `rerank` score at all on the side that ran the stage**. A
+missing score means the memory was never judged, and exactly one thing joins the list after the
+stage does: the graph's reserved slot, which the pipeline pins last (`memory_recaller.rs`, and the
+test named `a_reserved_slot_puts_the_connected_answer_second_and_leaves_first_alone` — rank 2 is its
+designed position, not an accident). Those four arrivals are `52813f19` at relevance 0.62,
+`8ed20c4a` at 0.30, `8ed20c4a` again at 0.16, and `640bd611` at 0.35 — three of them memories from a
+different project than the question, sitting above the answer, unjudged and unjudgeable.
+
+That closes Phase 3's reading from "a number with no shape" to a mechanism: **G1 held (0 top-1
+changes) and MRR fell 2.8 because the slot inserts an unjudged memory at position two and everything
+below shifts once**, which by construction cannot move first place and does cost reciprocal rank in a
+store whose ranking was already right. It also says something the Phase 3 text did not anticipate:
+enabling the seat and the stage together means the model is never allowed to veto what the seat
+inserts. Whatever Phase 8 decides about the seat's default now has both a measurement and a reason.
+
 #### Two of eighteen are not ranking failures at all
 
 q10 and q11 — the two inference-server questions — have **no memory above relevance 0.24** (q11:
@@ -2385,10 +2419,14 @@ single-knob comparisons at n=18 means one flipped query is 5.6 points of p@1, so
 about two queries in either direction should be read as nothing, exactly as the eval's 1.7-per-case
 noise floor says here.
 
-Still owed on this host, in the order that would change a decision: the `grep` over the export that
-names q10/q11 as absent-memory or vocabulary-mismatch; the δ sweep with the stage **off**, which is
-the configuration the host now runs and whose absolute no file here measures; the fusion test
-(`replace`, then `weight = 2`) that decides whether the stage is muted or merely expensive; the M1
+Still owed on this host, in the order that would change a decision: the key-free existence probe for
+q10/q11 (no listing was ever fetched — the digest step ran without a key, so there is no
+`memories.md` to grep; quoting the phrase back at the store with `recall audit` answers it without
+one, and the script now prints that command); the δ sweep with the stage **off**, which the host has
+re-run and not yet reported — it is the configuration that ships there now, so the absolute p@1 at
+the shipped `mode = "off"` depends on those summaries even though every *difference* measured earlier
+is valid; the fusion test M5 (`replace`, then `weight = 2`) that
+decides whether the stage is muted or merely expensive, against the 83.3 predicted above; the M1
 hand review of the seat's moved rows; the warm-RSS-with-stage-off number; Task 1.5 if the stage goes
 back on; and Task 0.9's store copy, which is what turns these eighteen questions into something a
 later phase can gate on instead of an anecdote about one machine.
