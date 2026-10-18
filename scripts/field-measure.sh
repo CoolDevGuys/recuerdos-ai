@@ -140,9 +140,9 @@ cp "$CONFIG" "$OUT/base.toml"
 # compares one config with itself and reports a difference that is nothing. So:
 # build the variant, then ask the binary what it thinks the value is, and refuse
 # to measure if it disagrees with the file we just wrote.
-set_key() { # set_key <section> <key> <value> <dest-name>
-  local sec=$1 key=$2 val=$3 dest=$4
-  if grep -qE "^[[:space:]]*\[$sec\][[:space:]]*$" "$OUT/base.toml"; then
+set_key() { # set_key <src-name> <section> <key> <value> <dest-name>
+  local src=$OUT/$1 sec=$2 key=$3 val=$4 dest=$5
+  if grep -qE "^[[:space:]]*\[$sec\][[:space:]]*$" "$src"; then
     # Rewrite the key where it already lives rather than appending a second one: a
     # config copied from the shipped example already carries both knobs, and a
     # duplicate key is something figment has to decide about, silently.
@@ -162,9 +162,9 @@ set_key() { # set_key <section> <key> <value> <dest-name>
         print
       }
       END { if (insec && !emitted) print key " = " val }   # target section is last
-    ' "$OUT/base.toml" > "$OUT/$dest"
+    ' "$src" > "$OUT/$dest"
   else
-    { cat "$OUT/base.toml"; printf '\n[%s]\n%s = %s\n' "$sec" "$key" "$val"; } > "$OUT/$dest"
+    { cat "$src"; printf '\n[%s]\n%s = %s\n' "$sec" "$key" "$val"; } > "$OUT/$dest"
   fi
   local n
   n=$(awk -v sec="$sec" -v key="$key" '
@@ -175,6 +175,14 @@ set_key() { # set_key <section> <key> <value> <dest-name>
   local got want
   want=$(printf '%s' "$val" | tr -d '"')
   got=$(ra "$dest" config 2>/dev/null | awk -v k="$key" '$1==k{print $2; exit}')
+  # `[rerank].weight` has no line of its own: the report folds it into the strategy
+  # line as "strategy   rrf (weight 1)", and prints neither unless the stage is on.
+  # Read the folded number first, then fall back to a plain `weight` line so the guard
+  # survives the day the report is untangled — a guard that cries wolf is a guard
+  # people delete, and this one exists to catch the v0.4.1 orphaned-key bug.
+  if [ "$key" = "weight" ] && [ -z "$got" ]; then
+    got=$(ra "$dest" config 2>/dev/null | sed -n 's/^  *strategy .*(weight \([^)]*\)).*/\1/p' | head -1)
+  fi
   if [ "$got" != "$want" ]; then
     echo "!! $dest: asked for $key=$want, the binary reads '${got:-<absent>}'."
     echo "   Absent usually means the section that owns the key is switched off (a graph"
@@ -248,9 +256,16 @@ if [ -z "$KEY" ] && [ -t 0 ]; then
 fi
 if [ -z "$KEY" ]; then
     echo "── 01 · no key, so no listing of your own store. Not fatal: expect is optional."
-    echo "   Get the listing whenever convenient:"
+    echo "   Get the listing whenever convenient (it lands outside $OUT on purpose):"
     echo "     curl -s -H \"Authorization: Bearer \$KEY\" \\"
-    echo "       \"http://${LISTEN:-127.0.0.1:7070}/v1/memories/export?format=markdown\" > memories.md"
+    echo "       \"http://${LISTEN:-127.0.0.1:7070}/v1/memories/export?format=markdown\" -o \"$DIGEST\""
+    echo "   And to ask whether one specific memory exists without a listing at all — quote"
+    echo "   it and let the store answer, which needs no key because it is the same index:"
+    echo "     printf 'the exact phrase you expect it to contain\\n' > $OUT/probe.toml"
+    echo "     RECUERDOS_AI_CONFIG=$OUT/base.toml recuerdos-ai recall audit \\"
+    echo "       --queries $OUT/probe.toml --user $USER_HANDLE --limit 3"
+    echo "   A stored memory quoted back to itself comes first near rel 0.9. Junk at rel 0.2"
+    echo "   means it is not in there, which is an answer, not a failure."
 elif curl -fsS --max-time 60 -H "Authorization: Bearer $KEY" \
         "http://${LISTEN:-127.0.0.1:7070}/v1/memories/export?format=markdown" > "$DIGEST.tmp" 2>/dev/null; then
     mv "$DIGEST.tmp" "$DIGEST" && chmod 600 "$DIGEST"
@@ -301,7 +316,7 @@ fi
 grep -q "REPLACE ME" "$QUERIES" && { echo "── $QUERIES still holds the template placeholder. Fill it in, then re-run."; exit 2; }
 
 echo "── M1 · Phase 3: does the reserved seat put anything a human wants in the window? ──"
-set_key graph expansion_slots 0 noslot.toml
+set_key base.toml graph expansion_slots 0 noslot.toml
 ra noslot.toml recall audit --compare-config "$(wp base.toml)" \
    --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
    2>&1 | tee "$OUT/m1-slot.txt"
@@ -319,9 +334,9 @@ cat <<'NOTE'
 NOTE
 
 echo "── M2 · Phase 2: is δ = 0.05 too timid on a real store? ──────────────────"
-set_key retrieval relevance_weight 0 delta0.toml
-set_key retrieval relevance_weight 0.2 delta02.toml
-set_key retrieval relevance_weight 0.5 delta05.toml
+set_key base.toml retrieval relevance_weight 0 delta0.toml
+set_key base.toml retrieval relevance_weight 0.2 delta02.toml
+set_key base.toml retrieval relevance_weight 0.5 delta05.toml
 ra delta0.toml recall audit --compare-config "$(wp base.toml)" \
    --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
    2>&1 | tee "$OUT/m2-delta0-vs-005.txt"
@@ -348,7 +363,7 @@ ra base.toml recall audit --compare-config "$(wp base.toml)" \
   | sed -n '/latency/Ip' | tee "$OUT/m3-latency-noise-floor.txt"
 echo "   (base vs base is not a mistake: it is the noise floor for the latency numbers around it.)"
 if [ "$MODE" != "off" ]; then
-  set_key rerank mode '"off"' rerankoff.toml
+  set_key base.toml rerank mode '"off"' rerankoff.toml
   ra rerankoff.toml recall audit --compare-config "$(wp base.toml)" \
      --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
      2>&1 | tee "$OUT/m3-rerank-off-vs-on.txt"
@@ -357,6 +372,39 @@ else
   echo "   [rerank].mode is already '$MODE' — Task 1.1's before/after flip is not available here."
   echo "   Recorded instead: mode, the noise-floor pass, and RSS above. That is the honest reading."
 fi
+
+echo "── M5 · Is the rerank stage muted by its fusion rather than wrong? ────────"
+# Why this exists, in one number: query 5 of the field δ files put the right memory at
+# rank 4 with rerank 0.999 while the memory served first carried 0.056, and the order did
+# not change. `[rerank].strategy = "rrf"` at `weight = 1` may break a tie against a single
+# retrieval leg but never overrule vector+BM25 agreement — and on a store that repeats
+# project names across memories, that agreement is a lexical artifact more often than the
+# eval corpus's paraphrased cases made it. The default was chosen on a grid over that
+# corpus, so this is the falsifier for it on real data. Every side here runs the stage:
+# the only difference is how its judgement is fused.
+if [ "$MODE" = "off" ]; then
+  set_key base.toml rerank mode '"on"' on.toml
+else
+  cp "$OUT/base.toml" "$OUT/on.toml"
+  echo "   ok  on.toml → mode = on (copied from base, which already runs the stage)"
+fi
+set_key on.toml rerank strategy '"replace"' replace.toml
+set_key on.toml rerank weight 2 weight2.toml
+for v in replace weight2; do
+  ra on.toml recall audit --compare-config "$(wp $v.toml)" \
+     --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
+     2>&1 | tee "$OUT/m5-$v-vs-rrf1.txt"
+done
+cat <<'NOTE'
+   `before` = the shipped fusion (rrf, weight 1); `after` = the variant. Read the
+   expectations line first. What the eval grid found, so you know what you are looking at:
+   `replace` lost up to −9.6 p@1 on three of its four models, because a cross-encoder's
+   raw-score gaps mean little on paraphrased synthetic cases, and `weight = 2` gave back 2
+   points plus a third of the `needle` kind's. If a variant lifts p@1 here, the stage's
+   300 ms has a purpose and the shipped fusion deserves a second look. If neither does,
+   mode = "off" is confirmed for the right reason rather than by default — which is also a
+   result worth having.
+NOTE
 
 echo "── M4 · Phase 1.5: the queue question, by hand ───────────────────────────"
 cat <<'RUNBOOK'
