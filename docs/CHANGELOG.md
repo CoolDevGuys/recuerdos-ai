@@ -132,6 +132,8 @@ places something a human would call unrelated. The commands are in
 [plan §17](../ai-specs/recall-quality-plan.md#17-results-log), and the findings go back
 into that log before Phase 4 starts.
 
+## v0.4.3 — A release to publish the Python SDK
+
 Nothing server-side changed. This cut exists because `release.yml` publishes the
 Python client when a tag goes out, and the SDK's `0.4.0` — merged after
 `v0.4.2` — would otherwise have sat unreleased on `main`, unnoticed by anyone
