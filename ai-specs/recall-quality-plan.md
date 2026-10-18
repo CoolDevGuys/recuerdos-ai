@@ -18,6 +18,16 @@ Line references are to `main` @ `bfe1d57`.
 
 ## 0. How an agent must use this document
 
+> **Status as of 2026-10-18 — do not start Phase 4.** Phases 0–3 are shipped (`v0.5.0-rc1`) and their
+> owed measurements were taken on a deployed store. Phases 4, 6 and 7 are **stopped as written**: the
+> recall failures they were designed around were not observed on that store, and the two queries that
+> had been cited as their evidence were memories that were never stored. Phase 5 is the one remaining
+> candidate — `vocab-gap` still reads 14.3% recall on the corpus — and it is the expensive one, so it
+> goes to the frozen-copy corpus before it gets code. Phase 8 stays, as a small release. The knob the
+> whole sequence was most sensitive to turned out to be δ, now shipped at **0.5**.
+> Numbers, verdicts per phase, and what would reopen one:
+> [`recall-quality-status.md`](recall-quality-status.md) and §17 below.
+
 1. **Work phases in order**, except Phase 1, which is independent and may run in
    parallel with Phase 0. Every phase from 2 on depends on Phase 0's eval changes;
    without them its numbers are not comparable.
@@ -208,17 +218,22 @@ if §17 says why that is worth keeping.
 
 ## 6. Phase map
 
-| Phase | Deliverable | Branch | Size | Ships on its own? |
-|---|---|---|---|---|
-| 0 | Age-aware, deduplicated eval; `complete@k`; new kinds; real-store `recall audit`; grid script | `chore/recall-eval-fidelity` | M | yes (tooling) |
-| 1 | Reranker off on the field host; deadline work bounded and cancellable | `fix/rerank-deadline-work` | M | yes |
-| 2 | Relevance-aware ordering (`[retrieval].relevance_weight`) | `feat/relevance-affinity` | S | yes |
-| 3 | Graph expansion slot (`[graph].expansion_slots`) | `feat/graph-expansion` | S–M | yes |
-| 4 | Per-model embedding prompts, pin fingerprint | `fix/embedding-prompts` | M | yes |
-| 5 | Ingest-time question probes | `feat/question-probes` | L | yes (off by default until gated) |
-| 6 | Entity resolution (alias edges) | `feat/entity-aliases` | M–L | yes |
-| 7 | Temporal cues for "before / previously" questions | `feat/temporal-recall` | S–M | yes (exploratory) |
-| 8 | Docs, defaults, release | `docs/recall-quality-release` | S | yes |
+Status read 2026-10-18, after the field-host measurements in §17. A phase marked **stopped** is not
+deferred work waiting for capacity: its target failure was looked for and not found, so starting it
+would tune an instrument on a population it cannot observe. Reopening one needs the evidence named in
+[`recall-quality-status.md`](recall-quality-status.md) §5.
+
+| Phase | Deliverable | Branch | Size | Ships on its own? | Status |
+|---|---|---|---|---|---|
+| 0 | Age-aware, deduplicated eval; `complete@k`; new kinds; real-store `recall audit`; grid script | `chore/recall-eval-fidelity` | M | yes (tooling) | **done**, measured (§17); its Task 0.9 copy arrived 2026-10-18 |
+| 1 | Reranker off on the field host; deadline work bounded and cancellable | `fix/rerank-deadline-work` | M | yes | **done**, measured — and it found the fusion problem (M5) |
+| 2 | Relevance-aware ordering (`[retrieval].relevance_weight`) | `feat/relevance-affinity` | S | yes | **done**; the field read it timid, default raised to **0.5** |
+| 3 | Graph expansion slot (`[graph].expansion_slots`) | `feat/graph-expansion` | S–M | yes | **done**; costs −2.2 MRR here, top-1 unharmed; hand review of the arrivals owed |
+| 4 | Per-model embedding prompts, pin fingerprint | `fix/embedding-prompts` | M | yes | **stopped** — no second embedder measured anywhere |
+| 5 | Ingest-time question probes | `feat/question-probes` | L | yes (off by default until gated) | **open, unfunded** — the only class still failing on the corpus (`vocab-gap` 14.3%) |
+| 6 | Entity resolution (alias edges) | `feat/entity-aliases` | M–L | yes | **stopped** — no query on the store was hurt by a split concept |
+| 7 | Temporal cues for "before / previously" questions | `feat/temporal-recall` | S–M | yes (exploratory) | **stopped** — corpus-side only (`temporal` p@1 0.0%); no real temporal question asked |
+| 8 | Docs, defaults, release | `docs/recall-quality-release` | S | yes | **pending, small** — defaults now all come from measurements |
 
 ---
 
@@ -665,6 +680,14 @@ retrieval quality.
 
 **Branch:** `fix/embedding-prompts`
 
+> **Status 2026-10-18: stopped as written.** The defect is real in principle and unobservable in
+> practice: every measurement this project has taken — the corpus and the field host — runs
+> `bge-small-en-v1.5`, so no run has ever shown a prompt-less model losing a query. Phase 3 left the
+> mechanism in place (`calibrate`, the per-model baseline map) and that is where the value is: a
+> deployment on another embedder gets a warning rather than silence. Reopening this phase needs a
+> second embedder actually deployed and measured, not another read of the model cards. See
+> [`recall-quality-status.md`](recall-quality-status.md) §5.
+
 ### Tasks
 
 - **4.1 Prompt profiles.** New module
@@ -756,6 +779,15 @@ cross-encoder tried at query time: bridge "a question" to "a statement". Each me
 is indexed together with a few questions it answers.
 
 **Branch:** `feat/question-probes`
+
+> **Status 2026-10-18: open, and the only later phase with a failing measurement to answer to.** On the
+> corpus today `vocab-gap` reads **recall 14.3%, p@1 0.0%** — one of six cases reaches the answer, the
+> others do not, which is the class this phase exists for and nothing else touches. What it does not
+> have is a *field* target: the 18 real questions contain no vocabulary-gap question, so nobody has
+> shown a person losing a memory this way. Given the cost (an LLM at write time, per memory, forever),
+> the order is the corpus-copy work first — a real query set with gap-shaped questions in it — and the
+> code only if the gap survives contact with a store nobody wrote for the test. See
+> [`recall-quality-status.md`](recall-quality-status.md) §5 and §6 item 2.
 
 ### Design
 
@@ -875,6 +907,14 @@ relationships stop fragmenting (G3).
 
 **Branch:** `feat/entity-aliases`
 
+> **Status 2026-10-18: stopped as written.** G3 — the fragmented concept neighbourhood this would
+> merge — was looked for on a real store and not found: 280 entities and 61 relations over 182 active
+> memories, and none of the 18 owner-written queries lost an answer to a split concept. The reserved
+> seat (Phase 3) costs a little on that same graph, which makes *adding* edges to it a change with a
+> price and no observed buyer. Reopening needs a query that fails because "Postgres" and "PostgreSQL"
+> are two nodes — a shape the field query file does not contain. See
+> [`recall-quality-status.md`](recall-quality-status.md) §5.
+
 ### Tasks
 
 - **6.1 Entity vectors.**
@@ -936,6 +976,17 @@ one top-1 the Phase 2 change can lose).
 
 **Branch:** `feat/temporal-recall`
 
+> **Status 2026-10-18: stopped as written, with the weakness kept on the record.** The corpus does show
+> the shape — `temporal` reads **p@1 0.0%** over its five cases, and that number is not a scoring
+> artifact — but it is a synthetic shape: those cases were authored to be temporally ambiguous, and the
+> field host asked no question of that kind, so nothing has been observed to fix. One gap worth naming
+> rather than smoothing over: the gated comparison at δ = 0.5 shows no kind losing precision@1, but the
+> `temporal` kind is marked informational and sits **outside** that comparison, so this phase's worry is
+> unmeasured at the new δ rather than measured and dismissed. Reopening it needs a real "what did we use
+> before?" question against a store with superseded rows — the frozen copy has 43 of them, so the
+> question is answerable and has not been answered.
+> See [`recall-quality-status.md`](recall-quality-status.md) §5.
+
 ### Tasks
 
 - **7.1 Cue detector.** A small, closed, documented list (`before`, `previously`,
@@ -960,6 +1011,15 @@ one top-1 the Phase 2 change can lose).
 ## 15. Phase 8: Docs, defaults, release
 
 **Branch:** `docs/recall-quality-release`
+
+> **Status 2026-10-18: pending, and smaller than written.** The defaults this phase existed to set are
+> now set from measurements rather than from a grid's judgement: δ is 0.5 (#40), `[rerank].mode` stays
+> `off` with the real-store numbers behind it, and `[graph].expansion_slots` stays 1 with its price
+> recorded. What is left is the release itself plus one decision the field work opened and could not
+> close — whether the rerank stage should be fused by `replace` or gated on the model's confidence. That
+> decision belongs to the frozen-copy corpus, not to this phase; if it is still open when the release is
+> cut, ship the defaults above and say so in the notes.
+> See [`recall-quality-status.md`](recall-quality-status.md) §4 and §6 item 1.
 
 - **8.1 Defaults.**
   - Each knob's default is set from its phase's measurement, in a **separate
@@ -1021,19 +1081,27 @@ one top-1 the Phase 2 change can lose).
 | The eval corpus and the field host disagree about the fusion, by more than anything Phases 4–8 were written to buy | `replace` reads **−9.6 p@1 worst case on three of four grid models** on `eval/cases.toml` (reranking-plan §12) and **+44.4 on the field store** (§17 · Field host, M5), with the same binary and the same model. Both are internally consistent, so one of them is describing the wrong population: the corpus is paraphrased synthetic cases with near-tied heads, the field store is long fact-shaped memories with repeated project names. The query file may also be needle-shaped, which is what a cross-encoder is best at. This is recorded as a risk rather than resolved because the temptation to ship the big number is exactly the failure mode the gate exists for; the resolution is the frozen real corpus and a rerank grid run against a store copy, and until then the shipped strategy stands. §12's distribution printer calibrates the confidence threshold that would satisfy both. |
 
 **Follow-ups (not in this plan):**
-- **Raise `[retrieval].relevance_weight` above 0.05.** Both instruments point the same way and neither
-  shows a cost: the eval's own curve reads p@1 +9.6 / +13.5 / +17.3 at δ 0.2 / 0.3 / 0.5 with abstention
-  unmoved and no `by_kind` regression at any cell (§17, Phase 2), and the field host reads +11.1 p@1 /
-  +7.7 MRR at 0.5 over the shipped value **with the stage off** — the configuration that actually serves
-  there — after +27.8 / +19.9 with it on (§17 · Field host). Phase 2 said this is a release note rather
-  than a config edit if the falsifier held, and it held: at 0.05, 0.2 and 0.5 on the field host and at
-  every value on the corpus, with **no query losing first place in any run**. What is left is the
-  *value*, and it is a preference rather than a measurement — 0.5 is what this store measures best, 0.3
-  is what the corpus rates a safe plateau, and no instrument has found a turning point. The one failure
-  class a large δ can lose is a superseded fact that consolidation failed to retire; worth one look at
-  the export before shipping, though a store that absorbed six memories about this work in a day makes
-  supersession a live shape there rather than a hypothetical. Raising it re-records `eval/baseline.json`,
-  as Phases 2 and 3 did.
+- **~~Raise `[retrieval].relevance_weight` above 0.05~~ — done 2026-10-18: the default is 0.5.** Both
+  instruments pointed the same way and neither showed a cost: the eval's own curve reads p@1 +9.6 /
+  +13.5 / +17.3 at δ 0.2 / 0.3 / 0.5 with abstention unmoved and no `by_kind` regression at any cell
+  (§17, Phase 2), and the field host reads +11.1 p@1 / +7.7 MRR at 0.5 over the shipped value **with the
+  stage off** — the configuration that actually serves there — after +27.8 / +19.9 with it on (§17 ·
+  Field host). Phase 2 said this is a release note rather than a config edit if the falsifier held, and
+  it held: at 0.05, 0.2 and 0.5 on the field host and at every value on the corpus, with **no query
+  losing first place in any run**. `eval/baseline.json` was re-recorded, as Phases 2 and 3 did, and the
+  recorded `by_kind` map confirms the headline rather than contradicting it.
+  - *The one caveat that was checked rather than assumed*: the worry about a large δ was a **stale fact
+    winning on relevance**. Retired facts cannot lose that way — the recall path drops a memory whose
+    `superseded_by` is set, pinned by `superseded_memories_are_excluded_unless_requested`, and the
+    frozen copy confirms 43 such rows sitting outside ranking. What a large δ *can* do is promote a
+    stale-but-never-retired memory over a fresher one, because nothing detected the contradiction. That
+    is a consolidation-coverage question, not a δ question, and it is worth one measured case before
+    anyone calls 0.5 settled for a store with weak reconciliation.
+- **Re-run the rerank grid at the new δ.** Every cell in reranking-plan §12 — the measurement that chose
+  `strategy = "rrf"` at `weight = 1` — was taken while δ was 0.05. δ is applied before the rerank stage,
+  so it changes the head the stage is asked to judge; the fusion decision therefore has an input it no
+  longer has. This is not hypothetical: at δ = 0.5 the field store's head is a different five memories
+  than the one M5 measured.
 - **Was the rerank stage muted rather than useless? Asked, answered: muted, by 44 points.** Query 5 of
   the field files was the exhibit (the model scored the right memory 0.999 and the served first 0.056,
   and rank 4 stood, because `rrf` at `weight = 1` may break a tie against one leg but never overrule
@@ -1343,16 +1411,36 @@ looks), which is what makes the 14.3 mean what it says.
 
 #### `recall audit` on a real store (Task 0.9)
 
-**Not run — blocked, and it needs the operator, not the code.** The tool is in
-place (`recall audit --config A --compare-config B --queries F [--json]`, with
-`A = B` recording a self-comparison) and its purity, refusal and JSON-leak
-tests pass in the harness, but the field half of the task needs two things only
-the operator can supply: a copy of the deployed store, and a query file with
-`expect` substrings written by the person whose life it describes (§0.9 keeps
-that file out of the repo). Both the self-comparison (must show 0 rank changes)
-and the per-query ranks stay _TBD_ until a window is agreed. Until then §4's
-"real-store `recall audit` is part of every gate" is unsatisfied by
-measurement, not by tooling.
+**Partly run: the store is here, the corpus is not.** The tool was finished long before the data
+(`recall audit --config A --compare-config B --queries F [--json]`, with `A = B` for a self-comparison;
+purity, refusal and JSON-leak tests pass). On 2026-10-18 the operator handed over the first half:
+
+```
+eval/store-2026-10-18.tar.gz
+sha256 b20fda44397bfa87eb91f51f970792810935b0225d04ac7966c0385d445bfa17   2,038,835 bytes
+```
+
+Verified on arrival rather than assumed: `PRAGMA integrity_check` → `ok`; 225 rows in `memories`, 43 of
+them superseded, **182 active**; oldest `2026-07-31`, newest write `2026-10-18T16:23:26Z`; kinds — 94
+`preference.coding`, 65 `fact.project`, 17 `decision`, 16 `experience`, 15 `fact.person`, 12 `skill`,
+4 `reference`, 2 `preference.personal`. That newest write predates the measurement run in §17 · Field
+host, so the copy and those numbers describe the same state, which is what makes it a *frozen* corpus
+rather than a snapshot of a moving one. Two facts about reading either: the ids `recall audit` prints
+are the **last eight characters** of the memory UUIDs, and the copy is a cold tar of a live SQLite file
+(`-wal` included), so it is consistent as a set — extract all three files together or none.
+
+**It is private and it is not in git.** A store copy *is* someone's memories; the measurement bundles
+quote them too. `eval/*.tar.gz`, `eval/store-*/` and `eval/field-*/` are ignored, and what is committed
+from them is the digest above plus aggregate counts. Anyone reproducing §17's field numbers needs the
+file from its owner, not from this repository.
+
+**Still owed, and the reason this is "partly":** a query file of ~40 `expect` pairs written against this
+frozen copy, in the voice of the person who stored those memories, plus three of the existing 18 field
+queries re-anchored (they encode last week's answers, see §17 · The instrument drifted). With that file
+in place the corpus stops being 110 synthetic memories and becomes the instrument that can decide the
+fusion question in §16 — which is the only reason it is worth the hour it costs. §4's "real-store
+`recall audit` is part of every gate" is now satisfied for measurement-by-tooling and for one 18-question
+store; the frozen corpus is what turns that single store's anecdote into a gate.
 
 #### Deviations from the task text (all deliberate, none silent)
 
@@ -2589,6 +2677,10 @@ was entered.
 
 #### M5 did not run: the guard caught a bug of its own
 
+*(Kept as the record of why the first attempt produced nothing. The re-run happened on the same day and
+its result is above, under "M5: the fusion is the weakest link"; the bug below is why that re-run was
+needed at all, and why the guard now reads inside the section that owns each key.)*
+
 ```
 !! weight2.toml: asked for weight=2, the binary reads '0.3'.
 ```
@@ -2604,13 +2696,15 @@ because of my code rather than the system's behaviour.
 Closed by the two runs: the existence probe (the memories are absent, above), the δ sweep with the
 stage off (above), the warm RSS with the stage off (above), and M5 (above), which answered the fusion
 question with a bigger number than the hypothesis that asked it. Still owed, in the order that would
-change a decision: the **frozen store copy plus a rerank grid run against it** — that is what
-separates "the corpus describes the wrong population" from "the field query file is needle-shaped",
-and it is the only measurement in this project that can flip a shipped default; the M1 hand review of
-the seat's moved rows, which the floorless-audit caveat narrows but does not settle; re-anchoring
-queries 1–3 of the field file so they do not encode last week's answer; Task 1.5 if the stage ever goes
-back on; and the same store copy feeding the corpus, which is what turns these eighteen questions into
-something a later phase can gate on instead of an anecdote about one machine that keeps changing.
+change a decision: **a query file against the frozen store copy, and a rerank grid run on that copy** —
+the copy arrived on 2026-10-18 and is digested and verified in §17 · Task 0.9, so what is missing is the
+~40 owner-written `expect` pairs, not the data. That run is what separates "the corpus describes the
+wrong population" from "the field query file is needle-shaped", and it is the only measurement in this
+project that can flip a shipped default. Then: the M1 hand review of the seat's moved rows, which the
+floorless-audit caveat narrows but does not settle; re-anchoring queries 1–3 of the field file so they
+do not encode last week's answer; the same grid re-run at the new δ, because the published fusion choice
+was made while δ was 0.05 and the head the stage sees has changed since; and Task 1.5 if the stage ever
+goes back on.
 
 One caveat about `complete@5` here, because the ceiling argument above leans on it: the audit
 applies no client floor — it prints `floor: clients drop below 0.25, this audit shows everything`.
@@ -2621,19 +2715,47 @@ floor refuses is unreachable by the slot anyway" — which is still the right de
 after the floor, deliberately), but it is a narrower claim than the table reads.
 
 ### Phase 4 — embedding prompts
-- Per-model with/without tables + `calibrate`: _TBD_
+
+**No measurement taken; the phase is stopped as written.** Nothing this project has measured runs a
+non-default embedder — the corpus and the field host both use `bge-small-en-v1.5` — so the with/without
+table this section asked for has no left-hand column to compare against. `calibrate` and the per-model
+baseline map from Phase 3 are the shipped mitigation. Reopening condition: a second embedder actually
+deployed, with a query set it loses. §11's status note, and
+[`recall-quality-status.md`](recall-quality-status.md) §5.
 
 ### Phase 5 — question probes
-- Eval with/without; bench p95; ingest token cost; field audit: _TBD_
+
+**No measurement taken; the phase is open and unfunded.** It is the only later phase whose failure class
+is still failing on the corpus — `vocab-gap` reads **recall 14.3% / p@1 0.0%** in the 2026-10-18 eval
+run, one of six cases answered — and still has no field observation, because the 18 owner-written
+questions contain no vocabulary-gap question. Bench p95, ingest token cost and the field audit are
+therefore all still owed, and an LLM at write time should not be bought on a synthetic class. Order:
+the frozen-copy query set (§16, status §6 item 2) decides whether the class is real, then this phase.
 
 ### Phase 6 — aliases
-- τ calibration per model; gate; field audit: _TBD_
+
+**No measurement taken; the phase is stopped as written.** No τ was calibrated because no query on the
+field store lost an answer to a split concept (280 entities, 61 relations, 182 active memories, §17 ·
+Field host), and the one graph mechanism already shipped costs MRR on that same store. Reopening
+condition: a query that fails because two spellings of one thing are two nodes. §13's status note.
 
 ### Phase 7 — temporal cues
-- Mechanism (a) vs (b): _TBD_ · decision: _TBD_
+
+**No measurement taken; the phase is stopped as written, with the weakness recorded.** `temporal` reads
+p@1 **0.0%** over its five corpus cases, so the shape is real in the corpus; no real question of that
+kind has been asked against a store that has 43 superseded rows. Note for whoever does measure it: that
+kind is marked informational, so it is **outside** the gated δ = 0.5 comparison — the affinity change's
+effect on temporal ranking is unmeasured, not benign. §14's status note.
 
 ### Phase 8 — release
-- Smoke test; final defaults per knob: _TBD_
+
+**In progress, and smaller than planned.** Defaults are set from measurements:
+`[retrieval].relevance_weight` **0.5** (both instruments, no rank-1 loss at any value, #40);
+`[rerank].mode` **off** (the stage changes ~nothing fused at weight 1 and costs 236 ms p50 and 1.67 GB);
+`[graph].expansion_slots` **1** (top-1 unharmed, −2.2 MRR on the field store, revisit with a seat-aware
+query set). Smoke test still owed. The one open default — `strategy = "rrf"` versus `replace`, or a
+confidence gate between them — is explicitly **not** this phase's to guess at; it belongs to the
+frozen-copy rerank grid (§16 · follow-ups, [`recall-quality-status.md`](recall-quality-status.md) §4).
 
 ---
 
