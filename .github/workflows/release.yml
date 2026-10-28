@@ -32,6 +32,12 @@ jobs:
   # (Debian 13, Ubuntu 24.04+, Fedora 39+) no matter which runner we build
   # on — building on an older glibc simply fails to link. Older or minimal
   # systems use the Docker image instead, which bundles everything.
+  #
+  # The x86_64 runner is pinned, never `ubuntu-latest`: a binary links
+  # against the build host's glibc, and when `ubuntu-latest` moved to 26.04
+  # (glibc 2.43) v0.5.0-rc2's Linux binary stopped starting on every
+  # 24.04/Debian 13 host the README promises. The "glibc floor" step below
+  # makes that a failed release instead of a broken download.
   binaries:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -40,7 +46,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
@@ -71,6 +77,23 @@ jobs:
       # exercises the whole link — including the ONNX and SQLite objects.
       - name: Smoke test
         run: ./target/release/recuerdos-ai --version
+
+      # The smoke test only proves the binary starts *here*. This proves it
+      # starts on the oldest system the README and install.sh promise: no
+      # symbol may require a glibc newer than the documented floor.
+      - name: glibc floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          floor=2.38
+          needed=$(objdump -T target/release/recuerdos-ai | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sed 's/GLIBC_//' | sort -V -u | tail -1)
+          echo "highest glibc symbol version required: $needed (floor $floor)"
+          if [ "$(printf '%s\n%s\n' "$floor" "$needed" | sort -V | tail -1)" != "$floor" ]; then
+            echo "::error::the binary needs glibc $needed, above the documented floor $floor — was the runner image upgraded?"
+            exit 1
+          fi
 
       - name: Package
         id: package

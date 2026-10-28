@@ -138,6 +138,12 @@ one knob. Three of rc1's owed questions have answers, and one of them is a shipp
   `query_instruction`.** One embedder serves both columns, so the second side's instruction would have
   been silently ignored; audit each config on its own instead.
 
+- **Fixed: the `v0.5.0-rc2` x86_64 Linux binary did not start on the systems the README supports.** It
+  failed with ``GLIBC_2.43' not found``: GitHub moved `ubuntu-latest` to 26.04 between rc1 and rc2, and
+  a binary links against its build host's glibc. The release runner is now pinned to `ubuntu-24.04`, and
+  a new release step refuses any Linux binary that needs a glibc above the documented 2.38 floor (rc1
+  needed 2.38; rc2 needed 2.43). The rc2 Docker image and the macOS / aarch64 binaries were unaffected.
+
 Nothing else moves: no migrations, no wire changes, no new downloads. Upgrading from `v0.5.0-rc1` to
 a build containing this is a config-file question — the store is untouched, and every knob above stays
 reversible (the document format by one `reindex`).
