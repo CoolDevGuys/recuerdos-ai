@@ -529,9 +529,10 @@ fn side_as_configured<'a>(
 
 /// Refuse a second config that would not be reading this store.
 ///
-/// `[storage].path` and `[embeddings].model` are not tuning knobs: one picks a
-/// different database, the other a model whose vectors this store does not
-/// contain. Either would produce a confident report about nothing, so the
+/// `[storage].path` and `[embeddings]` `model` / `document_text` are not
+/// tuning knobs: one picks a different database, the others vectors this
+/// store does not contain. `query_instruction` is refused for a narrower
+/// reason: one embedder serves both columns, so it could not be applied. Either would produce a confident report about nothing, so the
 /// command stops and names the difference instead.
 fn refuse_a_different_store(config: &AppConfig, compare: &AppConfig) -> Result<()> {
     if compare.embeddings.model != config.embeddings.model {
@@ -540,6 +541,24 @@ fn refuse_a_different_store(config: &AppConfig, compare: &AppConfig) -> Result<(
              store were built by one of them, so one side would be scored against vectors it \
              cannot read",
             config.embeddings.model, compare.embeddings.model
+        )));
+    }
+    // Both columns share the `--config` side's embedder, and the store was
+    // built in one document format: a second config that changed either
+    // would be silently measured as the first.
+    if compare.embeddings.document_text != config.embeddings.document_text {
+        return Err(RaError::Validation(format!(
+            "the two configs name different [embeddings].document_text ({} vs {}): this \
+             store's vectors were built from one of them",
+            config.embeddings.document_text, compare.embeddings.document_text
+        )));
+    }
+    if compare.embeddings.query_instruction != config.embeddings.query_instruction {
+        return Err(RaError::Validation(format!(
+            "the two configs name different [embeddings].query_instruction ({:?} vs {:?}): both \
+             columns embed the query with the --config side's embedder, so the second \
+             instruction would never be applied — audit each config on its own instead",
+            config.embeddings.query_instruction, compare.embeddings.query_instruction
         )));
     }
     if compare.data_dir() != config.data_dir() {
@@ -2092,6 +2111,18 @@ mod tests {
             error.to_string().contains("some-other-model"),
             "should name what it refused: {error}"
         );
+
+        let mut other_text = base.clone();
+        other_text.embeddings.document_text = "enriched".to_string();
+        let error = refuse_a_different_store(&base, &other_text)
+            .expect_err("a store is built in one document format");
+        assert!(error.to_string().contains("document_text"), "{error}");
+
+        let mut other_instruction = base.clone();
+        other_instruction.embeddings.query_instruction = "query: ".to_string();
+        let error = refuse_a_different_store(&base, &other_instruction)
+            .expect_err("one embedder serves both columns");
+        assert!(error.to_string().contains("query_instruction"), "{error}");
 
         let mut other_store = base.clone();
         other_store.storage.path = "/tmp/somewhere-else".to_string();

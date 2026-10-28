@@ -8,4 +8,5 @@
 pub mod blocking_http;
 pub mod fastembed_embedder;
 pub mod gemini_embedder;
+pub mod instructed_embedder;
 pub mod remote_embedder;

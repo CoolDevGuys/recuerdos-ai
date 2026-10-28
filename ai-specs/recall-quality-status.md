@@ -5,6 +5,12 @@ Snapshot: **2026-10-18**. This page is the state of the work in one read. The sp
 **§17 Results log**, which stays the authority — if this summary and §17 disagree, §17 is right and
 this page is stale.
 
+> **2026-10-27:** broad, concept-style questions ("how does the user approach testing?") are now
+> tracked in [`concept-recall-plan.md`](concept-recall-plan.md). Its proposal A —
+> `[embeddings].document_text = "enriched"` — is implemented and measured on the frozen store copy:
+> field p@1 50.0 → 66.7, eval p@1 67.3 → 73.1, broad-question on-topic@5 36.0 → 50.7. It also measures
+> Phase 4's query instruction on bge-small: not worth enabling.
+
 Nothing here is a projection. Every figure was measured on one of two instruments, both named beside
 it, and the ones that could not be measured are listed as not measured rather than estimated.
 

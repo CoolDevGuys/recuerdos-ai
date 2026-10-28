@@ -1,6 +1,7 @@
 //! Edits an existing memory, keeping both indexes in step.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::domain::document_text::DocumentText;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, MemoryEdit};
 use crate::memories::domain::memory_repository::MemoryRepository;
@@ -17,6 +18,7 @@ pub struct MemoryUpdater {
     text: Arc<dyn TextIndex>,
     embedder: Arc<dyn Embedder>,
     clock: Arc<dyn Clock>,
+    document_text: DocumentText,
 }
 
 impl MemoryUpdater {
@@ -33,7 +35,15 @@ impl MemoryUpdater {
             text,
             embedder,
             clock,
+            document_text: DocumentText::default(),
         }
+    }
+
+    /// What the vector is built from — see [`DocumentText`]. Decides, too,
+    /// whether a label-only edit has to re-embed.
+    pub fn with_document_text(mut self, document_text: DocumentText) -> Self {
+        self.document_text = document_text;
+        self
     }
 
     pub fn execute(
@@ -53,15 +63,24 @@ impl MemoryUpdater {
             .as_ref()
             .is_some_and(|content| content.trim() != existing.content());
 
+        // Read before `edit` consumes the memory: under `enriched` the labels
+        // are part of the embedded text, so the comparison needs both sides.
+        let embedded_before = self.document_text.of(&existing);
+
         let updated = existing.edit(edit, self.clock.now())?;
         self.memories.update(context, &updated, actor)?;
 
         // Re-embedding is the expensive part, so it only happens when the
-        // text actually changed. A tag-only edit leaves the vector valid.
-        if content_changed {
+        // embedded text actually changed. Under `content` a tag-only edit
+        // leaves the vector valid; under `enriched` the labels are part of
+        // the text, so changing them is changing what was embedded.
+        let embedded_text_changed = content_changed
+            || (self.document_text.embeds_labels()
+                && embedded_before != self.document_text.of(&updated));
+        if embedded_text_changed {
             let embedding = self
                 .embedder
-                .embed_one(updated.content(), EmbeddingTask::Document)?;
+                .embed_one(&self.document_text.of(&updated), EmbeddingTask::Document)?;
             self.vectors.upsert(context, updated.id(), &embedding)?;
         }
 
@@ -84,6 +103,7 @@ mod tests {
     use super::*;
     use crate::memories::application::test_doubles::{Fixture, now};
     use crate::memories::domain::category::Category;
+    use crate::memories::domain::document_text::DocumentText;
     use crate::memories::domain::recall_query::RecallQuery;
 
     fn content_edit(content: &str) -> MemoryEdit {
@@ -154,6 +174,54 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.tags(), &["added".to_string()]);
+    }
+
+    #[test]
+    fn a_tag_only_edit_re_embeds_when_the_tags_are_embedded() {
+        let fixture = Fixture::new();
+        let memory = fixture.save(&fixture.alex, "unchanged content");
+
+        // Under `enriched` the tags are part of the vector's text, so the
+        // edit must reach the embedder — the injected failure proves it did.
+        fixture.embedder.fail_next();
+
+        let result = fixture
+            .updater()
+            .with_document_text(DocumentText::Enriched)
+            .execute(
+                &fixture.alex,
+                memory.id(),
+                MemoryEdit {
+                    tags: Some(vec!["added".to_string()]),
+                    ..Default::default()
+                },
+                "test",
+            );
+
+        assert!(result.is_err(), "a label edit must re-embed under enriched");
+    }
+
+    #[test]
+    fn an_edit_that_leaves_the_embedded_text_alone_does_not_re_embed() {
+        let fixture = Fixture::new();
+        let memory = fixture.save(&fixture.alex, "unchanged content");
+        fixture.embedder.fail_next();
+
+        // Only the expiry changes: nothing in the embedded text, so nothing
+        // for even `enriched` to rebuild.
+        fixture
+            .updater()
+            .with_document_text(DocumentText::Enriched)
+            .execute(
+                &fixture.alex,
+                memory.id(),
+                MemoryEdit {
+                    expires_at: Some(None),
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap();
     }
 
     #[test]

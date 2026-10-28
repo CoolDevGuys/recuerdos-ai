@@ -115,9 +115,32 @@ one knob. Three of rc1's owed questions have answers, and one of them is a shipp
   noise). What separates those two readings is a frozen copy of a real store inside the harness, and
   that is now the project's next measurement rather than a new phase.
 
+- **New, opt-in: `[embeddings].document_text = "enriched"`** builds each memory's vector from a short
+  header naming its category, sub-label and tags, then its sentence — so the vector leg, the one that
+  matches on meaning, sees the labels the keyword leg already had. On a frozen 222-memory personal
+  store, same model and ranking: 15 broad questions (*"how does the user approach testing?"*) put
+  **50.7%** on-topic memories in the top 5 against 36.0%, and reach **57.2%** of their expected
+  memories in the top 10 against 44.7%; 22 single-answer preference questions read precision@1
+  **54.5 → 63.6** and MRR **72.5 → 79.2**; the 18 field questions **50.0 → 66.7** / **63.4 → 74.5**;
+  the eval set **67.3 → 73.1** / **75.9 → 80.6** with abstention unchanged. No single-answer question
+  ranked worse, and recall latency is unchanged — the header is embedded once, at save. The format is
+  part of the collection pin (`bge-small-en-v1.5+enriched-v1`), so switching is a `recuerdos-ai
+  reindex` with the daemon stopped, and it carries its own similarity baseline (`0.53`): **a config
+  that sets `[retrieval].similarity_baseline` explicitly must change it too.** Default stays
+  `content`, so an upgrade opens every existing store untouched.
+  [`concept-recall-plan.md`](../ai-specs/concept-recall-plan.md) has the measurement and what comes
+  next.
+- **New, opt-in: `[embeddings].query_instruction`** prepends a retrieval instruction to recall
+  queries, for models trained with one (BGE's *"Represent this sentence for searching relevant
+  passages: "*, E5's *"query: "*), whichever provider serves them. Query-side only — no reindex. Off
+  by default: for bge-small it adds nothing on top of `enriched`.
+- **`recall audit --compare-config` refuses a second config with a different `document_text` or
+  `query_instruction`.** One embedder serves both columns, so the second side's instruction would have
+  been silently ignored; audit each config on its own instead.
+
 Nothing else moves: no migrations, no wire changes, no new downloads. Upgrading from `v0.5.0-rc1` to
-a build containing this is a config-file question — the store is untouched, and both knobs above stay
-reversible without another deploy.
+a build containing this is a config-file question — the store is untouched, and every knob above stays
+reversible (the document format by one `reindex`).
 
 ## v0.5.0-rc1 — Three ordering changes, and the measurements they still owe
 

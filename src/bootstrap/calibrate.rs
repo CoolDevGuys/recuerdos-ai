@@ -41,6 +41,7 @@
 use crate::bootstrap::config::AppConfig;
 use crate::bootstrap::eval::EvalSet;
 use crate::bootstrap::memories_wiring::{build_embedder, resolve_similarity_baseline};
+use crate::memories::domain::category::Category;
 use crate::memories::domain::embedder::EmbeddingTask;
 use crate::memories::domain::recall_ranker::{
     DEFAULT_RELEVANCE_FLOOR, RelevanceCalibration, default_similarity_baseline_for,
@@ -90,7 +91,25 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<()> {
     let baseline = resolve_similarity_baseline(config, embedder.model_id());
     let calibration = RelevanceCalibration::new(baseline);
     let floor = config.retrieval.min_relevance;
+    // `corpus` is the memories' content — what a case's `expect` names and
+    // what the report prints. `documents` is what gets embedded, as the saver
+    // would store it: under `enriched` the labels shift every cosine, so the
+    // ceiling and floor must be read on the text recall compares against.
     let corpus: Vec<String> = set.memories.iter().map(|m| m.content.clone()).collect();
+    let document_text = config.document_text();
+    let documents: Vec<String> = set
+        .memories
+        .iter()
+        .map(|m| {
+            document_text.render(
+                &Category::parse(&m.category)
+                    .unwrap_or_else(|_| Category::Custom(m.category.clone())),
+                m.subcategory.as_deref(),
+                &m.tags,
+                &m.content,
+            )
+        })
+        .collect();
 
     println!(
         "embedder: {} ({} dimensions)",
@@ -99,7 +118,11 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<()> {
     );
     let source = match config.retrieval.similarity_baseline {
         Some(_) => "explicit [retrieval].similarity_baseline",
-        None if default_similarity_baseline_for(embedder.model_id()).is_some() => {
+        None if default_similarity_baseline_for(
+            &config.document_text().pin(embedder.model_id()),
+        )
+        .is_some() =>
+        {
             "per-model default (SIMILARITY_BASELINES)"
         }
         None => "UNCALIBRATED fallback — measure this model and set the value",
@@ -107,7 +130,7 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<()> {
     println!("baseline in force: {baseline}  ({source})");
     println!("floor in force:    {floor}    ([retrieval].min_relevance)\n");
 
-    let memories = embedder.embed(&corpus, EmbeddingTask::Document)?;
+    let memories = embedder.embed(&documents, EmbeddingTask::Document)?;
     report_norms("documents", &memories);
     let queries = embedder.embed(
         &set.cases

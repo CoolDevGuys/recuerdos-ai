@@ -26,6 +26,7 @@ use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
 use crate::providers::infrastructure::chat::transport;
 use crate::providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder;
 use crate::providers::infrastructure::embeddings::gemini_embedder::{self, GeminiEmbedder};
+use crate::providers::infrastructure::embeddings::instructed_embedder::InstructedEmbedder;
 use crate::providers::infrastructure::embeddings::remote_embedder::{
     EmbeddingApi, OLLAMA_DEFAULT_BASE_URL, OPENAI_DEFAULT_BASE_URL, RemoteEmbedder,
 };
@@ -210,22 +211,28 @@ impl Memories {
         }
 
         Ok(Self {
-            saver: Arc::new(DirectMemorySaver::new(
-                Arc::clone(&repository),
-                Arc::clone(&vectors),
-                Arc::clone(&text),
-                Arc::clone(&embedder),
-                Arc::clone(&clock),
-            )),
+            saver: Arc::new(
+                DirectMemorySaver::new(
+                    Arc::clone(&repository),
+                    Arc::clone(&vectors),
+                    Arc::clone(&text),
+                    Arc::clone(&embedder),
+                    Arc::clone(&clock),
+                )
+                .with_document_text(config.document_text()),
+            ),
             recaller: Arc::new(recaller),
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
-            updater: Arc::new(MemoryUpdater::new(
-                Arc::clone(&repository),
-                Arc::clone(&vectors),
-                Arc::clone(&text),
-                Arc::clone(&embedder),
-                Arc::clone(&clock),
-            )),
+            updater: Arc::new(
+                MemoryUpdater::new(
+                    Arc::clone(&repository),
+                    Arc::clone(&vectors),
+                    Arc::clone(&text),
+                    Arc::clone(&embedder),
+                    Arc::clone(&clock),
+                )
+                .with_document_text(config.document_text()),
+            ),
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),
@@ -279,9 +286,12 @@ impl RecallCore {
         read_only_text: bool,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
+        // The pin names the model *and* the text its vectors were built
+        // from: a store embedded from bare content must not be queried as if
+        // it were enriched, or the other way round.
         let concrete_repository = SqliteMemoryRepository::new(
             Arc::clone(database),
-            embedder.model_id(),
+            &config.document_text().pin(embedder.model_id()),
             embedder.dimensions(),
         );
         // Fail fast, before the vector table is opened at the new width:
@@ -428,6 +438,24 @@ pub(crate) fn resolve_similarity_baseline(config: &AppConfig, model_id: &str) ->
     if let Some(baseline) = config.retrieval.similarity_baseline {
         return baseline;
     }
+    // Looked up by pin first: the document format shifts the cosines, so an
+    // enriched store has its own row. A model calibrated only on bare content
+    // falls back to that row — close (≈0.02 for bge-small), but not measured.
+    let pin = config.document_text().pin(model_id);
+    if let Some(baseline) = default_similarity_baseline_for(&pin) {
+        return baseline;
+    }
+    if pin != model_id {
+        if let Some(baseline) = default_similarity_baseline_for(model_id) {
+            tracing::warn!(
+                pin = pin.as_str(),
+                "similarity_baseline not calibrated for {pin}; using the {model_id} content \
+                 baseline {baseline}. Measure it with `recuerdos-ai calibrate` and set \
+                 [retrieval].similarity_baseline."
+            );
+            return baseline;
+        }
+    }
     default_similarity_baseline_for(model_id).unwrap_or_else(|| {
         tracing::warn!(
             model = model_id,
@@ -550,6 +578,15 @@ fn load_reranker(config: &AppConfig, max_concurrency: usize) -> Result<Fastembed
 }
 
 pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
+    // The instruction wraps whichever provider serves the model: BGE wants
+    // it whether it runs in-process or behind an OpenAI-compatible server.
+    Ok(InstructedEmbedder::wrap(
+        build_provider_embedder(config)?,
+        &config.embeddings.query_instruction,
+    ))
+}
+
+fn build_provider_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
     let embeddings = &config.embeddings;
     let configured_base = embeddings.base_url.trim();
     let base_url = |default: &str| {
@@ -673,6 +710,27 @@ mod tests {
         assert_eq!(
             resolve_similarity_baseline(&config_with(None), "text-embedding-004"),
             DEFAULT_SIMILARITY_BASELINE
+        );
+    }
+
+    /// An enriched store reads its own row, and a model calibrated only on
+    /// bare content falls back to that content row rather than the constant.
+    #[test]
+    fn an_enriched_store_resolves_by_its_pin() {
+        let mut enriched = config_with(None);
+        enriched.embeddings.document_text = "enriched".to_string();
+        assert_eq!(
+            resolve_similarity_baseline(&enriched, "bge-small-en-v1.5"),
+            0.53
+        );
+        assert_eq!(
+            resolve_similarity_baseline(&enriched, "gemini-embedding-2"),
+            0.46
+        );
+        enriched.retrieval.similarity_baseline = Some(0.7);
+        assert_eq!(
+            resolve_similarity_baseline(&enriched, "bge-small-en-v1.5"),
+            0.7
         );
     }
 

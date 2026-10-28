@@ -193,9 +193,11 @@ orphaned.
 
 ```toml
 [embeddings]
-provider  = "local"                    # local | gemini | openai-compat | ollama
-model     = "bge-small-en-v1.5"        # or all-minilm-l6-v2
-cache_dir = "~/.recuerdos-ai/models"    # local only
+provider          = "local"                    # local | gemini | openai-compat | ollama
+model             = "bge-small-en-v1.5"        # or all-minilm-l6-v2
+cache_dir         = "~/.recuerdos-ai/models"    # local only
+document_text     = "content"                  # content | enriched — see below
+query_instruction = ""                         # prepended to recall queries only
 ```
 
 ### `provider = "local"` (default)
@@ -322,6 +324,75 @@ daemon **stopped**: it rebuilds the vector table and holds the write
 lock.
 
 The full-text (BM25) index is model-independent and is not touched.
+
+### What a memory's vector is built from (`document_text`)
+
+`content` (the default) embeds the memory's sentence alone. `enriched`
+embeds a short header naming its category, sub-label and tags, then the
+sentence:
+
+```
+Coding preference (tooling, package-management). User prefers pnpm over npm
+```
+
+The labels already reach the keyword (BM25) leg; `enriched` gives them to
+the vector leg too, which is the one that matches on meaning. That is what
+lets a **broad** question — *"how does the user approach testing?"*,
+*"what are the user's UI standards?"* — reach the memories filed under that
+topic even when their sentences never use the question's words.
+
+Measured on a real 222-memory store (ai-specs/concept-recall-plan.md §4),
+same model, same ranking settings:
+
+| | `content` | `enriched` |
+|---|---|---|
+| 15 broad questions — share of the top 5 that is on-topic | 36.0% | 50.7% |
+| 15 broad questions — expected memories reached in the top 10 | 44.7% | 57.2% |
+| 22 preference questions — precision@1 / MRR | 54.5 / 72.5 | 63.6 / 79.2 |
+| 18 field questions — precision@1 / MRR | 50.0 / 63.4 | 66.7 / 74.5 |
+| eval set (`recuerdos-ai eval`) — precision@1 / MRR | 67.3 / 75.9 | 73.1 / 80.6 |
+| recall latency p50 | ≈8 ms | ≈8 ms |
+
+Not one single-answer question ranked worse. It costs nothing at recall
+time — the header is embedded once, when the memory is stored.
+
+The format is **part of the pin**: an enriched store pins
+`bge-small-en-v1.5+enriched-v1`, so switching either way on an existing
+store is a `reindex`, exactly like switching model — the daemon refuses to
+start until you run it:
+
+```bash
+# 1. stop the daemon
+# 2. set [embeddings].document_text = "enriched"
+recuerdos-ai reindex
+# 3. start the daemon
+```
+
+The header lifts every cosine slightly (≈0.02 for bge-small), so the
+relevance calibration has its own row for the enriched pin
+(`similarity_baseline` `0.53` instead of `0.5`). **If your config sets
+`[retrieval].similarity_baseline` explicitly, that number wins over the
+map** — set it to `0.53` (or remove it) when you switch bge-small to
+`enriched`, or one class of unrelated query starts clearing the relevance
+floor. Another model has no measured enriched row yet: it falls back to its
+`content` baseline with a warning; measure it with `recuerdos-ai calibrate`.
+
+With `enriched`, editing only a memory's tags or category re-embeds it
+(they are part of its vector now); with `content` it does not.
+
+### Query instruction (`query_instruction`)
+
+Some models are trained with a retrieval instruction in front of the
+*query* — BGE v1.5's is `"Represent this sentence for searching relevant
+passages: "`, E5's is `"query: "`. Whatever is set here is prepended to
+every recall query before it is embedded, whichever provider serves the
+model; stored memories are never touched, so it can change at any time
+without a reindex.
+
+Empty is the default and the recommendation for bge-small: the
+instruction helped `content` vectors a little (preference precision@1
+54.5 → 59.1) but added nothing on top of `enriched` and slightly lowered
+broad-question recall. It exists for models that require one.
 
 ## Retrieval
 

@@ -86,6 +86,20 @@ api_key_env = ""
 # rejects a larger batch with "batch size is invalid". Ignored by the local
 # provider, which batches in-process.
 max_batch_size = 0
+# What each memory's vector is built from. "content" (the default) embeds
+# the sentence alone; "enriched" embeds a header naming its category,
+# sub-label and tags, then the sentence — so broad questions ("how does the
+# user approach testing?") reach the memories filed under that topic. It
+# measured better on every question set we have (docs/configuration.md).
+# Part of the pin: switching on an existing store needs `recuerdos-ai
+# reindex` with the daemon stopped. Enriched bge-small calibrates at
+# similarity_baseline 0.53 — change [retrieval].similarity_baseline too if
+# you set it explicitly.
+document_text = "content"
+# Prepended to every recall query (never to stored memories) before it is
+# embedded, for models trained with a retrieval instruction — e.g.
+# "query: " for E5. Empty sends the query as typed; no reindex to change it.
+query_instruction = ""
 
 # Example — Alibaba DashScope (OpenAI-compatible), which caps the batch at 10:
 #   provider       = "openai-compat"

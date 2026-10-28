@@ -32,6 +32,8 @@
 //! the drop fail. This is a maintenance command, not a hot path.
 
 use super::sqlite_vector_index::{VEC_TABLE, create_vec_table, to_bytes};
+use crate::memories::domain::category::Category;
+use crate::memories::domain::document_text::DocumentText;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::{SqliteDatabase, map_sqlite_error};
@@ -56,15 +58,27 @@ pub struct ReindexReport {
 pub struct SqliteReindexer {
     database: Arc<SqliteDatabase>,
     embedder: Arc<dyn Embedder>,
+    document_text: DocumentText,
 }
 
 impl SqliteReindexer {
     pub fn new(database: Arc<SqliteDatabase>, embedder: Arc<dyn Embedder>) -> Self {
-        Self { database, embedder }
+        Self {
+            database,
+            embedder,
+            document_text: DocumentText::default(),
+        }
+    }
+
+    /// Builds the vectors from `document_text` and pins the collection to
+    /// it — switching format is a reindex, exactly like switching model.
+    pub fn with_document_text(mut self, document_text: DocumentText) -> Self {
+        self.document_text = document_text;
+        self
     }
 
     pub fn execute(&self) -> Result<ReindexReport> {
-        let model = self.embedder.model_id().to_string();
+        let model = self.document_text.pin(self.embedder.model_id());
         let dimensions = self.embedder.dimensions();
 
         self.database.with_connection(|connection| {
@@ -86,15 +100,28 @@ impl SqliteReindexer {
             // so `include_superseded` recall can still find them.
             let rows: Vec<(String, String, String)> = {
                 let mut statement = connection
-                    .prepare("SELECT id, user_id, content FROM memories WHERE deleted_at IS NULL")
+                    .prepare(
+                        "SELECT id, user_id, content, category, subcategory, tags
+                         FROM memories WHERE deleted_at IS NULL",
+                    )
                     .map_err(|e| map_sqlite_error(e, "reindex read conflict"))?;
+                let document_text = self.document_text;
                 statement
-                    .query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                        ))
+                    .query_map([], move |row| {
+                        let content = row.get::<_, String>(2)?;
+                        let category = row.get::<_, String>(3)?;
+                        let tags: Vec<String> =
+                            serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default();
+                        // The text the saver would embed for this row today,
+                        // so a reindexed vector and a freshly saved one agree.
+                        let text = document_text.render(
+                            &Category::parse(&category)
+                                .unwrap_or_else(|_| Category::Custom(category.clone())),
+                            row.get::<_, Option<String>>(4)?.as_deref(),
+                            &tags,
+                            &content,
+                        );
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, text))
                     })
                     .map_err(|e| map_sqlite_error(e, "reindex read conflict"))?
                     .collect::<std::result::Result<Vec<_>, _>>()
@@ -115,15 +142,13 @@ impl SqliteReindexer {
 
             let mut reindexed = 0usize;
             for chunk in rows.chunks(BATCH) {
-                let contents: Vec<String> = chunk
-                    .iter()
-                    .map(|(_, _, content)| content.clone())
-                    .collect();
+                let texts: Vec<String> = chunk.iter().map(|(_, _, text)| text.clone()).collect();
 
                 // Document task: these are stored memories, embedded the
-                // same way `DirectMemorySaver` embeds them, so the query
+                // same way (and from the same text) `DirectMemorySaver`
+                // embeds them, so the query
                 // (embedded as a Query) matches on recall.
-                let vectors = self.embedder.embed(&contents, EmbeddingTask::Document)?;
+                let vectors = self.embedder.embed(&texts, EmbeddingTask::Document)?;
                 if vectors.len() != chunk.len() {
                     return Err(RaError::Internal(format!(
                         "embedder returned {} vectors for {} memories",
@@ -196,19 +221,23 @@ mod tests {
     fn memory(context: &UserContext, content: &str) -> Memory {
         Memory::create(
             context.user_id(),
-            NewMemory {
-                content: content.to_string(),
-                category: crate::memories::domain::category::Category::PreferenceCoding,
-                subcategory: None,
-                tags: vec![],
-                entities: vec![],
-                confidence: 1.0,
-                source: MemorySource::default(),
-                expires_at: None,
-            },
+            new_memory_parts(content),
             chrono::Utc::now(),
         )
         .unwrap()
+    }
+
+    fn new_memory_parts(content: &str) -> NewMemory {
+        NewMemory {
+            content: content.to_string(),
+            category: crate::memories::domain::category::Category::PreferenceCoding,
+            subcategory: None,
+            tags: vec![],
+            entities: vec![],
+            confidence: 1.0,
+            source: MemorySource::default(),
+            expires_at: None,
+        }
     }
 
     /// Seeds a store with `old_dims`-wide vectors under `old_model`,
@@ -278,6 +307,61 @@ mod tests {
         new_repo
             .insert(&alex, &fresh, "test")
             .expect("the repin should let the new model write");
+    }
+
+    #[test]
+    fn an_enriched_reindex_pins_the_format_and_embeds_the_labels() {
+        let database = Arc::new(SqliteDatabase::open_in_memory().unwrap());
+        let identity =
+            crate::bootstrap::wiring::Identity::from_database(Arc::clone(&database)).unwrap();
+        let alex = authenticate(&identity, "alex");
+
+        let repo = SqliteMemoryRepository::new(Arc::clone(&database), "fake", 32);
+        SqliteVectorIndex::open(Arc::clone(&database), 32).unwrap();
+        let new = Memory::create(
+            alex.user_id(),
+            NewMemory {
+                tags: vec!["package-management".to_string()],
+                ..new_memory_parts("User prefers pnpm")
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        repo.insert(&alex, &new, "test").unwrap();
+
+        let embedder: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new(32));
+        let report = SqliteReindexer::new(Arc::clone(&database), Arc::clone(&embedder))
+            .with_document_text(DocumentText::Enriched)
+            .execute()
+            .unwrap();
+
+        assert_eq!(report.to.0, DocumentText::Enriched.pin(embedder.model_id()));
+        // A content-pinned repository now refuses the store; an enriched one opens it.
+        assert!(
+            SqliteMemoryRepository::new(Arc::clone(&database), embedder.model_id(), 32)
+                .verify_pin()
+                .is_err()
+        );
+        SqliteMemoryRepository::new(Arc::clone(&database), &report.to.0, 32)
+            .verify_pin()
+            .unwrap();
+
+        // The stored vector is the enriched text's.
+        let hits = SqliteVectorIndex::open(Arc::clone(&database), 32)
+            .unwrap()
+            .search(
+                &alex,
+                &embedder
+                    .embed_one(
+                        "Coding preference (package-management). User prefers pnpm",
+                        EmbeddingTask::Query,
+                    )
+                    .unwrap(),
+                1,
+            )
+            .unwrap();
+        assert_eq!(hits[0].0, new.id());
+        assert!((hits[0].1 - 1.0).abs() < 1e-4, "got {}", hits[0].1);
     }
 
     #[test]
