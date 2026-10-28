@@ -218,7 +218,7 @@ start until `reindex`, which is a release-note decision, not a code one. Recomme
       instruction wrapper, config validation, baseline resolution, audit refusals. Full suite green.
 - [x] Eval: no gated metric drops; abstention 100%.
 - [x] Docs: `docs/configuration.md`, `recuerdos-ai.example.toml`, CHANGELOG.
-- [ ] Field host: deploy (§4.5) and record `field-measure.sh` in §9.
+- [x] Field host: deployed (v0.5.0-rc3 build, 2026-10-28) and `field-measure.sh` recorded in §9: p@1 55.6 → 61.1, MRR 65.3 → 69.4, nothing worse.
 - [ ] Decide the `v0.5.0` default.
 
 ---
@@ -366,7 +366,7 @@ Cheap, manual or one LLM pass, and the only proposal that edits memories.
 | Step | What | Cost | Status |
 |---|---|---|---|
 | 1 | **A** — enriched vectors (+ instruction knob) | S | **done**, measured (§4) |
-| 2 | Field host: deploy A, `expansion_slots = 0`, record field reading | config + reindex | owner |
+| 2 | Field host: deploy A, `expansion_slots = 0`, record field reading | config + reindex | **A done** (§9); seat still 1 |
 | 3 | **C.0** — multi-expectation audit + committed concept question texts | S | next |
 | 4 | **B** — relation backfill on the frozen copy, re-measure the seat | no code, LLM calls | next |
 | 5 | **C.1–C.6** — topic layer | M–L | after 3 |
@@ -381,4 +381,7 @@ Cheap, manual or one LLM pass, and the only proposal that edits memories.
 | 2026-10-27 | A measured on the frozen store copy, local bge-small, 4 configs × 3 sets + eval | §4.3 | this file |
 | 2026-10-27 | Enriched baseline calibrated: noise ceiling 0.631, floor-gated signal 0.551 → 0.53 | §4.1 | `recall_ranker.rs` `SIMILARITY_BASELINES` |
 | 2026-10-27 | Field host, first attempt: config set `document_text = "enriched"`, `similarity_baseline = 0.53`, but the binary was the published **`0.5.0-rc1`**, which predates A and ignores the key — so this reads content vectors at the enriched baseline, **not A**. Field set: p@1 55.6, MRR 69.0 seat off / 65.3 seat on; rerank on 50.0 / 61.1 at 299 ms p50. Live MCP showed the signature: same order as before, every relevance ≈0.02–0.03 lower, one broad question falling under the floor. | not a measurement of A | `eval/field-20261027-0100/` (not committed) |
-| | Field host after A on a build that contains it (§4.5; check `recuerdos-ai config` prints `document_text enriched` and the collection pin reads `+enriched-v1`) | *owed* | |
+| 2026-10-28 | **Field host after A** — rc3 build (reports `0.5.0-rc1`: `Cargo.toml` was not bumped; `config` prints `document_text enriched`, `similarity_baseline 0.53 (explicit)`). Same 18 questions vs the 2026-10-27 run (old code, same baseline): seat on **p@1 55.6 → 61.1, MRR 65.3 → 69.4**; seat off 55.6 → 61.1, 69.0 → 72.7; complete@5 88.9 both (the two misses are memories never stored). Moves: Python-tools question 3 → 1, linkedin auth 4 → 3; none worse. Recall p50 6.4 ms, RSS 78 MB. One question short of the frozen-copy forecast (66.7 / 74.5): the host serves bge-small through llama.cpp, and the store has grown since the copy. | A confirmed on the field host | `eval/field-20261028-0239/` (not committed) |
+| 2026-10-28 | Graph seat on the enriched store: top-1 unchanged, MRR 72.7 → 69.4 with it on — four answers pushed down one place for a graph arrival. Fourth reading in the same direction. | recommend `expansion_slots = 0` | same bundle, `m1-slot` |
+| 2026-10-28 | Rerank on the enriched store, depth 10: shipped fusion (`rrf`, weight 1) p@1 **77.8** / MRR 81.5 vs off 61.1 / 69.4; `replace` 83.3 / 85.2 (was 66.7 vs 83.3 on content vectors). Cost p50 ≈600 ms, p95 ≈1.2 s — at the 1200 ms timeout. Recorded, not shipped. | open | same bundle, `m5-*` |
+| 2026-10-28 | Bundle hygiene: `m3-rerank-off-vs-on.txt` in both field folders is the 2026-10-18 file (byte-identical; M3 is skipped with rerank off). `field-measure.sh` now clears old results first. | — | `scripts/field-measure.sh` |

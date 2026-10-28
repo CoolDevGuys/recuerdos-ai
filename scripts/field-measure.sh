@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Field measurements owed by recall-quality-plan Phases 0–3.
 #
-# Run this ON the host that runs recuerdos-ai, after installing v0.5.0-rc1:
+# Run this ON the host that runs recuerdos-ai, after installing v0.5.0-rc4:
 #
 #   curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh \
-#     | RECUERDOS_AI_VERSION=v0.5.0-rc1 sh
+#     | RECUERDOS_AI_VERSION=v0.5.0-rc4 sh
 #
 # The RECUERDOS_AI_VERSION is not optional. `install.sh` with no version asks
 # GitHub for /releases/latest, and GitHub excludes prereleases from that — a
@@ -38,12 +38,18 @@ OUT="${OUT:-$HOME/field-measure}"   # stable on purpose: the first run writes a 
                                     # timestamped directory would lose it on re-run
 CONFIG="${CONFIG:-}"
 BIN="${BIN:-}"
-IMAGE="${IMAGE:-ghcr.io/cooldevguys/recuerdos-ai:0.5.0-rc1}"   # image tags carry no leading "v"
+IMAGE="${IMAGE:-ghcr.io/cooldevguys/recuerdos-ai:0.5.0-rc4}"   # image tags carry no leading "v"
 VOLUME="${VOLUME:-recuerdos-ai-data}"
 LIMIT="${LIMIT:-5}"                 # the k the plan's gates are written on
-WANT_VERSION="${WANT_VERSION:-0.5.0-rc1}"
+WANT_VERSION="${WANT_VERSION:-0.5.0-rc4}"
 
 mkdir -p "$OUT"
+# $OUT is stable on purpose (queries.toml and probe.toml live there), so the
+# previous run's results are cleared first: a step this run skips — M3 with
+# rerank off — must leave no file behind, or the bundle ships an old reading
+# as if it were new.
+rm -f "$OUT"/00-config.txt "$OUT"/m[0-9]-*.txt "$OUT"/m[0-9]-*.json \
+      "$OUT"/{base,noslot,delta0,delta02,delta05,on,rerankoff,replace,weight2}.toml
 
 # ── which shape is this deployment? ─────────────────────────────────────────
 # The knobs this script measures must never arrive from the environment: figment

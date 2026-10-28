@@ -3,85 +3,21 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-## v0.4.0 — Recall quality, and an optional cross-encoder reranker
+## Unreleased
 
-Two measured recall defects are fixed, and a second stage that had been
-built and rejected once before is added — this time with the measurements
-that justify it.
+- **The version number tracks the tag again.** `Cargo.toml` had stayed at `0.5.0-rc1` through the rc2
+  and rc3 tags, so those binaries report `recuerdos-ai 0.5.0-rc1`; it is now `0.5.0-rc4`, and the release
+  workflow refuses a tag whose version differs from `Cargo.toml`.
+- **`scripts/field-measure.sh` clears its previous results before measuring**, so a step that is
+  skipped (M3 with rerank off) no longer leaves an old run's file in the new bundle; its version
+  defaults follow the release.
+- CHANGELOG: `v0.4.0` moved back into version order.
 
-A cross-encoder reads the query and one candidate *together*, which no
-retrieval leg ever does. It was tried during the graph work and reverted:
-neutral on a small corpus, a second gigabyte on the hot path. Before
-trusting it again we fixed what made the fused list wrong in the first
-place, grew the eval set to 108 memories and 59 cases, and ran 81 grid
-cells — four models, two strategies, three depths, four weights. It earned
-**+5.8 precision@1**. It also costs 1.1 GB of weights and +71 ms at p95, so
-it ships **off by default**, with the tools to judge it against your own
-memories before you spend either.
+## v0.5.0-rc2 / rc3 — the field host answered the questions rc1 asked, and recall reads a memory's labels
 
-- **The keyword leg stopped matching stopwords.** "what do I use for data
-  storage" matched any memory containing *the*, *do* or *use* — BM25 was
-  indexing question words as if they carried meaning, which inflated noise
-  into the top ranks. The analyzer now drops the Lucene English list plus
-  question words, auxiliaries and pronouns, and deliberately keeps `use`,
-  `user` and `prefer`, which are words people search for in a technical
-  store. Measured on the committed corpus: `precision@1` **62.5% → 65.4%**,
-  and abstention on questions the store cannot answer **25% → 75%** — a
-  memory service that always answers something is one you stop trusting.
-  The keyword index is versioned, so the first start after the upgrade
-  rebuilds it from the `memories` table: no model calls, seconds at personal
-  scale, and `reindex --text` does the same by hand
-  ([deployment.md](deployment.md#6-upgrade)).
-- **Relevance is calibrated per embedding model.** Relevance subtracts the
-  cosine at which a model says nothing before rescaling, and that floor is a
-  property of the model — it differs by more than **0.15** between the two
-  shipped embedders. With one constant (0.5, measured against the default
-  `bge-small-en-v1.5`), switching `[embeddings].model` silently miscalibrated
-  every relevance number: either noise sailed past the floor or real answers
-  were subtracted away. `[retrieval].similarity_baseline` now defaults from a
-  measured per-model map (`gemini-embedding-2` → 0.46); a model with no
-  measured entry falls back to 0.5 **with a warning at startup**, and
-  `recuerdos-ai calibrate` produces the number. *Behaviour change if you use a
-  hosted embedder: the relevance numbers move.*
-- **`[rerank]` — an optional second stage, off by default.** `mode = "off" |
-  "shadow" | "on"`. `shadow` scores every real recall and logs what *would*
-  have changed (ids and ranks, never content) while serving the old order —
-  how the stage is judged on traffic you didn't have to invent; `on` serves
-  the reranked order. The tuned default (`bge-reranker-base`, fused as an
-  RRF leg at weight 1.0, depth 10) measures **+5.8 precision@1, +2.7 MRR,
-  +0.3 recall@5** with no case kind regressing, for **+71 ms p95** added to a
-  recall, 1.1 GB of weights and ~1.5 GiB RAM per inference. `off` is a hard
-  no-op: nothing loads, nothing downloads, the release image grows by nothing,
-  and recall is byte-identical to a build without the feature. The model is
-  English; the two multilingual candidates are measured and costed in
-  [configuration.md](configuration.md#if-a-model-is-too-big-for-your-box).
-- **`rerank audit` judges it on your store, not on our corpus.** It replays
-  your queries over your real memories twice — with and without the stage —
-  and prints both orderings, how often the head moved and what it cost. It
-  writes nothing, so the daemon can stay running, and it is the only
-  supported way to run the stage over an existing corpus: there is
-  deliberately no "rerank everything" command, because a rerank score is a
-  property of a query against a candidate list, not of a stored memory
-  ([evaluation.md](evaluation.md)).
-- **A slow reranker can cost latency, never a request.** Past `timeout_ms`
-  (default 250, ~3.5× the tuned model's measured p95) the stage is dropped
-  and the fused order is served with a warning. `max_concurrency` (default 1)
-  bounds how many copies of the model your box holds, because each inference
-  is another resident copy of the weights.
-- **`matched.rerank_rank` and `rerank_score`** appear in a recall result only
-  when the stage is on, so you can see which memories the second opinion
-  promoted. Nothing a client has to send changed; the Python SDK gained the
-  two optional fields.
-- **Fixed: Gemini embedding batches larger than the API's cap.**
-  `batchEmbedContents` accepts at most 100 inputs, so a `reindex` or a
-  consolidation pass over a store of any size failed with HTTP 400. The
-  adapter now chunks the input and preserves order.
-- **Getting the weights where they need to be.** `warm-models` downloads the
-  rerank model too when the config enables one, and the image can bake it in:
-  `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
-  carries no rerank model, since the default does not use one.
+`v0.5.0-rc3` is `rc2` plus the release fix at the end of this list: **use rc3** — rc2's x86_64 Linux
+binary needs glibc 2.43. Both binaries report `0.5.0-rc1` (see Unreleased).
 
-## Unreleased — the field host answered the questions rc1 asked, and one answer changes a default
 
 Deployed measurements are in. [`recall-quality-plan.md`](../ai-specs/recall-quality-plan.md) §17 now
 carries the first readings taken against a live personal store running `v0.5.0-rc1`: 18 questions
@@ -298,6 +234,84 @@ whose config was being reviewed when it turned up.
   the bare-binary case, where `DynamicUser=` or `ProtectHome=` can leave the
   cache directory unwritable and the download has nowhere to land
   ([deployment.md](deployment.md#optional-second-stage-reranking)).
+
+## v0.4.0 — Recall quality, and an optional cross-encoder reranker
+
+Two measured recall defects are fixed, and a second stage that had been
+built and rejected once before is added — this time with the measurements
+that justify it.
+
+A cross-encoder reads the query and one candidate *together*, which no
+retrieval leg ever does. It was tried during the graph work and reverted:
+neutral on a small corpus, a second gigabyte on the hot path. Before
+trusting it again we fixed what made the fused list wrong in the first
+place, grew the eval set to 108 memories and 59 cases, and ran 81 grid
+cells — four models, two strategies, three depths, four weights. It earned
+**+5.8 precision@1**. It also costs 1.1 GB of weights and +71 ms at p95, so
+it ships **off by default**, with the tools to judge it against your own
+memories before you spend either.
+
+- **The keyword leg stopped matching stopwords.** "what do I use for data
+  storage" matched any memory containing *the*, *do* or *use* — BM25 was
+  indexing question words as if they carried meaning, which inflated noise
+  into the top ranks. The analyzer now drops the Lucene English list plus
+  question words, auxiliaries and pronouns, and deliberately keeps `use`,
+  `user` and `prefer`, which are words people search for in a technical
+  store. Measured on the committed corpus: `precision@1` **62.5% → 65.4%**,
+  and abstention on questions the store cannot answer **25% → 75%** — a
+  memory service that always answers something is one you stop trusting.
+  The keyword index is versioned, so the first start after the upgrade
+  rebuilds it from the `memories` table: no model calls, seconds at personal
+  scale, and `reindex --text` does the same by hand
+  ([deployment.md](deployment.md#6-upgrade)).
+- **Relevance is calibrated per embedding model.** Relevance subtracts the
+  cosine at which a model says nothing before rescaling, and that floor is a
+  property of the model — it differs by more than **0.15** between the two
+  shipped embedders. With one constant (0.5, measured against the default
+  `bge-small-en-v1.5`), switching `[embeddings].model` silently miscalibrated
+  every relevance number: either noise sailed past the floor or real answers
+  were subtracted away. `[retrieval].similarity_baseline` now defaults from a
+  measured per-model map (`gemini-embedding-2` → 0.46); a model with no
+  measured entry falls back to 0.5 **with a warning at startup**, and
+  `recuerdos-ai calibrate` produces the number. *Behaviour change if you use a
+  hosted embedder: the relevance numbers move.*
+- **`[rerank]` — an optional second stage, off by default.** `mode = "off" |
+  "shadow" | "on"`. `shadow` scores every real recall and logs what *would*
+  have changed (ids and ranks, never content) while serving the old order —
+  how the stage is judged on traffic you didn't have to invent; `on` serves
+  the reranked order. The tuned default (`bge-reranker-base`, fused as an
+  RRF leg at weight 1.0, depth 10) measures **+5.8 precision@1, +2.7 MRR,
+  +0.3 recall@5** with no case kind regressing, for **+71 ms p95** added to a
+  recall, 1.1 GB of weights and ~1.5 GiB RAM per inference. `off` is a hard
+  no-op: nothing loads, nothing downloads, the release image grows by nothing,
+  and recall is byte-identical to a build without the feature. The model is
+  English; the two multilingual candidates are measured and costed in
+  [configuration.md](configuration.md#if-a-model-is-too-big-for-your-box).
+- **`rerank audit` judges it on your store, not on our corpus.** It replays
+  your queries over your real memories twice — with and without the stage —
+  and prints both orderings, how often the head moved and what it cost. It
+  writes nothing, so the daemon can stay running, and it is the only
+  supported way to run the stage over an existing corpus: there is
+  deliberately no "rerank everything" command, because a rerank score is a
+  property of a query against a candidate list, not of a stored memory
+  ([evaluation.md](evaluation.md)).
+- **A slow reranker can cost latency, never a request.** Past `timeout_ms`
+  (default 250, ~3.5× the tuned model's measured p95) the stage is dropped
+  and the fused order is served with a warning. `max_concurrency` (default 1)
+  bounds how many copies of the model your box holds, because each inference
+  is another resident copy of the weights.
+- **`matched.rerank_rank` and `rerank_score`** appear in a recall result only
+  when the stage is on, so you can see which memories the second opinion
+  promoted. Nothing a client has to send changed; the Python SDK gained the
+  two optional fields.
+- **Fixed: Gemini embedding batches larger than the API's cap.**
+  `batchEmbedContents` accepts at most 100 inputs, so a `reindex` or a
+  consolidation pass over a store of any size failed with HTTP 400. The
+  adapter now chunks the input and preserves order.
+- **Getting the weights where they need to be.** `warm-models` downloads the
+  rerank model too when the config enables one, and the image can bake it in:
+  `docker build --build-arg RERANK_MODEL=bge-reranker-base`. The default image
+  carries no rerank model, since the default does not use one.
 
 ## v0.2.1
 
