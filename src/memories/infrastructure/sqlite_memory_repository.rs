@@ -98,9 +98,10 @@ impl SqliteMemoryRepository {
         RaError::Validation(format!(
             "this store was built with embedding model {stored_model:?} ({stored_dimensions} \
              dimensions) but the service is configured for {:?} ({}). Vectors from different \
-             models are not comparable. Either restore the previous [embeddings] settings, or \
-             run `recuerdos-ai reindex` (with the daemon stopped) to re-embed every memory \
-             under the new model in place.",
+             models — or built from different [embeddings].document_text — are not comparable. \
+             Either restore the previous [embeddings] settings, or run `recuerdos-ai reindex` \
+             (with the daemon stopped) to re-embed every memory under the new settings in \
+             place.",
             self.embedding_model, self.dimensions
         ))
     }

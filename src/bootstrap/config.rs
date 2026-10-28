@@ -181,6 +181,18 @@ pub struct EmbeddingsConfig {
     /// caps the batch, e.g. `10` for Alibaba DashScope's OpenAI-compatible
     /// endpoint. Ignored by the local provider, which batches in-process.
     pub max_batch_size: usize,
+    /// What each memory's vector is built from: `content` (the sentence
+    /// alone) or `enriched` (a header naming its category, sub-label and
+    /// tags, then the sentence) — see `memories::domain::document_text`.
+    /// Part of the collection pin, so changing it on an existing store is a
+    /// `reindex`, like changing the model.
+    pub document_text: String,
+    /// Text prepended to every recall *query* before it is embedded, for
+    /// models trained with a retrieval instruction (BGE v1.5:
+    /// "Represent this sentence for searching relevant passages: ").
+    /// Empty — the default — sends the query as typed. Query-side only, so
+    /// it can change at any time without a reindex.
+    pub query_instruction: String,
 }
 
 impl Default for EmbeddingsConfig {
@@ -197,6 +209,10 @@ impl Default for EmbeddingsConfig {
             // 0 = "no cap", preserving the send-it-all behaviour for
             // providers (OpenAI, most gateways) that accept large batches.
             max_batch_size: 0,
+            // The format every store before this option was built with, so
+            // an upgrade opens existing stores without a reindex.
+            document_text: "content".to_string(),
+            query_instruction: String::new(),
         }
     }
 }
@@ -876,6 +892,17 @@ impl AppConfig {
         if self.embeddings.provider == "local" && self.embeddings.cache_dir.trim().is_empty() {
             issues.push("[embeddings].cache_dir is empty".to_string());
         }
+        if crate::memories::domain::document_text::DocumentText::parse(
+            &self.embeddings.document_text,
+        )
+        .is_err()
+        {
+            issues.push(format!(
+                "[embeddings].document_text {:?} is not one of {:?}",
+                self.embeddings.document_text,
+                crate::memories::domain::document_text::DocumentText::NAMES
+            ));
+        }
 
         if !UNDERSTANDING_PROVIDERS.contains(&self.understanding.provider.as_str()) {
             issues.push(format!(
@@ -1067,6 +1094,14 @@ impl AppConfig {
     /// Resolve `embeddings.cache_dir`, expanding a leading `~`.
     pub fn model_cache_dir(&self) -> PathBuf {
         expand_home(&self.embeddings.cache_dir)
+    }
+
+    /// What memory vectors are built from. Validated at load, so the
+    /// fallback is unreachable for a loaded config; it only keeps a
+    /// hand-built one (tests) from panicking.
+    pub fn document_text(&self) -> crate::memories::domain::document_text::DocumentText {
+        crate::memories::domain::document_text::DocumentText::parse(&self.embeddings.document_text)
+            .unwrap_or_default()
     }
 }
 
@@ -1306,6 +1341,43 @@ mod tests {
 
             let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
             assert!(!config.rate_limit.enabled);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn an_unknown_document_text_is_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[embeddings]\ndocument_text = \"tags\"\n",
+            )?;
+
+            let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
+            assert!(
+                err.0
+                    .iter()
+                    .any(|m| m.contains("[embeddings].document_text")),
+                "{:?}",
+                err.0
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn enriched_document_text_loads() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[embeddings]\ndocument_text = \"enriched\"\n",
+            )?;
+
+            let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
+            assert_eq!(
+                config.document_text(),
+                crate::memories::domain::document_text::DocumentText::Enriched
+            );
             Ok(())
         });
     }

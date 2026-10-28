@@ -1051,6 +1051,14 @@ pub const DEFAULT_SIMILARITY_BASELINE: f32 = 0.5;
 ///   shipped `0.25` floor requires `> 0.44`; answers down to raw
 ///   `0.611` survive it while `b ≤ 0.481`, so `0.46` sits mid-window:
 ///   noise corrects to `0.222`, a `0.611` answer to `0.280`.
+/// - `bge-small-en-v1.5+enriched-v1` → `0.53`: the same model over
+///   `[embeddings].document_text = "enriched"` vectors (the key is the
+///   collection pin, see `memories::domain::document_text`). The shared
+///   category header lifts every cosine by about `0.02` — noise ceiling
+///   `0.611 → 0.631`, floor-gated answers `0.528 → 0.551` — so the bare
+///   model's `0.5` would let one `negative` case through the `0.25` floor
+///   (noise corrects to `0.263`). `0.53` restores the margin the content
+///   row has: noise corrects to `0.215`.
 ///
 /// What the measurement *also* says, and `0.46` cannot fix: two
 /// floor-gated answers sit **below** the noise ceiling — raw `0.562` for
@@ -1070,10 +1078,14 @@ pub const DEFAULT_SIMILARITY_BASELINE: f32 = 0.5;
 /// model falls back to [`DEFAULT_SIMILARITY_BASELINE`] with a `warn!` at
 /// startup, which is deliberately loud because every relevance threshold
 /// in the system silently shifts if this number is wrong.
-pub const SIMILARITY_BASELINES: &[(&str, f32)] =
-    &[("bge-small-en-v1.5", 0.5), ("gemini-embedding-2", 0.46)];
+pub const SIMILARITY_BASELINES: &[(&str, f32)] = &[
+    ("bge-small-en-v1.5", 0.5),
+    ("gemini-embedding-2", 0.46),
+    ("bge-small-en-v1.5+enriched-v1", 0.53),
+];
 
-/// The measured baseline for `model_id`, or `None` when the model has
+/// The measured baseline for `model_id` — a model id, or a collection pin
+/// naming a model and its document format — or `None` when it has
 /// never been calibrated (the caller falls back to
 /// [`DEFAULT_SIMILARITY_BASELINE`] and warns).
 pub fn default_similarity_baseline_for(model_id: &str) -> Option<f32> {

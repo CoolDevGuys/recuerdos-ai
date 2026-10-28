@@ -3,6 +3,7 @@
 //! `Reranker` contracts consumed by this context's use cases.
 
 pub mod category;
+pub mod document_text;
 pub mod embedder;
 pub mod entity_graph;
 pub mod entity_key;

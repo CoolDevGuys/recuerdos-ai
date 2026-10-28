@@ -687,6 +687,11 @@ retrieval quality.
 > deployment on another embedder gets a warning rather than silence. Reopening this phase needs a
 > second embedder actually deployed and measured, not another read of the model cards. See
 > [`recall-quality-status.md`](recall-quality-status.md) §5.
+>
+> **2026-10-27:** the query half exists now as `[embeddings].query_instruction`, provider-agnostic and
+> off by default, and the "pin fingerprint" idea shipped as the document format in the pin
+> ([`concept-recall-plan.md`](concept-recall-plan.md) §4). Measured on bge-small: the BGE instruction
+> helps bare-content vectors slightly and adds nothing on top of enriched vectors.
 
 ### Tasks
 

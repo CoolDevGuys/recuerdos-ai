@@ -21,6 +21,7 @@
 //!    state that can be rebuilt.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::domain::document_text::DocumentText;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
@@ -36,6 +37,7 @@ pub struct DirectMemorySaver {
     text: Arc<dyn TextIndex>,
     embedder: Arc<dyn Embedder>,
     clock: Arc<dyn Clock>,
+    document_text: DocumentText,
 }
 
 impl DirectMemorySaver {
@@ -52,7 +54,15 @@ impl DirectMemorySaver {
             text,
             embedder,
             clock,
+            document_text: DocumentText::default(),
         }
+    }
+
+    /// What the vector is built from — see [`DocumentText`]. Must match the
+    /// store's pin, which the wiring guarantees by deriving both from config.
+    pub fn with_document_text(mut self, document_text: DocumentText) -> Self {
+        self.document_text = document_text;
+        self
     }
 
     pub fn execute(&self, context: &UserContext, new: NewMemory, actor: &str) -> Result<Memory> {
@@ -60,7 +70,7 @@ impl DirectMemorySaver {
 
         let embedding = self
             .embedder
-            .embed_one(memory.content(), EmbeddingTask::Document)?;
+            .embed_one(&self.document_text.of(&memory), EmbeddingTask::Document)?;
 
         self.memories.insert(context, &memory, actor)?;
 
@@ -122,6 +132,35 @@ mod tests {
         );
         assert!(fixture.vectors.contains(memory.id()));
         assert!(fixture.text.contains(memory.id()));
+    }
+
+    #[test]
+    fn enriched_text_puts_the_labels_in_the_vector() {
+        let fixture = Fixture::new();
+        let mut new = new_memory("User prefers pnpm");
+        new.tags = vec!["package-management".to_string()];
+
+        let memory = fixture
+            .saver()
+            .with_document_text(DocumentText::Enriched)
+            .execute(&fixture.alex, new, "test")
+            .unwrap();
+
+        // The stored vector is the enriched text's, exactly: searching with
+        // that text's embedding finds it at full similarity, which the bare
+        // sentence's embedding does not.
+        let search = |text: &str| {
+            let query = fixture
+                .embedder
+                .embed_one(text, EmbeddingTask::Query)
+                .unwrap();
+            fixture.vectors.search(&fixture.alex, &query, 1).unwrap()[0]
+        };
+        let enriched = search("Coding preference (package-management). User prefers pnpm");
+        let bare = search("User prefers pnpm");
+        assert_eq!(enriched.0, memory.id());
+        assert!((enriched.1 - 1.0).abs() < 1e-5, "got {}", enriched.1);
+        assert!(bare.1 < enriched.1);
     }
 
     #[test]

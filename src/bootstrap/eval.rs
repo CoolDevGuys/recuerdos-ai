@@ -112,9 +112,9 @@ pub(crate) struct SeedMemory {
     pub(crate) content: String,
     pub(crate) category: String,
     #[serde(default)]
-    subcategory: Option<String>,
+    pub(crate) subcategory: Option<String>,
     #[serde(default)]
-    tags: Vec<String>,
+    pub(crate) tags: Vec<String>,
     /// Named things the memory refers to. Projected into the graph on
     /// seeding (Task 7.3.6) so the graph leg has entities to seed a hop
     /// from — the same entities production's extraction pipeline attaches

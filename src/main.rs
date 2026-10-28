@@ -1046,6 +1046,7 @@ fn run_reindex(text: bool, vectors: bool, config_path: Option<&Path>) -> Result<
             std::sync::Arc::clone(&database),
             std::sync::Arc::clone(&embedder),
         )
+        .with_document_text(config.document_text())
         .execute()
         .map_err(|e| e.to_string())?;
 
@@ -1142,6 +1143,15 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         println!("  base_url   {}", display_base_url(&embeddings.base_url));
         println!("  api_key    {}", key_status(&embeddings.api_key_env));
     }
+    // Both print in every state: which text the vectors are built from is
+    // the one embedding setting that also decides which store will open, so
+    // "content" is an answer an operator checking a deploy needs to see.
+    println!("  document_text {}", embeddings.document_text);
+    if embeddings.query_instruction.trim().is_empty() {
+        println!("  query_instruction none");
+    } else {
+        println!("  query_instruction {:?}", embeddings.query_instruction);
+    }
 
     println!("\nunderstanding");
     println!("  provider   {}", understanding.provider);
@@ -1173,6 +1183,18 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         retrieval.recency_half_life_days
     );
     println!("  floor      {}", retrieval.min_relevance);
+    // The baseline the ranker will actually use — explicit, or the map row
+    // for this model *and* document format — because an explicit value
+    // silently outranks the enriched row (docs/configuration.md).
+    println!(
+        "  similarity_baseline {} ({})",
+        bootstrap::memories_wiring::resolve_similarity_baseline(&config, &embeddings.model),
+        if retrieval.similarity_baseline.is_some() {
+            "explicit"
+        } else {
+            "per-model default"
+        }
+    );
     println!("  relevance_weight {}", retrieval.relevance_weight);
 
     // The rerank stage prints in every mode: `off` is its effective
