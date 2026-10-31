@@ -54,7 +54,7 @@ Line references below are to `main` at that commit.
 
 All runs use `eval` on `main` @ `bfe1d57`, default config (bge-small-en-v1.5, the same embedder the
 field host runs now), no reranker, in the dev container. Every variant is env-gated in
-[`experiments/recall-accuracy-2026-10-17.patch`](experiments/recall-accuracy-2026-10-17.patch),
+`experiments/recall-accuracy-2026-10-17.patch` (deleted 2026-11-01 — it no longer applied to main; recover with `git show 490c45a:ai-specs/experiments/recall-accuracy-2026-10-17.patch`),
 so the control run is byte-identical to `main`. The control reproduces the committed
 baseline exactly.
 

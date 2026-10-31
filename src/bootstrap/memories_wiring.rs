@@ -26,7 +26,6 @@ use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
 use crate::providers::infrastructure::chat::transport;
 use crate::providers::infrastructure::embeddings::fastembed_embedder::FastembedEmbedder;
 use crate::providers::infrastructure::embeddings::gemini_embedder::{self, GeminiEmbedder};
-use crate::providers::infrastructure::embeddings::instructed_embedder::InstructedEmbedder;
 use crate::providers::infrastructure::embeddings::remote_embedder::{
     EmbeddingApi, OLLAMA_DEFAULT_BASE_URL, OPENAI_DEFAULT_BASE_URL, RemoteEmbedder,
 };
@@ -393,7 +392,7 @@ fn assemble_recall_base(
 /// The `rerank audit` alias calls this twice with the *same* config, forcing
 /// the mode `Off` then `On`; `recall audit --compare-config` calls it once per
 /// config, so the whole config is what differs — graph weights, recency,
-/// hybrid on/off, the ranker's strategy. The guarantees are unchanged from the
+/// the ranker's strategy. The guarantees are unchanged from the
 /// rerank audit: the keyword index is read-only, nothing on this path writes,
 /// and the daemon may stay running.
 ///
@@ -578,15 +577,6 @@ fn load_reranker(config: &AppConfig, max_concurrency: usize) -> Result<Fastembed
 }
 
 pub(crate) fn build_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
-    // The instruction wraps whichever provider serves the model: BGE wants
-    // it whether it runs in-process or behind an OpenAI-compatible server.
-    Ok(InstructedEmbedder::wrap(
-        build_provider_embedder(config)?,
-        &config.embeddings.query_instruction,
-    ))
-}
-
-fn build_provider_embedder(config: &AppConfig) -> Result<Arc<dyn Embedder>> {
     let embeddings = &config.embeddings;
     let configured_base = embeddings.base_url.trim();
     let base_url = |default: &str| {

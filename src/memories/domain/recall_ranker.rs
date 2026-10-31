@@ -15,7 +15,7 @@
 //! vector leg, exact identifiers (`useQuery`, `pnpm`) from the keyword
 //! leg.
 //!
-//! # Why recency and confidence are bounded multipliers
+//! # Why recency is a bounded multiplier
 //!
 //! project-plan.md §8 gives the shape `rrf × recency × confidence`. Taken
 //! literally with an exponential decay, a two-year-old memory at a 90-day
@@ -23,7 +23,7 @@
 //! store whose whole job is remembering an architecture decision made
 //! last year.
 //!
-//! So both multipliers are floored into a narrow band. The width of that
+//! So the multiplier is floored into a narrow band. The width of that
 //! band is not a taste call — it has to be calibrated against RRF's rank
 //! spacing, and getting it wrong silently inverts the ranking:
 //!
@@ -37,21 +37,16 @@
 //!   near-adjacent results, not enough to leapfrog a memory that is many
 //!   ranks better.
 //!
-//! # Why importance shares confidence's band instead of getting its own
+//! # Why confidence and importance no longer touch the order
 //!
-//! Importance (`consolidation::domain::decay`) is the third signal, and
-//! it is deliberately *not* a third multiplier. Each floored band spans
-//! 1.25x, and they compound: two bands already span 1.56x, against the
-//! 1.33x that separates rank 1 from rank 20. A third would take the
-//! product to 1.95x and quietly make decay able to bury the best match
-//! in the corpus — precisely the failure the floor exists to prevent.
-//!
-//! So confidence and importance are multiplied *first* and floored
-//! *once*. Both answer the same question — how much is this memory
-//! worth, independent of the query — and treating them as one band means
-//! adding decay cannot widen the spread beyond what confidence alone
-//! already did. That property is pinned by a test below; anything that
-//! adds a fourth signal should join this band, not open another.
+//! They used to share a second floored band (`confidence × importance`).
+//! Measured on a real store it was a feedback loop: importance rises with
+//! use (`consolidation::domain::decay`), so a memory recalled often — a
+//! short, generically phrased one matches many questions — outranked better
+//! matches for every question after. Removing the band raised preference
+//! precision@1 63.6 → 77.3 with no question worse, and the eval did not
+//! move (concept-recall-plan.md §9). Both values stay on the memory: the
+//! profile digest orders by them, and nothing in recall does.
 //!
 //! # Why relevance finally gets a multiplier, and how wide it may be
 //!
@@ -130,7 +125,7 @@
 //! stages commute, which is pinned — that is what makes "δ then rerank" and
 //! "rerank then δ" the same arithmetic.
 //!
-//! Relevance leads; recency and quality break ties among comparably relevant
+//! Relevance leads; recency breaks ties among comparably relevant
 //! results. Since Phase 2 the first clause is arithmetic rather than aspiration:
 //! relevance is in the score, not only in the report. All of it is pinned by
 //! tests below.
@@ -146,7 +141,7 @@
 //! ## `Rrf { weight }` — a fourth fusion leg
 //!
 //! The rerank list joins the RRF sum as `weight × 1/(k + rank)`, so the
-//! bounded recency/quality band applies to it exactly as to the other
+//! bounded recency band applies to it exactly as to the other
 //! legs. The leg arithmetic says what each weight *means*; the Phase 7
 //! grid (§12) says what it *buys*, and above 1 the two disagreed:
 //!
@@ -171,10 +166,10 @@
 //! ## `Replace` — the rerank score becomes the head's head
 //!
 //! The reranked candidates are re-ordered by their raw scores multiplied
-//! by the *same* [`MULTIPLIER_FLOOR`]-bounded recency/quality band, and
+//! by the *same* [`MULTIPLIER_FLOOR`]-bounded recency band, and
 //! form the head; every memory the reranker never saw keeps its fused
 //! relative order directly behind it. Because the band spans only 1.25×
-//! ([`MULTIPLIER_FLOOR`] = 0.8), recency and quality can decide ties and
+//! ([`MULTIPLIER_FLOOR`] = 0.8), recency can decide ties and
 //! gaps under 25%, and cannot bury a clear rerank-score winner — the
 //! identical argument that bounds the other multipliers, applied to a new
 //! signal instead of a new band (invariant from §"Why importance shares
@@ -236,7 +231,7 @@ pub enum RerankStrategy {
     /// grid numbers behind that).
     Rrf { weight: f32 },
     /// The reranked head is ordered by raw score × the bounded
-    /// recency/quality band; everything the reranker never saw follows
+    /// recency band; everything the reranker never saw follows
     /// in its fused order. Assumes non-negative, mutually comparable
     /// raw scores — the Phase 5 adapter squashes every model's logits into
     /// `(0, 1)` for exactly this contract, monotonically so no rank moves.
@@ -547,7 +542,7 @@ impl RecallRanker {
         scored
     }
 
-    /// Lets relevance compete with recency and quality inside the fused bands
+    /// Lets relevance compete with recency inside the fused bands
     /// (recall-quality-plan.md Phase 2).
     ///
     /// `score ×= affinity(relevance)` for every candidate, then re-sort. The
@@ -603,7 +598,7 @@ impl RecallRanker {
     /// "no reranker, no change" guarantee a code path rather than an
     /// arithmetic coincidence.
     ///
-    /// Under both strategies the bounded recency/quality band survives:
+    /// Under both strategies the bounded recency band survives:
     /// `Rrf` recomputes the sum inside the same band, and `Replace`
     /// multiplies the raw score by that same band, so the rerank stage
     /// adds a signal without opening a multiplier of its own.
@@ -656,11 +651,10 @@ impl RecallRanker {
                             scored.rerank_score = Some(raw);
                             // The band the whole module calibrates, applied
                             // to the model's own number: ties and gaps
-                            // under 1.25× are for recency and quality,
+                            // under 1.25× are for recency,
                             // anything wider is the reranker's call.
-                            scored.score = raw
-                                * self.recency_multiplier(scored.memory.created_at(), now)
-                                * quality(&scored.memory);
+                            scored.score =
+                                raw * self.recency_multiplier(scored.memory.created_at(), now);
                             head.push(scored);
                         }
                         // The tail keeps its fused relative order — the
@@ -686,7 +680,7 @@ impl RecallRanker {
             + reciprocal_rank(detail.bm25_rank)
             + self.graph_relevance(detail);
 
-        relevance * self.recency_multiplier(memory.created_at(), now) * quality(memory)
+        relevance * self.recency_multiplier(memory.created_at(), now)
     }
 
     /// The graph leg's contribution to relevance, after the two 7.3.7
@@ -886,7 +880,7 @@ const BM25_SATURATION: f32 = 8.0;
 /// below asserts that they still do against measured numbers.
 pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.25;
 
-/// How strongly relevance competes with recency and quality inside the fused
+/// How strongly relevance competes with recency inside the fused
 /// bands (`[retrieval].relevance_weight`, recall-quality-plan.md Phase 2).
 ///
 /// `0.0` is not "a very small weight": [`RecallRanker::apply_relevance`]
@@ -1146,13 +1140,6 @@ impl RelevanceCalibration {
     }
 }
 
-/// How much a memory is worth regardless of the query: how sure we are
-/// of it, and how much it is actually used. One band for both — see the
-/// module docs.
-fn quality(memory: &Memory) -> f32 {
-    floored(memory.confidence() * memory.importance())
-}
-
 /// Maps `0.0..=1.0` onto `MULTIPLIER_FLOOR..=1.0`.
 fn floored(value: f32) -> f32 {
     MULTIPLIER_FLOOR + (1.0 - MULTIPLIER_FLOOR) * value.clamp(0.0, 1.0)
@@ -1208,97 +1195,6 @@ mod tests {
 
     fn ordered(scored: &[ScoredMemory]) -> Vec<MemoryId> {
         scored.iter().map(|s| s.memory.id()).collect()
-    }
-
-    #[test]
-    fn a_decayed_memory_loses_a_tie_to_one_in_active_use() {
-        // What importance decay buys: two equally relevant memories,
-        // and the one people actually read comes first.
-        let used = memory().with_importance(1.0);
-        let ignored = memory().with_importance(crate::consolidation::domain::decay::MIN_IMPORTANCE);
-
-        let result = ranker().rank(
-            &ids(&[&ignored, &used]),
-            &ids(&[&ignored, &used]),
-            vec![used.clone(), ignored.clone()],
-            now(),
-        );
-
-        assert_eq!(
-            ordered(&result),
-            [used.id(), ignored.id()],
-            "the decayed memory outranked the one in active use"
-        );
-    }
-
-    #[test]
-    fn adding_decay_did_not_widen_the_multiplier_band() {
-        // The load-bearing property. Each floored band spans 1.25x and
-        // they compound; the bands are calibrated against RRF's rank
-        // spacing, so an extra one silently changes which memory wins
-        // every close call in the system. Confidence and importance
-        // therefore share a band: the worst case a memory can suffer for
-        // being uncertain *and* unused is the same MULTIPLIER_FLOOR it
-        // already suffered for being uncertain alone.
-        let best = memory_aged(0, 1.0).with_importance(1.0);
-        let worst_confidence = memory_aged(0, 0.0).with_importance(1.0);
-        let worst_both = memory_aged(0, 0.0).with_importance(0.0);
-
-        assert!((quality(&best) - 1.0).abs() < 1e-6);
-        assert!((quality(&worst_confidence) - MULTIPLIER_FLOOR).abs() < 1e-6);
-        assert!(
-            (quality(&worst_both) - MULTIPLIER_FLOOR).abs() < 1e-6,
-            "decay opened a second band: quality fell to {}, below the floor {MULTIPLIER_FLOOR}",
-            quality(&worst_both)
-        );
-    }
-
-    #[test]
-    fn decay_reorders_neighbours_without_leapfrogging_many_ranks() {
-        // The band is meant to break ties, not to re-sort the corpus.
-        // A decayed memory one rank better loses; a decayed memory many
-        // ranks better still wins.
-        let decayed = memory().with_importance(0.0);
-        let used = memory().with_importance(1.0);
-
-        let adjacent = ranker().rank(
-            &ids(&[&decayed, &used]),
-            &ids(&[&decayed, &used]),
-            vec![decayed.clone(), used.clone()],
-            now(),
-        );
-        assert_eq!(
-            ordered(&adjacent)[0],
-            used.id(),
-            "decay should break a near-tie"
-        );
-
-        // Now put twenty places between them.
-        let filler: Vec<Memory> = (0..19).map(|_| memory()).collect();
-        let mut ranking = vec![&decayed];
-        ranking.extend(filler.iter());
-        ranking.push(&used);
-        let mut candidates = vec![decayed.clone(), used.clone()];
-        candidates.extend(filler.iter().cloned());
-
-        // Compared to each other rather than to the whole list: the
-        // filler sits one rank behind the decayed memory, and a 1.25x
-        // band does swamp a single rank — that is the band doing its job.
-        // What it must not do is swamp twenty.
-        let distant = ordered(&ranker().rank(&ids(&ranking), &ids(&ranking), candidates, now()));
-        let place = |id| distant.iter().position(|found| *found == id).unwrap();
-
-        assert!(
-            place(decayed.id()) < place(used.id()),
-            "decay leapfrogged twenty ranks and buried the better match"
-        );
-    }
-
-    #[test]
-    fn a_memory_nothing_has_measured_yet_ranks_as_it_always_did() {
-        // Importance defaults to 1.0, so a memory saved between two
-        // nightly runs is not penalised for not having been scored.
-        assert_eq!(memory().importance(), 1.0);
     }
 
     #[test]
@@ -1696,18 +1592,28 @@ mod tests {
     }
 
     #[test]
-    fn confidence_breaks_ties_between_equally_ranked_memories() {
-        let confident = memory_aged(0, 1.0);
-        let unsure = memory_aged(0, 0.1);
+    fn neither_confidence_nor_importance_reorders_recall() {
+        // Both used to be a floored multiplier on the score. On the field
+        // store that band cost preference precision@1 63.6 → 77.3 when
+        // removed and the eval did not move (concept-recall-plan.md §9):
+        // frequently recalled memories gained importance and outranked
+        // better matches. Ordering is relevance and recency now; these two
+        // stay on the memory for the profile digest and decay.
+        let unsure_and_unused = memory_aged(0, 0.0).with_importance(0.0);
+        let sure_and_used = memory_aged(0, 1.0).with_importance(1.0);
 
         let result = ranker().rank(
-            &ids(&[&unsure, &confident]),
-            &ids(&[&confident, &unsure]),
-            vec![unsure.clone(), confident.clone()],
+            &ids(&[&unsure_and_unused, &sure_and_used]),
+            &ids(&[&unsure_and_unused, &sure_and_used]),
+            vec![sure_and_used.clone(), unsure_and_unused.clone()],
             now(),
         );
 
-        assert_eq!(ordered(&result)[0], confident.id());
+        assert_eq!(ordered(&result)[0], unsure_and_unused.id());
+        assert!(
+            result[0].score > result[1].score,
+            "the better-ranked memory must win"
+        );
     }
 
     #[test]

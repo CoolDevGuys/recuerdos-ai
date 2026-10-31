@@ -2492,18 +2492,20 @@ fn re_recording_a_memory_preserves_an_edge_another_memory_closed() {
 }
 
 #[test]
-fn the_default_build_has_a_graph_and_disabling_it_removes_one() {
-    // The graph ships on by default as of Task 7.3.6 (the eval showed
-    // relational recall gaining with no other kind regressing). Turning it
-    // off is the escape hatch that restores the pre-graph behaviour exactly
-    // — recall consults no graph, and a build is byte-identical to one from
-    // before Task 7.3.
+fn the_default_build_has_no_graph_and_enabling_it_adds_one() {
+    // The graph ships off by default since v0.5.0-rc4: on a real store it
+    // displaced better matches (concept-recall-plan.md §9), and only the
+    // eval's multi-hop relational cases need it. Enabling it is opt-in.
     use crate::bootstrap::config::AppConfig;
 
-    let on = AppConfig::default();
-    assert!(on.graph.enabled, "the graph must default to on");
+    let off = AppConfig::default();
+    assert!(!off.graph.enabled, "the graph must default to off");
+    assert!(
+        !off.graph.extract_relations(),
+        "off asks ingest for no relations"
+    );
 
-    let mut off = AppConfig::default();
-    off.graph.enabled = false;
-    assert!(!off.graph.enabled);
+    let mut on = AppConfig::default();
+    on.graph.enabled = true;
+    assert!(on.graph.extract_relations());
 }

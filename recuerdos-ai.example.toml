@@ -96,10 +96,6 @@ max_batch_size = 0
 # similarity_baseline 0.53 — change [retrieval].similarity_baseline too if
 # you set it explicitly.
 document_text = "content"
-# Prepended to every recall query (never to stored memories) before it is
-# embedded, for models trained with a retrieval instruction — e.g.
-# "query: " for E5. Empty sends the query as typed; no reindex to change it.
-query_instruction = ""
 
 # Example — Alibaba DashScope (OpenAI-compatible), which caps the batch at 10:
 #   provider       = "openai-compat"
@@ -199,7 +195,6 @@ max_memories = 5000
 # Everything for this section belongs here, before the next `[table]` header:
 # TOML has no way to reopen a section, so a key written after `[rerank]` opens
 # below would define a *rerank* setting (and be ignored as an unknown one).
-hybrid = true
 default_limit = 8
 recency_half_life_days = 90
 
@@ -362,14 +357,14 @@ batch_size = 16
 # in docs/evaluation.md.
 
 [graph]
-# The entity/relation graph (Strategy B). On by default as of Task 7.3.6:
-# the eval measured relational recall@5 climbing 71.4% → 85.7% with no
-# other case kind regressing, so the third "connected to" leg ships in the
-# default build. It sits on top of plain semantic/keyword recall — a query
-# that names no known entity gets exactly the two-leg result. Turn it off
-# to restore the pre-graph behaviour: no hop, and no edges written on
-# ingest.
-enabled = true
+# The entity/relation graph (Strategy B). Off by default since v0.5.0-rc4.
+# It answers multi-hop relational questions ("who owns the decision about
+# the service that…") — the eval's relational recall@5 reads 85.7% with it,
+# 42.9% without. On a real store asking ordinary questions it displaced
+# better matches instead: precision@1 66.7% with it, 83.3% without. Turn it
+# on if your memories are people, teams and ownership chains; it then also
+# writes edges on ingest and asks the model for relations.
+enabled = false
 # When the graph is on, whether extraction also asks the model for
 # relations between a memory's entities (subject–predicate–object). Turn
 # off to keep the cheaper entity/co-occurrence graph without the extra

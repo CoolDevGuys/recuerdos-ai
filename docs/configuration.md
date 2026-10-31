@@ -67,17 +67,18 @@ with its default and an explanatory comment. Highlights:
   decay run regardless of provider — both are arithmetic. Merging
   duplicates needs `[understanding].provider`, because deciding whether
   two memories mean the same thing has no offline fallback.
-- `[graph].enabled` defaults to `true` — recall runs a third "connected to"
-  leg (an entity/relation graph hop) beside the semantic and keyword legs,
-  and ingest writes edges. It earns the default: the eval measured
-  relational recall@5 climbing 71.4% → 85.7% with no other case kind
-  regressing. It only fires when a query names an entity some memory of
-  yours declared, so a query that names nothing known gets the exact
-  two-leg result. `[graph].extract_relations` (also default `true`) is
-  whether ingest asks the model for the edges the hop walks — turn it off,
-  or turn `[graph].enabled` off entirely, to restore the pre-graph
-  behaviour and its lower token cost. A graph the extraction never filled
-  can be backfilled with `recuerdos-ai graph backfill`.
+- `[graph].enabled` defaults to `false` (since v0.5.0-rc4). On, recall runs a
+  third "connected to" leg (an entity/relation graph hop) beside the semantic and
+  keyword legs, and ingest writes edges. It is worth turning on for one shape of
+  question — multi-hop relational ones ("who owns the decision about the service
+  that…"): the eval's `relational` kind reads recall@5 **85.7%** with it and
+  **42.9%** without. On a real personal store whose questions are not that shape it
+  displaced better matches instead — precision@1 **66.7% on vs 83.3% off**, five
+  questions better and none worse with it off, and no latency difference either way
+  (ai-specs/concept-recall-plan.md §9). `[graph].extract_relations` (default
+  `true`) is whether ingest asks the model for the edges the hop walks; it has no
+  effect while the graph is off. A graph the extraction never filled can be
+  backfilled with `recuerdos-ai graph backfill`.
 - `[graph].rank_weight` (default `0.3`) and `[graph].unanchored_floor`
   (default `3`) tune how much the hop leg sways ranking. Weighting it below
   `1.0` lets the graph *add* relational recall without *displacing* a memory
@@ -194,10 +195,9 @@ orphaned.
 ```toml
 [embeddings]
 provider          = "local"                    # local | gemini | openai-compat | ollama
-model             = "bge-small-en-v1.5"        # or all-minilm-l6-v2
+model             = "bge-small-en-v1.5"
 cache_dir         = "~/.recuerdos-ai/models"    # local only
 document_text     = "content"                  # content | enriched — see below
-query_instruction = ""                         # prepended to recall queries only
 ```
 
 ### `provider = "local"` (default)
@@ -208,8 +208,9 @@ that is why the daemon works with no API key and no network.
 `cache_dir` is where the ~130 MB model lives. The Docker image bakes it
 in at `/models`, so containers never download at runtime. On bare metal
 the model is fetched on first use; `recuerdos-ai warm-models` does it
-ahead of time, which is what you want before taking a host offline. Both
-built-in models are 384-dimensional.
+ahead of time, which is what you want before taking a host offline. The
+built-in model is 384-dimensional; it is the only local one with a measured
+relevance calibration, so it is the only one accepted.
 
 ### Gemini (`gemini`) — native, task-type-aware
 
@@ -380,25 +381,10 @@ floor. Another model has no measured enriched row yet: it falls back to its
 With `enriched`, editing only a memory's tags or category re-embeds it
 (they are part of its vector now); with `content` it does not.
 
-### Query instruction (`query_instruction`)
-
-Some models are trained with a retrieval instruction in front of the
-*query* — BGE v1.5's is `"Represent this sentence for searching relevant
-passages: "`, E5's is `"query: "`. Whatever is set here is prepended to
-every recall query before it is embedded, whichever provider serves the
-model; stored memories are never touched, so it can change at any time
-without a reindex.
-
-Empty is the default and the recommendation for bge-small: the
-instruction helped `content` vectors a little (preference precision@1
-54.5 → 59.1) but added nothing on top of `enriched` and slightly lowered
-broad-question recall. It exists for models that require one.
-
 ## Retrieval
 
 ```toml
 [retrieval]
-hybrid                 = true
 default_limit          = 8
 recency_half_life_days = 90
 relevance_weight       = 0.5

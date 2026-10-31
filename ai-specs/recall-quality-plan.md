@@ -94,7 +94,7 @@ reranker can address.
 
 All runs use `main` @ `bfe1d57`, default config (bge-small-en-v1.5), and no reranker.
 Experiment switches are in
-[experiments/recall-accuracy-2026-10-17.patch](experiments/recall-accuracy-2026-10-17.patch).
+`experiments/recall-accuracy-2026-10-17.patch` (deleted 2026-11-01 — it no longer applied to main; recover with `git show 490c45a:ai-specs/experiments/recall-accuracy-2026-10-17.patch`).
 
 | Variant | recall@5 | p@1 | MRR | relational recall | abstention | p95 |
 |---|---|---|---|---|---|---|
@@ -1186,7 +1186,7 @@ one top-1 the Phase 2 change can lose).
   corpus the two differ by one informational `alias` case, which is under the noise floor
   for a case flip. Either more `alias` cases or the field-host audit can decide it; a
   third grid on the same 73 cases cannot.
-- Port or delete `ai-specs/experiments/recall-accuracy-2026-10-17.patch`. It no
+- **Done 2026-11-01: deleted.** Port or delete `ai-specs/experiments/recall-accuracy-2026-10-17.patch`. It no
   longer applies (`git apply --check` fails at `memory_recaller.rs:427` — it predates
   Phase 1's deadline plumbing and Phase 2's affinity stage), which makes it a trap
   for anyone reaching for the `RA_EXP_FUSE=tiebreak` reference row Phase 2's Task 2.6

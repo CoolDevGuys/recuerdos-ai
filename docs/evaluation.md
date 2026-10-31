@@ -190,9 +190,9 @@ Why the top so rarely moves is the fusion weight, not the model. At
 cannot overrule vector-and-BM25 agreement; only `2` or more lets it do that, and
 the tuning grid measured those values and lost precision with both — the
 strength that promotes a good memory also promotes a `0.006`-confident dissent.
-`eval --grid` is that sweep (`--grid-depths`, `--grid-weights`), and it runs on
-the eval corpus rather than yours: your own store is what `rerank audit`
-measures, at one configuration per run.
+(That grid, `eval --grid`, was removed in v0.5.0-rc4 once its tuning was done;
+its last table is `eval/grid-phase7.txt`.) Your own store is what `rerank audit`
+and `recall audit --compare-config` measure, one configuration pair per run.
 
 What it will not do:
 

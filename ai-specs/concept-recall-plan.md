@@ -385,3 +385,47 @@ Cheap, manual or one LLM pass, and the only proposal that edits memories.
 | 2026-10-28 | Graph seat on the enriched store: top-1 unchanged, MRR 72.7 → 69.4 with it on — four answers pushed down one place for a graph arrival. Fourth reading in the same direction. | recommend `expansion_slots = 0` | same bundle, `m1-slot` |
 | 2026-10-28 | Rerank on the enriched store, depth 10: shipped fusion (`rrf`, weight 1) p@1 **77.8** / MRR 81.5 vs off 61.1 / 69.4; `replace` 83.3 / 85.2 (was 66.7 vs 83.3 on content vectors). Cost p50 ≈600 ms, p95 ≈1.2 s — at the 1200 ms timeout. Recorded, not shipped. | open | same bundle, `m5-*` |
 | 2026-10-28 | Bundle hygiene: `m3-rerank-off-vs-on.txt` in both field folders is the 2026-10-18 file (byte-identical; M3 is skipped with rerank off). `field-measure.sh` now clears old results first. | — | `scripts/field-measure.sh` |
+| 2026-11-01 | Cleanup measurement, §10: graph off, quality multiplier removed | field p@1 66.7 → 83.3, prefs 63.6 → 86.4 | §10 |
+
+---
+
+## 10. Cleanup: which default-on features earn their place (2026-11-01)
+
+Owner question: *remove features that do not improve recall — but only if they really do not.* Code that is
+switched off cannot change accuracy; only default-on parts of the score can. So each was switched off
+**alone** against the pipeline then shipped (enriched vectors, baseline 0.53, graph on with one seat), on the
+frozen field-store copy (local bge-small) and on the eval. 40 single-answer questions (22 preference + 18
+field), 15 broad ones.
+
+| Switched off | broad on-topic@5 | prefs p@1 / MRR | field p@1 / MRR | single-answer moves | eval |
+|---|---|---|---|---|---|
+| nothing — graph on, seat 1 | 50.7 | 63.6 / 79.2 | 66.7 / 74.5 | — | gate baseline |
+| graph seat only | 50.7 | 63.6 / 79.5 | 66.7 / 76.9 | 0 / 0 at top-1 | relational complete@5 85.7 → 57.1 |
+| **graph** | 50.7 | 72.7 / 85.6 | 83.3 / 86.1 | **+5 / −0** | relational recall@5 85.7 → **42.9**; gated recall@5 −4.5 |
+| recency (graph off) | 52.0 | 81.8 / 90.2 | 83.3 / 86.1 | +2 / −0 | p@1 −2.7; with quality off: recall@5 −1.6 more, nl-category −12.5 |
+| recency for durable categories only | 53.3 | 81.8 / 90.2 | 83.3 / 86.1 | +2 / −0 alone; **+1 / −1** with quality off | chain p@1 100 → 60 |
+| **quality (confidence × importance)** | **56.0** | **86.4 / 92.4** | 83.3 / 86.1 | **+3 / −0** (graph off); with graph on prefs p@1 63.6 → 77.3 | **identical** |
+| relevance weight (control) | 46.7 | 45.5 / 68.6 | 44.4 / 60.2 | 0 / **−13** | — |
+| BM25 (`hybrid = false`) | — | — | — | identical: the key was never read | — |
+
+**Does the graph improve recall anywhere?** Yes, in one place: the eval's multi-hop `relational` cases ("who
+owns the decision about the service that…"), three of which it alone answers. On the real store it wins **one
+of 143** expectations (a generic memory reaching rank 6 for one broad question) and loses nineteen, including
+every question that names a project. No latency difference either way (p50 ≈8 ms). By the owner's condition
+it is therefore **not removed**: it is **off by default**, documented as the switch for corpora of people, teams
+and ownership chains. The seat stays at 1 for when it is on — it is what makes the relational cases work.
+
+**Shipped (PR on `feat/cleanup-measured`):** graph default off; quality multiplier removed from ranking (both
+values stay on memories for the profile digest); eval baseline re-recorded (recall@5 82.1, p@1 67.3, MRR 73.8,
+complete@5 78.8 — the drop is the three relational cases). Removed as unused or measured useless:
+`[retrieval].hybrid`, `[embeddings].query_instruction`, `all-minilm-l6-v2`, `eval --grid`, `rerank
+distribution`, `scripts/rerank-grid.sh`, the stale experiment patch.
+
+**Kept:** recency (mixed — helps one preference question, costs the eval); the reranker (on the enriched field
+store, p@1 77.8 vs 61.1 off at depth 10, at ~600 ms p50 — the open latency trade).
+
+**Combined effect, this PR vs the field host's current config, same store:** field p@1 66.7 → **83.3**, MRR 74.5
+→ **86.1**; preference p@1 63.6 → **86.4**, MRR 79.2 → **92.4**; broad on-topic@5 50.7 → **56.0**, recall@10 57.2
+→ **59.0**; 8 of 40 better, 0 worse; p50 9.0 → 8.3 ms. **Owed:** the same reading on the field host after
+deploying (`[graph] enabled = false` there — its config sets `true` explicitly).
+
