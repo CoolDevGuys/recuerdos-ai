@@ -686,7 +686,6 @@ fn describe(side: &Side) -> SideInfo {
         reranker: side.reranker_name.clone(),
         strategy: match rerank_strategy(&side.config.rerank) {
             RerankStrategy::Rrf { weight } => format!("rrf(weight {weight})"),
-            RerankStrategy::Replace => "replace".to_string(),
         },
         mode: match side.forced {
             true => format!("{} (forced)", mode_name(side.mode)),
@@ -1510,11 +1509,11 @@ mod tests {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let mut config = AppConfig::default();
         config.storage.path = scratch.path().to_string_lossy().to_string();
-        // `replace` plus the reversing fake makes "the reranked order was
-        // served" an *exact* assertion. The damped rrf leg deliberately cannot
+        // A dominant weight plus the reversing fake makes "the reranked order
+        // was served" an *exact* assertion. The default weight-1 leg cannot
         // fully invert a head — its arithmetic is tested in `recall_ranker`,
         // and asserting an inversion through it would test the wrong thing.
-        config.rerank.strategy = "replace".to_string();
+        config.rerank.weight = crate::memories::domain::recall_ranker::DOMINANT_RERANK_WEIGHT;
 
         let database = Arc::new(SqliteDatabase::open(&scratch.path().join(DATABASE_FILE)).unwrap());
         let identity = Identity::from_database(Arc::clone(&database)).unwrap();
@@ -1729,7 +1728,7 @@ mod tests {
         assert_eq!(report.summary.rerank_calls, 1);
         assert_eq!(report.summary.queries, 1);
         assert_eq!(report.summary.top1_changed_percent, 100.0);
-        assert_eq!(report.strategy, "replace");
+        assert_eq!(report.strategy, "rrf(weight 1000)");
     }
 
     #[test]
@@ -2103,7 +2102,7 @@ mod tests {
         );
 
         let mut other_text = base.clone();
-        other_text.embeddings.document_text = "enriched".to_string();
+        other_text.embeddings.document_text = "content".to_string();
         let error = refuse_a_different_store(&base, &other_text)
             .expect_err("a store is built in one document format");
         assert!(error.to_string().contains("document_text"), "{error}");

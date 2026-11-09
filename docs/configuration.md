@@ -43,7 +43,7 @@ recuerdos-ai config
 The rerank block prints one line, `mode off`, unless the stage is actually
 enabled — the point of the command is to show what a running daemon pays,
 and with the stage off it pays nothing. When it is on, the same block shows
-the model, depth, strategy, weight and deadline in force, so the two numbers
+the model, depth, weight and deadline in force, so the two numbers
 an operator needs when a recall is slow (which model, how deep) are one
 command away and reflect env overrides, not the file you meant to edit.
 
@@ -197,7 +197,7 @@ orphaned.
 provider          = "local"                    # local | gemini | openai-compat | ollama
 model             = "bge-small-en-v1.5"
 cache_dir         = "~/.recuerdos-ai/models"    # local only
-document_text     = "content"                  # content | enriched — see below
+document_text     = "enriched"                 # enriched | content — see below
 ```
 
 ### `provider = "local"` (default)
@@ -328,9 +328,9 @@ The full-text (BM25) index is model-independent and is not touched.
 
 ### What a memory's vector is built from (`document_text`)
 
-`content` (the default) embeds the memory's sentence alone. `enriched`
-embeds a short header naming its category, sub-label and tags, then the
-sentence:
+`enriched` (the default since v0.5.0-rc4) embeds a short header naming the
+memory's category, sub-label and tags, then its sentence. `content` embeds
+the sentence alone, as every release before rc4 did:
 
 ```
 Coding preference (tooling, package-management). User prefers pnpm over npm
@@ -355,25 +355,34 @@ same model, same ranking settings:
 | recall latency p50 | ≈8 ms | ≈8 ms |
 
 Not one single-answer question ranked worse. It costs nothing at recall
-time — the header is embedded once, when the memory is stored.
+time — the header is embedded once, when the memory is stored. Re-measured on
+the rc4 pipeline (graph off, no quality band) it still wins every set: field
+precision@1 77.8 → 83.3, preference 72.7 → 86.4, broad on-topic@5 36.0 → 56.0,
+eval precision@1 67.3 → 73.1 — 6 single-answer questions better, none worse
+(ai-specs/concept-recall-plan.md §11).
 
 The format is **part of the pin**: an enriched store pins
 `bge-small-en-v1.5+enriched-v1`, so switching either way on an existing
 store is a `reindex`, exactly like switching model — the daemon refuses to
-start until you run it:
+start until you run it.
+
+**Upgrading a store built before rc4** (it is pinned to `content`): the new
+default makes the daemon refuse to start with the pin message. Either re-embed
+it once, or keep the old format explicitly:
 
 ```bash
 # 1. stop the daemon
-# 2. set [embeddings].document_text = "enriched"
-recuerdos-ai reindex
-# 3. start the daemon
+recuerdos-ai reindex      # re-embeds every memory as enriched, in one transaction
+# 2. start the daemon
+#
+# …or, to keep the store as it is: set [embeddings].document_text = "content"
 ```
 
 The header lifts every cosine slightly (≈0.02 for bge-small), so the
 relevance calibration has its own row for the enriched pin
 (`similarity_baseline` `0.53` instead of `0.5`). **If your config sets
 `[retrieval].similarity_baseline` explicitly, that number wins over the
-map** — set it to `0.53` (or remove it) when you switch bge-small to
+map** — set it to `0.53` (or remove it) for bge-small on
 `enriched`, or one class of unrelated query starts clearing the relevance
 floor. Another model has no measured enriched row yet: it falls back to its
 `content` baseline with a warning; measure it with `recuerdos-ai calibrate`.
@@ -492,7 +501,7 @@ honest statement that nobody measured it.
 | Model | Languages it was trained to rank | Weights | Added p95 | Measured gain |
 |---|---|---|---|---|
 | `bge-reranker-base` (default) | English, Chinese | 1.1 GB | +71 ms | **+5.8 p@1** — the only candidate that clears the ship gate |
-| `jina-reranker-v2-base-multilingual` | broad multilingual | 1.1 GB | +76 ms | +3.8 p@1, and only with `strategy = "rrf"` |
+| `jina-reranker-v2-base-multilingual` | broad multilingual | 1.1 GB | +76 ms | +3.8 p@1 |
 | `bge-reranker-v2-m3` | widest of the four (BGE's multilingual line) | 2.2 GB | +157 ms | +1.9 — the same as the 147 MB model, for fifteen times the RAM |
 | `jina-reranker-v1-turbo-en` | English only | 147 MB | +20 ms | +1.9 (inside noise) |
 

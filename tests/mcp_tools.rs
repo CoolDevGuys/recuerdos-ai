@@ -130,7 +130,13 @@ async fn a_batch_save_stores_every_item_and_they_recall() {
 
     assert!(
         client
-            .call("memory_recall", json!({"query": "package manager"}))
+            // A question, not two bare words: since enriched vectors became
+            // the default, a terse keyword-free query against a two-memory
+            // store reads just under the relevance floor (relevance ≈0.23).
+            .call(
+                "memory_recall",
+                json!({"query": "which package manager does the user prefer?"})
+            )
             .await
             .contains("pnpm"),
         "the first batch item is not recallable"

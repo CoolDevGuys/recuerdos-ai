@@ -1088,10 +1088,7 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         // The model lands in the embeddings cache dir — shared by
         // convention, so showing it here would duplicate that section.
         println!("  depth      {}", rerank.depth);
-        println!(
-            "  strategy   {} (weight {})",
-            rerank.strategy, rerank.weight
-        );
+        println!("  weight     {}", rerank.weight);
         println!("  timeout    {} ms", rerank.timeout_ms);
         println!("  concurrent {}", rerank.max_concurrency);
         println!("  batch      {}", rerank.batch_size);

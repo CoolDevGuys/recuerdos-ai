@@ -203,9 +203,11 @@ impl Default for EmbeddingsConfig {
             // 0 = "no cap", preserving the send-it-all behaviour for
             // providers (OpenAI, most gateways) that accept large batches.
             max_batch_size: 0,
-            // The format every store before this option was built with, so
-            // an upgrade opens existing stores without a reindex.
-            document_text: "content".to_string(),
+            // Enriched since v0.5.0-rc4: it measured better on every question
+            // set (field p@1 77.8 → 83.3, eval p@1 +5.8; concept-recall-plan.md
+            // §11). A store built before then is pinned to `content` and
+            // refuses to start until `reindex`, or until this is set back.
+            document_text: "enriched".to_string(),
         }
     }
 }
@@ -554,24 +556,13 @@ pub struct RerankConfig {
     /// deeper — a store much larger than the eval's 108 may — spends
     /// latency for reach with the grid's numbers in hand, not guessing.
     pub depth: usize,
-    /// How the rerank scores reorder the head: `rrf` (a fourth fusion leg,
-    /// damped by `weight`) or `replace` (the rerank score, banded by the
-    /// recency/quality multiplier, orders the head outright). Both are
-    /// implemented and calibrated in `memories::domain::recall_ranker`.
-    ///
-    /// Phase 7 measured the choice (§12) and `rrf` won it outright:
-    /// `replace` lost precision on three of the four grid models (worst
-    /// −9.6) because a cross-encoder's raw-score *gaps* mean nothing on
-    /// this corpus — the task-7.4 distribution shows expected pairs
-    /// scoring 0.006 as often as 0.99, so banded raw scores reorder a
-    /// near-zero head into noise. The one model that gained from
-    /// `replace` needed a depth whose latency spent the whole budget.
-    /// `rrf`, reading only the *order* the scores imply, is the default.
-    pub strategy: String,
-    /// Weight on the rerank leg when `strategy = "rrf"`. `0` is off; `1`
+    /// Weight on the rerank leg, which joins fusion as a fourth RRF term.
+    /// (A `strategy = "replace"` that let raw scores order the head outright
+    /// was removed in v0.5.0-rc4: it measured worse on the eval in Phase 7
+    /// and on the field store — four answers better, three worse.) `0` is off; `1`
     /// lets the reranker break ties against a single retrieval leg but
     /// never overrule vector+BM25 agreement; only `>= 2` can do that.
-    /// Must be `>= 0`. Ignored by `replace`.
+    /// Must be `>= 0`.
     ///
     /// Phase 7 measured this range (§12), and the plan's expectation —
     /// that overruling agreement is where the wins live — inverted. The
@@ -626,7 +617,6 @@ impl Default for RerankConfig {
             mode: "off".to_string(),
             model: "bge-reranker-base".to_string(),
             depth: 10,
-            strategy: "rrf".to_string(),
             weight: 1.0,
             timeout_ms: 250,
             max_concurrency: 1,
@@ -1008,17 +998,10 @@ impl AppConfig {
         // operator meant to turn the feature on and fat-fingered — the
         // same argument graph validation makes for the hop knobs.
         const RERANK_MODES: &[&str] = &["off", "shadow", "on"];
-        const RERANK_STRATEGIES: &[&str] = &["rrf", "replace"];
         if !RERANK_MODES.contains(&self.rerank.mode.as_str()) {
             issues.push(format!(
                 "[rerank].mode {:?} is not one of {RERANK_MODES:?}",
                 self.rerank.mode
-            ));
-        }
-        if !RERANK_STRATEGIES.contains(&self.rerank.strategy.as_str()) {
-            issues.push(format!(
-                "[rerank].strategy {:?} is not one of {RERANK_STRATEGIES:?}",
-                self.rerank.strategy
             ));
         }
         if self.rerank.depth == 0 {
@@ -1669,7 +1652,6 @@ mod tests {
             assert_eq!(config.rerank.mode, "off");
             assert_eq!(config.rerank.model, "bge-reranker-base");
             assert_eq!(config.rerank.depth, 10);
-            assert_eq!(config.rerank.strategy, "rrf");
             assert_eq!(config.rerank.weight, 1.0);
             assert_eq!(config.rerank.timeout_ms, 250);
             assert_eq!(config.rerank.max_concurrency, 1);
@@ -1683,13 +1665,12 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.create_file(
                 "recuerdos-ai.toml",
-                "[rerank]\nmode = \"shadow\"\nmodel = \"bge-reranker-base\"\ndepth = 10\nstrategy = \"replace\"\nweight = 2.5\ntimeout_ms = 200\n",
+                "[rerank]\nmode = \"shadow\"\nmodel = \"bge-reranker-base\"\ndepth = 10\nweight = 2.5\ntimeout_ms = 200\n",
             )?;
             let config = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap();
             assert_eq!(config.rerank.mode, "shadow");
             assert_eq!(config.rerank.model, "bge-reranker-base");
             assert_eq!(config.rerank.depth, 10);
-            assert_eq!(config.rerank.strategy, "replace");
             assert_eq!(config.rerank.weight, 2.5);
             assert_eq!(config.rerank.timeout_ms, 200);
             // Untouched fields keep their defaults.
@@ -1717,12 +1698,11 @@ mod tests {
         Jail::expect_with(|jail| {
             jail.create_file(
                 "recuerdos-ai.toml",
-                "[rerank]\nmode = \"yes\"\nstrategy = \"rrff\"\ndepth = 0\nweight = -1.0\ntimeout_ms = 0\nmax_concurrency = 0\nbatch_size = 0\n",
+                "[rerank]\nmode = \"yes\"\ndepth = 0\nweight = -1.0\ntimeout_ms = 0\nmax_concurrency = 0\nbatch_size = 0\n",
             )?;
             let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
             for expected in [
                 "[rerank].mode",
-                "[rerank].strategy",
                 "[rerank].depth is 0",
                 "[rerank].weight",
                 "[rerank].timeout_ms is 0",

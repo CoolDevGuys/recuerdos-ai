@@ -163,33 +163,17 @@
 //!   model *is* the dissenter: it scores correct pairs near 0.006 as
 //!   readily as near 0.99. The default is the plateau's top: 1.0.
 //!
-//! ## `Replace` — the rerank score becomes the head's head
+//! ## Why there is no `Replace`
 //!
-//! The reranked candidates are re-ordered by their raw scores multiplied
-//! by the *same* [`MULTIPLIER_FLOOR`]-bounded recency band, and
-//! form the head; every memory the reranker never saw keeps its fused
-//! relative order directly behind it. Because the band spans only 1.25×
-//! ([`MULTIPLIER_FLOOR`] = 0.8), recency can decide ties and
-//! gaps under 25%, and cannot bury a clear rerank-score winner — the
-//! identical argument that bounds the other multipliers, applied to a new
-//! signal instead of a new band (invariant from §"Why importance shares
-//! confidence's band"). The raw scores must therefore be non-negative and
-//! comparable across candidates of one call — adapters on logit-scale
-//! models must squash them first; that is a Phase 5 obligation.
+//! A second strategy let the raw cross-encoder scores (× the recency band)
+//! order the head outright. It was removed in v0.5.0-rc4 after losing twice:
+//! Phase 7's grid had it losing precision on three of four models (worst
+//! −9.6 p@1), because a raw score's *gaps* mean little — expected pairs score
+//! 0.006 as readily as 0.99 — and on the enriched field store it moved seven
+//! answers, four up and three down, below the `Rrf` leg at the same depth.
+//! `Rrf`, which reads only the *order* the scores imply, is the stage.
 //!
-//! Phase 7's grid answered the survival question: not as a default. Its
-//! premise — that a raw score's *gaps* mean something — is exactly what
-//! task 7.4's distribution denies: expected-pair scores span the full
-//! range with a pile-up near zero, so on three of four grid models the
-//! banded raw scores lost precision (worst −9.6) — a head of near-zero
-//! scores reorders into band noise. The one model crisp enough to gain
-//! from `Replace` (+5.8 p@1, §12) needed a depth that spent 96% of the
-//! latency budget, and its gain sat on a cliff: one step shallower and
-//! the `needle` kind regressed by a third. `Rrf`, reading only the
-//! *order* the scores imply, delivered the same +5.8 on the chosen model
-//! at depth 10 for half the cost, flat across depths.
-//!
-//! Neither strategy touches `relevance`: the cross-encoder value is
+//! The rerank leg never touches `relevance`: the cross-encoder value is
 //! reported beside it as [`ScoredMemory::rerank_score`] (invariant I-4 —
 //! see `memories::domain::reranker` for why a cross-encoder probability
 //! must not silently *become* relevance on an unmeasured distribution).
@@ -230,13 +214,14 @@ pub enum RerankStrategy {
     /// and values ≥ 2 are measured harm (the module docs carry the
     /// grid numbers behind that).
     Rrf { weight: f32 },
-    /// The reranked head is ordered by raw score × the bounded
-    /// recency band; everything the reranker never saw follows
-    /// in its fused order. Assumes non-negative, mutually comparable
-    /// raw scores — the Phase 5 adapter squashes every model's logits into
-    /// `(0, 1)` for exactly this contract, monotonically so no rank moves.
-    Replace,
 }
+
+/// A rerank weight large enough that the rerank leg's order decides the head
+/// outright — for tests that assert "the rerank order was served" exactly,
+/// which the default weight-1 leg by design cannot do (it breaks ties, it
+/// does not invert agreement).
+#[cfg(test)]
+pub(crate) const DOMINANT_RERANK_WEIGHT: f32 = 1_000.0;
 
 /// A full-weight fourth RRF leg — and the Phase 7 grid's chosen value,
 /// unchanged: `1.0` is the top of the measured 0.5–1.0 plateau, the
@@ -428,8 +413,7 @@ impl RecallRanker {
     /// supplied to [`rank_with_legs`](Self::rank_with_legs) or
     /// [`apply_rerank`](Self::apply_rerank). Defaults to
     /// [`RerankStrategy::default()`] — a full-weight fourth RRF leg. The
-    /// module docs carry the calibration argument for the weight range and
-    /// for the band's interaction with `Replace`.
+    /// module docs carry the calibration argument for the weight range.
     pub fn with_rerank_strategy(mut self, strategy: RerankStrategy) -> Self {
         self.rerank_strategy = strategy;
         self
@@ -463,7 +447,7 @@ impl RecallRanker {
         now: DateTime<Utc>,
     ) -> Vec<ScoredMemory> {
         let mut scored = self.rank_with_graph(vector, keyword, graph, candidates, now);
-        self.apply_rerank(&mut scored, rerank, now);
+        self.apply_rerank(&mut scored, rerank);
         scored
     }
 
@@ -598,16 +582,10 @@ impl RecallRanker {
     /// "no reranker, no change" guarantee a code path rather than an
     /// arithmetic coincidence.
     ///
-    /// Under both strategies the bounded recency band survives:
-    /// `Rrf` recomputes the sum inside the same band, and `Replace`
-    /// multiplies the raw score by that same band, so the rerank stage
-    /// adds a signal without opening a multiplier of its own.
-    pub fn apply_rerank(
-        &self,
-        ranked: &mut Vec<ScoredMemory>,
-        rerank: &[(MemoryId, f32)],
-        now: DateTime<Utc>,
-    ) {
+    /// The bounded recency band survives: the leg sum is recomputed inside
+    /// the same band, so the rerank stage adds a signal without opening a
+    /// multiplier of its own.
+    pub fn apply_rerank(&self, ranked: &mut [ScoredMemory], rerank: &[(MemoryId, f32)]) {
         if rerank.is_empty() {
             return;
         }
@@ -638,39 +616,6 @@ impl RecallRanker {
                     }
                 }
                 sort_ranked(ranked);
-            }
-            RerankStrategy::Replace => {
-                let all = std::mem::take(ranked);
-                let mut head = Vec::new();
-                let mut tail = Vec::new();
-                for mut scored in all {
-                    match rerank.iter().position(|(id, _)| *id == scored.memory.id()) {
-                        Some(index) => {
-                            let raw = rerank[index].1;
-                            scored.match_detail.rerank_rank = Some(index + 1);
-                            scored.rerank_score = Some(raw);
-                            // The band the whole module calibrates, applied
-                            // to the model's own number: ties and gaps
-                            // under 1.25× are for recency,
-                            // anything wider is the reranker's call.
-                            scored.score =
-                                raw * self.recency_multiplier(scored.memory.created_at(), now);
-                            head.push(scored);
-                        }
-                        // The tail keeps its fused relative order — the
-                        // reranker never judged it, and `Replace` claims
-                        // only to reorder the head.
-                        None => tail.push(scored),
-                    }
-                }
-                // Stable sort: an exact tie on the banded score keeps the
-                // pre-rerank fusion order, which was already deterministic.
-                head.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                ranked.extend(head.into_iter().chain(tail));
             }
         }
     }
@@ -2069,13 +2014,13 @@ mod tests {
             .with_relevance_weight(0.2)
             .with_rerank_strategy(RerankStrategy::Rrf { weight: 1.0 });
         rank.apply_relevance(&mut affinity_first);
-        rank.apply_rerank(&mut affinity_first, &leg, now());
+        rank.apply_rerank(&mut affinity_first, &leg);
 
         // Rerank then affinity: the same two multiplications in the other order.
         let mut rerank_first = with_relevance(fuse(0.0), &relevance);
         ranker()
             .with_rerank_strategy(RerankStrategy::Rrf { weight: 1.0 })
-            .apply_rerank(&mut rerank_first, &leg, now());
+            .apply_rerank(&mut rerank_first, &leg);
         ranker()
             .with_relevance_weight(0.2)
             .apply_relevance(&mut rerank_first);
@@ -2124,7 +2069,7 @@ mod tests {
         ranker()
             .with_relevance_weight(0.2)
             .with_rerank_strategy(RerankStrategy::Rrf { weight: 0.0 })
-            .apply_rerank(&mut ranked, &[(a.id(), 0.9), (b.id(), 0.1)], now());
+            .apply_rerank(&mut ranked, &[(a.id(), 0.9), (b.id(), 0.1)]);
 
         assert_eq!(
             ordered(&ranked),
@@ -2496,90 +2441,6 @@ mod tests {
         );
         // Precision, not recall: the demoted answer is still returned.
         assert!(four.iter().any(|s| s.memory.id() == answer.id()));
-    }
-
-    #[test]
-    fn replace_reorders_the_head_by_score_and_leaves_the_tail_in_fused_order() {
-        // The leg covers only two of the four candidates; the other two
-        // keep their fused relative order directly behind the head.
-        let a = memory();
-        let b = memory();
-        let c = memory();
-        let d = memory();
-        let vector = ids(&[&a, &b, &c, &d]);
-        let candidates = || vec![a.clone(), b.clone(), c.clone(), d.clone()];
-        let leg = vec![(c.id(), 0.1), (b.id(), 0.9)]; // ranks: c 1st, b 2nd — scores say otherwise
-
-        let result = RecallRanker::new(90)
-            .with_rerank_strategy(RerankStrategy::Replace)
-            .rank_with_legs(
-                &vector,
-                &RankedIds::default(),
-                &RankedIds::default(),
-                &leg,
-                candidates(),
-                now(),
-            );
-
-        assert_eq!(
-            ordered(&result),
-            vec![b.id(), c.id(), a.id(), d.id()],
-            "Replace must order the head by score (b's 0.9 beats c's 0.1 despite the leg's own order) and preserve the tail"
-        );
-        let for_b = result.iter().find(|s| s.memory.id() == b.id()).unwrap();
-        assert_eq!(for_b.rerank_score, Some(0.9));
-        assert_eq!(for_b.match_detail.rerank_rank, Some(2)); // position in the leg, not the final place
-        assert_eq!(
-            result
-                .iter()
-                .find(|s| s.memory.id() == a.id())
-                .unwrap()
-                .rerank_score,
-            None
-        );
-    }
-
-    #[test]
-    fn replace_bands_the_score_so_recency_decides_ties_but_cannot_bury_gaps() {
-        // Same mechanism as the module's other multipliers: fresh and old
-        // share the rerank score, recency decides; a clear score gap the
-        // 1.25× band cannot cross stays with the clear winner.
-        let fresh = memory_aged(0, 1.0);
-        let old = memory_aged(730, 1.0);
-        let vector = ids(&[&old, &fresh]);
-        let candidates = || vec![old.clone(), fresh.clone()];
-
-        let tie = RecallRanker::new(90)
-            .with_rerank_strategy(RerankStrategy::Replace)
-            .rank_with_legs(
-                &vector,
-                &RankedIds::default(),
-                &RankedIds::default(),
-                &[(old.id(), 1.0), (fresh.id(), 1.0)],
-                candidates(),
-                now(),
-            );
-        assert_eq!(
-            ordered(&tie)[0],
-            fresh.id(),
-            "the band should let recency decide a rerank-score tie"
-        );
-
-        let gap = RecallRanker::new(90)
-            .with_rerank_strategy(RerankStrategy::Replace)
-            .rank_with_legs(
-                &vector,
-                &RankedIds::default(),
-                &RankedIds::default(),
-                &[(old.id(), 2.0), (fresh.id(), 1.0)],
-                candidates(),
-                now(),
-            );
-        assert_eq!(
-            ordered(&gap)[0],
-            old.id(),
-            "a 2× rerank-score gap must not be inverted by a 1.25× band"
-        );
     }
 
     // — expansion: graph hits placed by position, not by score
