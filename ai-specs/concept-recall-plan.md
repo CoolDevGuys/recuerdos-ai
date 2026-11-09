@@ -429,3 +429,38 @@ store, p@1 77.8 vs 61.1 off at depth 10, at ~600 ms p50 — the open latency tra
 → **59.0**; 8 of 40 better, 0 worse; p50 9.0 → 8.3 ms. **Owed:** the same reading on the field host after
 deploying (`[graph] enabled = false` there — its config sets `true` explicitly).
 
+---
+
+## 11. Second audit, after §10 shipped (2026-11-09)
+
+Same instrument as §10 — the frozen field-store copy (local bge-small), 40 single-answer and 15 broad questions,
+plus the eval — against the pipeline a field host runs after rc4: enriched vectors, baseline 0.53, graph off, no
+quality band. Every config field was also checked for a reader outside the loader: none is unread any more.
+
+| Variant | broad on-topic@5 | prefs p@1 / MRR | field p@1 / MRR | moves (of 40) | eval | p50 |
+|---|---|---|---|---|---|---|
+| **reference** | 56.0 | 86.4 / 92.4 | 83.3 / 86.1 | — | p@1 73.1 | 8 ms |
+| `content` vectors (then the default) | 36.0 | 72.7 / 83.6 | 77.8 / 83.3 | +0 / −6 | p@1 67.3 | 8 ms |
+| no keyword leg (temporary switch) | 54.7 | **100 / 100** | 77.8 / 83.3 | +3 / −1 | p@1 **61.5 (−11.6)** | 7 ms |
+| no vector leg (temporary switch) | 25.3 | 59.1 / 65.3 | 66.7 / 71.3 | +0 / −13 | — | 7 ms |
+| relevance weight 0 / 0.2 / 0.3 | ≤56.0 | 77.3–81.8 | 83.3 | −4 / −3 / −1 | — | — |
+| recency half-life 30 d | 56.0 | 86.4 / 92.4 | 83.3 / 85.2 | +0 / −1 | — | — |
+| recency half-life 365 d (or off) | 56.0 | 90.9 / 94.7 | 83.3 / 86.1 | +1 / −0 | p@1 −5.8, nl-category −12.5 | — |
+| graph on (seat 1) | 54.7 | 77.3 / 86.0 | 66.7 / 74.5 | +0 / −5 | — | 9 ms |
+| reranker on, `rrf` depth 10 | 57.3 | 90.9 / 94.7 | 83.3 / 86.1 | +1 / −0 | p@1 +1.9 | **395 ms** |
+| reranker on, `replace` depth 10 | 38.7 | 90.9 / 95.5 | 77.8 / 83.3 | +4 / −3 | — | 370 ms |
+
+Floor (0.25): no single-answer expected memory sits under it; on broad questions 7 of 62 on-topic hits do, and
+31 of 75 off-topic top-5 hits clear it. Eval abstention 100%.
+
+**Decided by the owner:** enriched becomes the default; the reranker stays, its `replace` strategy goes. Kept
+as measured: keyword leg (mixed — the eval's exact-token cases need it), relevance weight 0.5 (the best value the
+range allows), recency 90 d (mixed again), graph off.
+
+**Found while flipping the default:** enriched vectors read lower relevance numbers. A terse, keyword-free query
+against a two-memory store fell under the floor ("package manager" vs "User prefers pnpm": 0.31 → 0.23; "which
+package manager do I use?": 0.31 → 0.24, though enriched ranks it first where `content` ranked the wrong memory
+first). Three integration tests asserted that terse query; they now ask a question ("which package manager does
+the user prefer?" reads 0.48). Recorded as the default's known trade; a field reading of terse agent queries
+would say whether it matters in use. Eval re-baselined: recall@5 83.3, p@1 73.1, MRR 77.7, complete@5 80.8.
+

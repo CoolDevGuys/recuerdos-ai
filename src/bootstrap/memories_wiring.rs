@@ -489,16 +489,11 @@ pub(crate) fn parse_rerank_mode(mode: &str) -> Result<RerankMode> {
     }
 }
 
-/// `[rerank].strategy` (and its weight) as the ranker's strategy. Same
-/// validation argument as [`parse_rerank_mode`].
+/// `[rerank].weight` as the ranker's strategy: the rerank list as a fourth
+/// RRF leg, damped by that weight.
 pub(crate) fn rerank_strategy(rerank: &crate::bootstrap::config::RerankConfig) -> RerankStrategy {
-    match rerank.strategy.trim().to_ascii_lowercase().as_str() {
-        "replace" => RerankStrategy::Replace,
-        // "rrf" and anything past validation: the leg form, which is
-        // also `RerankStrategy::default()`'s shape.
-        _ => RerankStrategy::Rrf {
-            weight: rerank.weight,
-        },
+    RerankStrategy::Rrf {
+        weight: rerank.weight,
     }
 }
 
@@ -682,8 +677,15 @@ mod tests {
             resolve_similarity_baseline(&config_with(Some(0.7)), "gemini-embedding-2"),
             0.7
         );
+        // The default format is `enriched`, which has its own row.
         assert_eq!(
             resolve_similarity_baseline(&config_with(None), "bge-small-en-v1.5"),
+            0.53
+        );
+        let mut content = config_with(None);
+        content.embeddings.document_text = "content".to_string();
+        assert_eq!(
+            resolve_similarity_baseline(&content, "bge-small-en-v1.5"),
             0.5
         );
         assert_eq!(
@@ -730,6 +732,7 @@ mod tests {
     use crate::identity::domain::user_context::UserContext;
     use crate::memories::application::test_doubles::FakeReranker;
     use crate::memories::domain::recall_query::RecallQuery;
+    use crate::memories::domain::recall_ranker::DOMINANT_RERANK_WEIGHT;
 
     fn config_with_rerank(rerank: RerankConfig) -> AppConfig {
         AppConfig {
@@ -802,29 +805,21 @@ mod tests {
     }
 
     #[test]
-    fn the_strategy_and_weight_map_onto_the_ranker() {
+    fn the_weight_maps_onto_the_ranker() {
         let rrf = rerank_strategy(&RerankConfig {
-            strategy: "rrf".to_string(),
             weight: 2.5,
             ..RerankConfig::default()
         });
         assert!(
             matches!(rrf, RerankStrategy::Rrf { weight } if (weight - 2.5).abs() < f32::EPSILON)
         );
-        assert!(matches!(
-            rerank_strategy(&RerankConfig {
-                strategy: "replace".to_string(),
-                ..RerankConfig::default()
-            }),
-            RerankStrategy::Replace
-        ));
     }
 
     /// The phase's wiring-through test: a reranker handed to
     /// `assemble_with_reranker` must reach the *recaller the config
-    /// describes* — mode, depth and strategy all honoured. A fake
-    /// reversal under `Replace` makes "the rerank order was served" an
-    /// exact assertion (Phase 4's reasoning), and the depth-2 variant
+    /// describes* — mode, depth and weight all honoured. A fake reversal at
+    /// a weight that dominates the fused sum makes "the rerank order was
+    /// served" an exact assertion (Phase 4's reasoning), and the depth-2 variant
     /// proves the configured head size travels too.
     #[test]
     fn the_rerank_config_reaches_recall_through_the_real_wiring() {
@@ -848,9 +843,16 @@ mod tests {
                 },
                 rerank: RerankConfig {
                     mode: "on".to_string(),
-                    strategy: "replace".to_string(),
+                    weight: DOMINANT_RERANK_WEIGHT,
                     depth,
                     ..RerankConfig::default()
+                },
+                // The rerank leg's terms sit 1/(k + rank) apart — about 1.6% —
+                // so a relevance multiplier applied after it could reorder the
+                // head on its own. This test is about the wiring, not δ.
+                retrieval: crate::bootstrap::config::RetrievalConfig {
+                    relevance_weight: 0.0,
+                    ..Default::default()
                 },
                 ..AppConfig::default()
             };
@@ -888,7 +890,7 @@ mod tests {
         let (before, _dir) = instance(RerankConfig::default().depth, None);
         assert_eq!(before.len(), contents.len(), "fixture sanity");
 
-        // `mode = on` + `replace` + the reversing fake ⇒ exactly the
+        // `mode = on` + a dominant weight + the reversing fake ⇒ exactly the
         // reversed fused head; the default depth covers all three.
         let (served, _dir) = instance(
             RerankConfig::default().depth,

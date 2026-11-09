@@ -404,7 +404,7 @@ fi
 echo "── M5 · Is the rerank stage muted by its fusion rather than wrong? ────────"
 # Why this exists, in one number: query 5 of the field δ files put the right memory at
 # rank 4 with rerank 0.999 while the memory served first carried 0.056, and the order did
-# not change. `[rerank].strategy = "rrf"` at `weight = 1` may break a tie against a single
+# not change. The rerank leg at `weight = 1` may break a tie against a single
 # retrieval leg but never overrule vector+BM25 agreement — and on a store that repeats
 # project names across memories, that agreement is a lexical artifact more often than the
 # eval corpus's paraphrased cases made it. The default was chosen on a grid over that
@@ -416,22 +416,23 @@ else
   cp "$OUT/base.toml" "$OUT/on.toml"
   echo "   ok  on.toml → mode = on (copied from base, which already runs the stage)"
 fi
-set_key on.toml rerank strategy '"replace"' replace.toml
 set_key on.toml rerank weight 2 weight2.toml
-for v in replace weight2; do
-  ra on.toml recall audit --compare-config "$(wp $v.toml)" \
-     --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
-     2>&1 | tee "$OUT/m5-$v-vs-rrf1.txt"
-done
+# Off vs on is the open trade since rc4 (the stage gained one question at ~48× the
+# latency on a frozen field copy); weight 2 vs 1 is whether the shipped damping holds.
+ra base.toml recall audit --compare-config "$(wp on.toml)" \
+   --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
+   2>&1 | tee "$OUT/m5-on-vs-base.txt"
+ra on.toml recall audit --compare-config "$(wp weight2.toml)" \
+   --queries "$(wp queries.toml)" --user "$USER_HANDLE" --limit "$LIMIT" \
+   2>&1 | tee "$OUT/m5-weight2-vs-rrf1.txt"
 cat <<'NOTE'
-   `before` = the shipped fusion (rrf, weight 1); `after` = the variant. Read the
-   expectations line first. What the eval grid found, so you know what you are looking at:
-   `replace` lost up to −9.6 p@1 on three of its four models, because a cross-encoder's
-   raw-score gaps mean little on paraphrased synthetic cases, and `weight = 2` gave back 2
-   points plus a third of the `needle` kind's. If a variant lifts p@1 here, the stage's
-   300 ms has a purpose and the shipped fusion deserves a second look. If neither does,
-   mode = "off" is confirmed for the right reason rather than by default — which is also a
-   result worth having.
+   m5-on-vs-base: `before` = your config, `after` = the same with the stage on (weight 1).
+   m5-weight2-vs-rrf1: `before` = stage on at weight 1, `after` = weight 2. Read the
+   expectations line first. On a frozen field copy (rc4 pipeline) the stage gained one
+   question for ~395 ms p50; the eval grid had weight 2 giving back 2 points of p@1. If
+   `on` lifts p@1 here by more than a question, its latency has a purpose; if not,
+   mode = "off" is confirmed for the right reason. (A `replace` strategy was removed in
+   rc4 after losing on both instruments.)
 NOTE
 
 echo "── M4 · Phase 1.5: the queue question, by hand ───────────────────────────"

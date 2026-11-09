@@ -5,6 +5,32 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Enriched vectors by default, and the rerank `replace` strategy removed
+
+A second audit on the pipeline above (concept-recall-plan.md §11) found no unused settings left and two
+changes worth making.
+
+- **`[embeddings].document_text` defaults to `"enriched"`.** Re-measured on this pipeline it still wins every
+  set: field precision@1 77.8 → **83.3**, preference 72.7 → **86.4**, broad-question on-topic@5 36.0 → **56.0**,
+  eval precision@1 67.3 → **73.1** — six single-answer questions better, none worse. Its similarity baseline
+  (0.53) comes from the per-model map. *Behaviour change on upgrade:* **a store built before rc4 is pinned to
+  `content` and the daemon refuses to start** with the pin message. Run `recuerdos-ai reindex` once (daemon
+  stopped), or set `document_text = "content"` to keep the old vectors. One trade to know about: relevance
+  *numbers* read lower under enriched vectors, so a terse, keyword-free query against a near-empty store can
+  fall under the 0.25 floor where it used to clear it ("package manager" against "User prefers pnpm":
+  0.31 → 0.23) — while its *ranking* is better (the wrong memory topped "javascript package manager" under
+  `content`). On the field store no single-answer expected memory falls under the floor.
+- **`[rerank].strategy` is removed, and with it `replace`.** Raw rerank scores ordering the head lost on the
+  eval in Phase 7 and on the field store now (seven answers moved, four up, three down); the stage is the
+  weighted RRF leg, tuned by `[rerank].weight`. A config that still sets `strategy` gets the unknown-key
+  warning. `field-measure.sh` M5 now reads rerank off-vs-on and weight 2-vs-1 instead.
+- The reranker itself stays (off by default). On this pipeline it gains one field-store question and +1.9 eval
+  precision@1 for ~395 ms p50 against ~8 ms.
+- The eval baseline is re-recorded for the enriched default: recall@5 83.3, precision@1 73.1, MRR 77.7,
+  complete@5 80.8.
+
+### Graph off by default, the quality band removed, unused knobs gone
+
 Measured on a frozen copy of a real 222-memory store — 18 field questions, 22 preference questions, 15 broad
 questions — plus the eval set, each change switched off alone against the shipped pipeline
 ([`concept-recall-plan.md`](../ai-specs/concept-recall-plan.md) §10). Together, on that store: precision@1

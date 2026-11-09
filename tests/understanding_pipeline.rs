@@ -353,7 +353,9 @@ async fn without_a_provider_content_is_stored_verbatim_through_the_same_endpoint
     assert_eq!(job["status"], "succeeded", "{job}");
     assert_eq!(job["memory_ids"].as_array().unwrap().len(), 1);
 
-    let recalled = pipeline.search("package manager").await;
+    let recalled = pipeline
+        .search("which package manager does the user prefer?")
+        .await;
     assert_eq!(
         recalled,
         ["I prefer pnpm over npm for this repo"],
@@ -531,7 +533,9 @@ async fn a_wait_true_batch_stores_every_item_in_one_request() {
     );
 
     // Both are actually stored and recallable.
-    let pnpm = pipeline.search("package manager").await;
+    let pnpm = pipeline
+        .search("which package manager does the user prefer?")
+        .await;
     assert!(pnpm.iter().any(|c| c.contains("pnpm")), "{pnpm:?}");
     let host = pipeline.search("where does the backend run").await;
     assert!(host.iter().any(|c| c.contains("Hetzner")), "{host:?}");

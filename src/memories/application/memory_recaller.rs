@@ -46,7 +46,7 @@ use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
-use chrono::{DateTime, Utc};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -483,7 +483,7 @@ impl MemoryRecaller {
         // client-visible truncation rather than padded back in. `reranker:
         // None` and `mode = Off` return `ranked` untouched — the identity
         // path.
-        let (mut ranked, rerank) = self.rerank_leg(query, ranked, now);
+        let (mut ranked, rerank) = self.rerank_leg(query, ranked);
 
         // The graph's reserved slots (recall-quality-plan.md Phase 3), last in the
         // pipeline on purpose. After the floor, so a hop `[retrieval].min_relevance`
@@ -582,7 +582,6 @@ impl MemoryRecaller {
         &self,
         query: &RecallQuery,
         mut ranked: Vec<ScoredMemory>,
-        now: DateTime<Utc>,
     ) -> (Vec<ScoredMemory>, Option<RerankTrace>) {
         // Nothing wired, or `Off`: no stage exists for this recall, so there
         // is nothing to report and the response stays the pre-rerank build's
@@ -697,7 +696,7 @@ impl MemoryRecaller {
             );
         }
 
-        self.ranker.apply_rerank(&mut ranked, &leg.scores, now);
+        self.ranker.apply_rerank(&mut ranked, &leg.scores);
         (
             ranked,
             Some(RerankTrace::Applied {
@@ -1174,7 +1173,7 @@ mod tests {
     use crate::memories::domain::category::Category;
     use crate::memories::domain::entity_graph::{EntityGraph, Relation};
     use crate::memories::domain::memory::Entity;
-    use crate::memories::domain::recall_ranker::RerankStrategy;
+    use crate::memories::domain::recall_ranker::{DOMINANT_RERANK_WEIGHT, RerankStrategy};
 
     fn query(text: &str) -> RecallQuery {
         RecallQuery::new(text, 10).unwrap()
@@ -2025,8 +2024,8 @@ mod tests {
     #[test]
     fn the_slot_is_applied_after_the_rerank_leg_not_before_it() {
         // The order the two post-fusion stages run in, pinned rather than assumed:
-        // the reranker reverses the head it judges (`Replace` over a fake that
-        // scores by leading digit), and the hop still lands in slot 1 of *that*
+        // the reranker reverses the head it judges (a fake that scores by
+        // leading digit), and the hop still lands in slot 1 of *that*
         // list. Run before the rerank leg, the reranker would be free to bury it,
         // which is the behaviour this phase deliberately replaced.
         let fixture = Fixture::new();
@@ -2034,9 +2033,6 @@ mod tests {
         let (_, answer) = bridge_and_answer(&fixture, &graph);
         direct_notes(&fixture, 8);
 
-        // `Replace` because the default weight-1 RRF leg cannot fully invert a
-        // fused head — and a reversal is what makes "before or after the rerank
-        // leg" observable rather than a matter of nuance.
         let reverse = Arc::new(FakeReranker::reversing());
         let recaller = fixture
             .recaller_with_reranker(reverse, RerankMode::On, 10, Duration::from_secs(5))
@@ -2402,13 +2398,13 @@ mod tests {
         }
     }
 
-    /// A recaller over the `Replace` rerank strategy: with the reversing
+    /// A recaller whose rerank leg dominates the fused sum: with the reversing
     /// fake it makes "the rerank order was served" an *exact* assertion.
     /// (The default weight-1 RRF leg by design cannot fully invert a fused
     /// head — that is the strategy's arithmetic, tested on its own in
     /// `recall_ranker`; asserting an inversion through it would be testing
     /// the wrong thing.)
-    fn replace_recaller(
+    fn dominant_rerank_recaller(
         fixture: &Fixture,
         reranker: Arc<dyn Reranker>,
         mode: RerankMode,
@@ -2420,7 +2416,9 @@ mod tests {
             Arc::clone(&fixture.vectors) as Arc<dyn VectorIndex>,
             Arc::clone(&fixture.text) as Arc<dyn TextIndex>,
             Arc::clone(&fixture.embedder) as Arc<dyn Embedder>,
-            RecallRanker::new(90).with_rerank_strategy(RerankStrategy::Replace),
+            RecallRanker::new(90).with_rerank_strategy(RerankStrategy::Rrf {
+                weight: DOMINANT_RERANK_WEIGHT,
+            }),
             fixed_clock(),
             None,
             2,
@@ -2447,7 +2445,7 @@ mod tests {
             "the fixture should offer several results"
         );
 
-        let after = replace_recaller(
+        let after = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -2486,7 +2484,7 @@ mod tests {
             .execute(&fixture.alex, &question)
             .unwrap();
 
-        let after = replace_recaller(
+        let after = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::reversing()) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -2865,7 +2863,7 @@ mod tests {
             .unwrap());
 
         let fake = reranker(FakeReranker::reversing());
-        let after = replace_recaller(
+        let after = dominant_rerank_recaller(
             &fixture,
             fake.clone() as Arc<dyn Reranker>,
             RerankMode::On,
@@ -2946,7 +2944,7 @@ mod tests {
             fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
         }
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::reversing()),
             RerankMode::On,
@@ -2977,7 +2975,7 @@ mod tests {
         }
         let question = query("pnpm");
 
-        let traced = replace_recaller(
+        let traced = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::sleeping(Duration::from_millis(150))),
             RerankMode::On,
@@ -3022,7 +3020,7 @@ mod tests {
         let busy = Arc::new(BusyReranker::new(Duration::from_millis(5)));
         let held = busy.hold_session();
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&busy) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3077,7 +3075,7 @@ mod tests {
         let question = query("pnpm");
         let busy = Arc::new(BusyReranker::new(Duration::from_millis(400)));
         let recaller = || {
-            replace_recaller(
+            dominant_rerank_recaller(
                 &fixture,
                 Arc::clone(&busy) as Arc<dyn Reranker>,
                 RerankMode::On,
@@ -3170,7 +3168,7 @@ mod tests {
         // five other test binaries shifts those arrivals — this test is about
         // the shape of a partial leg, not about this many milliseconds.
         let chunked = Arc::new(ChunkedReranker::new(1, Duration::from_millis(60)));
-        let traced = replace_recaller(
+        let traced = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&chunked) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3237,7 +3235,7 @@ mod tests {
             .unwrap()
             .len();
 
-        let traced = replace_recaller(
+        let traced = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&chunked) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3266,7 +3264,7 @@ mod tests {
         );
 
         // Not stuck: a recall with room to think still judges the whole head.
-        let full = replace_recaller(
+        let full = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&chunked) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3300,7 +3298,7 @@ mod tests {
         // would arrive at 300. The ratio is wide so that "exactly one" is not a
         // statement about how the scheduler treats this process today.
         let chunked = Arc::new(ChunkedReranker::new(1, Duration::from_millis(150)));
-        let traced = replace_recaller(
+        let traced = dominant_rerank_recaller(
             &fixture,
             chunked as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3344,7 +3342,7 @@ mod tests {
         let one_at_a_time = Arc::new(ChunkedReranker::new(1, Duration::ZERO));
         let whole_head = Arc::new(ChunkedReranker::new(8, Duration::ZERO));
 
-        let chunked = replace_recaller(
+        let chunked = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&one_at_a_time) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3353,7 +3351,7 @@ mod tests {
         )
         .execute_traced(&fixture.alex, &question)
         .unwrap();
-        let unchunked = replace_recaller(
+        let unchunked = dominant_rerank_recaller(
             &fixture,
             Arc::clone(&whole_head) as Arc<dyn Reranker>,
             RerankMode::On,
@@ -3391,7 +3389,7 @@ mod tests {
             fixture.save(&fixture.alex, &format!("note number {index} about pnpm"));
         }
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::failing()),
             RerankMode::On,
@@ -3421,7 +3419,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.save(&fixture.alex, "the only note about pnpm");
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::reversing()),
             RerankMode::On,
@@ -3448,7 +3446,7 @@ mod tests {
         }
         let fake = reranker(FakeReranker::reversing());
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             fake as Arc<dyn Reranker>,
             RerankMode::Off,
@@ -3475,7 +3473,7 @@ mod tests {
             .execute(&fixture.alex, &question)
             .unwrap();
 
-        let report = replace_recaller(
+        let report = dominant_rerank_recaller(
             &fixture,
             reranker(FakeReranker::reversing()),
             RerankMode::Shadow,
