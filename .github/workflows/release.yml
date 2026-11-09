@@ -68,6 +68,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang pkg-config libssl-dev
 
+      # rc2 and rc3 shipped binaries reporting `0.5.0-rc1` because the tag
+      # moved and Cargo.toml did not; `--version` is how an operator (and
+      # field-measure.sh) tells builds apart, so a mismatch is a failed release.
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "$want" != "$have" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $have — bump the version before tagging"
+            exit 1
+          fi
+
       - name: Build
         run: cargo build --release --locked --bin recuerdos-ai
 
