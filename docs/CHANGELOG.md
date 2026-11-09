@@ -5,6 +5,37 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+Measured on a frozen copy of a real 222-memory store — 18 field questions, 22 preference questions, 15 broad
+questions — plus the eval set, each change switched off alone against the shipped pipeline
+([`concept-recall-plan.md`](../ai-specs/concept-recall-plan.md) §10). Together, on that store: precision@1
+**66.7 → 83.3** (field) and **63.6 → 86.4** (preferences), broad-question on-topic@5 **50.7 → 56.0**; 8 of 40
+single-answer questions better, none worse; recall p50 unchanged.
+
+- **The entity graph is now off by default (`[graph].enabled = false`).** On the real store it displaced
+  better matches: off, five questions rank higher and none lower, including every question that names a
+  project — the shape it was meant to help. It still wins the eval's multi-hop *relational* cases (recall@5
+  85.7% on, 42.9% off), so the code stays: turn it on if your memories are people, teams and ownership
+  chains. Off also means ingest asks the model for no relations. *Behaviour change on upgrade*: a config that
+  does not set `enabled` loses the graph leg; `enabled = true` restores it exactly.
+- **Confidence and importance no longer reorder recall.** Their shared multiplier was a feedback loop —
+  importance rises with use, so a memory recalled often outranked better matches for every later question.
+  Removing it: preference precision@1 72.7 → 86.4 (graph off), three questions better, none worse; the eval
+  did not move. Both values stay on memories; the profile digest still orders by them.
+- **The eval baseline is re-recorded** for the new defaults: recall@5 87.8 → 82.1 and complete@5 84.6 → 78.8,
+  all of it the three relational cases the graph answers; precision@1 unchanged at 67.3.
+- **Removed, measured or found unused:**
+  - `[retrieval].hybrid` — never read; BM25 always ran. A config that still sets it now gets the
+    unknown-key warning.
+  - `[embeddings].query_instruction` (added in rc2) — no gain for bge-small on top of `enriched`.
+  - `all-minilm-l6-v2` — the local model nobody calibrated; `bge-small-en-v1.5` is the one accepted.
+  - `eval --grid`, `rerank distribution`, `scripts/rerank-grid.sh`, `just rerank-grid` — the Phase 7 tuning
+    instruments; the tuning is done and `eval/grid-phase7.txt` keeps the last table. `rerank audit` and
+    `recall audit` stay.
+  - `ai-specs/experiments/recall-accuracy-2026-10-17.patch` — no longer applied to main.
+- Measured and **kept**: recency decay (off helps one more preference question but costs the eval recall@5
+  and `nl-category`), and the reranker (on the enriched field store, at ~600 ms p50, it reads p@1 77.8 vs
+  61.1 off — the open trade). Exempting durable categories from recency was tried and not shipped: one
+  question better, one worse.
 - **The version number tracks the tag again.** `Cargo.toml` had stayed at `0.5.0-rc1` through the rc2
   and rc3 tags, so those binaries report `recuerdos-ai 0.5.0-rc1`; it is now `0.5.0-rc4`, and the release
   workflow refuses a tag whose version differs from `Cargo.toml`.

@@ -187,12 +187,6 @@ pub struct EmbeddingsConfig {
     /// Part of the collection pin, so changing it on an existing store is a
     /// `reindex`, like changing the model.
     pub document_text: String,
-    /// Text prepended to every recall *query* before it is embedded, for
-    /// models trained with a retrieval instruction (BGE v1.5:
-    /// "Represent this sentence for searching relevant passages: ").
-    /// Empty — the default — sends the query as typed. Query-side only, so
-    /// it can change at any time without a reindex.
-    pub query_instruction: String,
 }
 
 impl Default for EmbeddingsConfig {
@@ -212,7 +206,6 @@ impl Default for EmbeddingsConfig {
             // The format every store before this option was built with, so
             // an upgrade opens existing stores without a reindex.
             document_text: "content".to_string(),
-            query_instruction: String::new(),
         }
     }
 }
@@ -311,7 +304,6 @@ impl Default for ConsolidationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RetrievalConfig {
-    pub hybrid: bool,
     pub default_limit: u32,
     pub recency_half_life_days: u32,
     /// Results below this relevance are dropped rather than returned.
@@ -386,7 +378,6 @@ pub struct RetrievalConfig {
 impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
-            hybrid: true,
             default_limit: 8,
             recency_half_life_days: 90,
             min_relevance: crate::memories::domain::recall_ranker::DEFAULT_RELEVANCE_FLOOR,
@@ -405,13 +396,15 @@ impl Default for RetrievalConfig {
 #[serde(default)]
 pub struct GraphConfig {
     /// The entity/relation graph (Strategy B, implementation-plan.md Task
-    /// 7.3). On by default as of Task 7.3.6: the eval measured relational
-    /// recall@5 climbing 71.4% → 85.7% with no other `by_kind` regressing,
-    /// so the third leg earns its place in the default build. Turning it
-    /// off restores the pre-graph behaviour exactly — recall stops
-    /// consulting the graph and ingest stops writing edges — for a
-    /// deployment that wants neither the hop nor the relation-extraction
-    /// tokens it costs.
+    /// 7.3). **Off by default** since v0.5.0-rc4. It answers one shape of
+    /// question — a multi-hop relational one ("who owns the decision about
+    /// the service that…"), where the eval's `relational` kind reads recall@5
+    /// 42.9% → 85.7% with it on. On a real store whose questions are not that
+    /// shape it only displaced better matches: field precision@1 83.3% off
+    /// against 66.7% on, five questions better and none worse
+    /// (concept-recall-plan.md §9). Turn it on for a corpus of people, teams
+    /// and ownership chains; off, recall never consults the graph and ingest
+    /// writes no edges and asks for no relations.
     pub enabled: bool,
     /// Whether extraction asks the model for `relations` between a memory's
     /// entities (Task 7.3.2). Only takes effect when `enabled` — a graph
@@ -489,7 +482,7 @@ impl GraphConfig {
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             extract_relations: true,
             max_hops: 2,
             hop_limit: 50,
@@ -1158,7 +1151,7 @@ mod tests {
         // The exact shape of the old example: `[rerank]` opens, and the
         // retrieval keys trail after it.
         let reports = unrecognised_keys(
-            "[retrieval]\nhybrid = true\n\n[rerank]\nmode = \"off\"\nmin_relevance = 0.25\n\
+            "[retrieval]\ndefault_limit = 8\n\n[rerank]\nmode = \"off\"\nmin_relevance = 0.25\n\
              similarity_baseline = 0.5\n",
         );
         assert_eq!(
@@ -1548,7 +1541,7 @@ mod tests {
             for value in ["4", "9", "100"] {
                 jail.create_file(
                     "recuerdos-ai.toml",
-                    &format!("[graph]\nexpansion_slots = {value}\n"),
+                    &format!("[graph]\nenabled = true\nexpansion_slots = {value}\n"),
                 )?;
                 let err = AppConfig::load(Some(Path::new("recuerdos-ai.toml"))).unwrap_err();
                 assert!(
@@ -1559,7 +1552,10 @@ mod tests {
             }
             // Three is the top of the range, and legal: the grid gets to measure
             // it without editing the schema.
-            jail.create_file("recuerdos-ai.toml", "[graph]\nexpansion_slots = 3\n")?;
+            jail.create_file(
+                "recuerdos-ai.toml",
+                "[graph]\nenabled = true\nexpansion_slots = 3\n",
+            )?;
             assert_eq!(
                 AppConfig::load(Some(Path::new("recuerdos-ai.toml")))
                     .unwrap()

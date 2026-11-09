@@ -110,16 +110,15 @@ impl Embedder for FastembedEmbedder {
 }
 
 fn resolve_model(name: &str) -> Result<EmbeddingModel> {
-    // Only models whose dimensionality matches DEFAULT_DIMENSIONS are
-    // listed. Adding one with different dims means making `dimensions`
-    // vary with the model, which the vec0 table's fixed width and the
-    // collection pin both depend on.
+    // Only calibrated models are listed: every relevance threshold depends
+    // on the model's similarity baseline (`SIMILARITY_BASELINES`), and a
+    // model nobody measured would ship a silently wrong one. Adding one
+    // means a `recuerdos-ai calibrate` row, and — at a width other than
+    // DEFAULT_DIMENSIONS — making `dimensions` vary with the model.
     match name.trim().to_ascii_lowercase().as_str() {
         "bge-small-en-v1.5" => Ok(EmbeddingModel::BGESmallENV15),
-        "all-minilm-l6-v2" => Ok(EmbeddingModel::AllMiniLML6V2),
         other => Err(RaError::Validation(format!(
-            "unknown embedding model {other:?} (expected bge-small-en-v1.5 or \
-             all-minilm-l6-v2)"
+            "unknown embedding model {other:?} (expected bge-small-en-v1.5)"
         ))),
     }
 }
@@ -136,12 +135,12 @@ mod tests {
     }
 
     #[test]
-    fn resolves_the_supported_models() {
+    fn resolves_the_supported_model() {
         assert!(
             resolve_model("BGE-Small-EN-v1.5").is_ok(),
             "case-insensitive"
         );
-        assert!(resolve_model("  all-minilm-l6-v2 ").is_ok(), "trimmed");
+        assert!(resolve_model("  bge-small-en-v1.5 ").is_ok(), "trimmed");
     }
 
     /// Exercises the real model. Ignored by default because it needs the

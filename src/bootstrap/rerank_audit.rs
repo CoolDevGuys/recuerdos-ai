@@ -10,7 +10,7 @@
 //!
 //! `recall audit --config a.toml --compare-config b.toml` compares **two
 //! configs** — any difference between them, not only the reranker: graph
-//! weights, recency, hybrid on/off, the fusion strategy. That is what the
+//! weights, recency, the fusion strategy. That is what the
 //! recall-quality plan needs in order to judge a knob on real memories instead
 //! of on the eval corpus, and with no second file the two sides are the same
 //! config, which is the self-comparison that must report zero changes.
@@ -531,8 +531,7 @@ fn side_as_configured<'a>(
 ///
 /// `[storage].path` and `[embeddings]` `model` / `document_text` are not
 /// tuning knobs: one picks a different database, the others vectors this
-/// store does not contain. `query_instruction` is refused for a narrower
-/// reason: one embedder serves both columns, so it could not be applied. Either would produce a confident report about nothing, so the
+/// store does not contain. Any of them would produce a confident report about nothing, so the
 /// command stops and names the difference instead.
 fn refuse_a_different_store(config: &AppConfig, compare: &AppConfig) -> Result<()> {
     if compare.embeddings.model != config.embeddings.model {
@@ -543,22 +542,13 @@ fn refuse_a_different_store(config: &AppConfig, compare: &AppConfig) -> Result<(
             config.embeddings.model, compare.embeddings.model
         )));
     }
-    // Both columns share the `--config` side's embedder, and the store was
-    // built in one document format: a second config that changed either
-    // would be silently measured as the first.
+    // The store was built in one document format: a second config naming
+    // the other would open a pin this store does not have.
     if compare.embeddings.document_text != config.embeddings.document_text {
         return Err(RaError::Validation(format!(
             "the two configs name different [embeddings].document_text ({} vs {}): this \
              store's vectors were built from one of them",
             config.embeddings.document_text, compare.embeddings.document_text
-        )));
-    }
-    if compare.embeddings.query_instruction != config.embeddings.query_instruction {
-        return Err(RaError::Validation(format!(
-            "the two configs name different [embeddings].query_instruction ({:?} vs {:?}): both \
-             columns embed the query with the --config side's embedder, so the second \
-             instruction would never be applied — audit each config on its own instead",
-            config.embeddings.query_instruction, compare.embeddings.query_instruction
         )));
     }
     if compare.data_dir() != config.data_dir() {
@@ -2117,12 +2107,6 @@ mod tests {
         let error = refuse_a_different_store(&base, &other_text)
             .expect_err("a store is built in one document format");
         assert!(error.to_string().contains("document_text"), "{error}");
-
-        let mut other_instruction = base.clone();
-        other_instruction.embeddings.query_instruction = "query: ".to_string();
-        let error = refuse_a_different_store(&base, &other_instruction)
-            .expect_err("one embedder serves both columns");
-        assert!(error.to_string().contains("query_instruction"), "{error}");
 
         let mut other_store = base.clone();
         other_store.storage.path = "/tmp/somewhere-else".to_string();

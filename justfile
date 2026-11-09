@@ -51,12 +51,6 @@ eval-record-native:
     cargo run -q --bin recuerdos-ai -- \
         eval --write-baseline eval/baseline.json
 
-# Phase 7.2 rerank tuning grid: model × strategy × depth × weight against
-# the eval corpus, with the off reference and Δ columns. See
-# scripts/rerank-grid.sh for the axes and the paired-latency reading.
-rerank-grid *args:
-    docker compose run --rm -T dev cargo run -q --bin recuerdos-ai -- eval --grid {{args}}
-
 # Phase 0.6 recall tuning grid: the first-stage knobs (graph, recency), one
 # process per cell so each row is a config a deployment could boot. See
 # scripts/recall-grid.sh for the cells and why it is not an in-process grid.

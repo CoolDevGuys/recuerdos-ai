@@ -38,7 +38,7 @@ use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{
-    RankedIds, RecallRanker, RerankStrategy, ScoredMemory, apply_expansion,
+    RankedIds, RecallRanker, ScoredMemory, apply_expansion,
 };
 use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
@@ -273,17 +273,6 @@ impl MemoryRecaller {
         pipeline.rerank_depth = depth;
         pipeline.rerank_timeout = timeout;
         pipeline
-    }
-
-    /// The same pipeline with the rerank leg fused a different way
-    /// (reranking-plan.md Phase 7.2). Wiring sets the strategy from
-    /// `[rerank].strategy` at assembly time; this exists so the tuning
-    /// grid can measure both strategies from *one* seeded store, cells
-    /// differing only in what the grid says to vary. Like every
-    /// `with_*` here it shares the indexes and never writes.
-    pub fn with_rerank_strategy(mut self, strategy: RerankStrategy) -> Self {
-        self.ranker = self.ranker.with_rerank_strategy(strategy);
-        self
     }
 
     /// Attaches a second-stage reranker (reranking-plan.md Phase 4). Not

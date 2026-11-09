@@ -41,7 +41,7 @@
 # reading against a rerank-off row in the same grid.
 #
 # The §1.3 experiment variants (which need
-# `ai-specs/experiments/recall-accuracy-2026-10-17.patch` applied) are what
+# `ai-specs/experiments/recall-accuracy-2026-10-17.patch` applied — since deleted, see `git show 490c45a:…`) are what
 # `--no-defaults` is for, so a re-run measures the variants plus a reference
 # instead of six config cells nobody is arguing about:
 #

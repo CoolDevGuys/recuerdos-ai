@@ -32,7 +32,7 @@ LangChain ──SDK───▶ │               │  nightly: merge, decay, ex
 - 🔒 **Yours** — SQLite on your disk, runs offline, no account, Apache-2.0.
 - 🧩 **Any agent, any LLM** — REST + MCP, provider-agnostic, one shared memory.
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
-- 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. On by default.
+- 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. Opt-in (`[graph].enabled`) since v0.5.0-rc4: it wins multi-hop questions about people, teams and ownership, and on a store of ordinary preferences it measured as displacing better matches.
 - 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model — and 0 of 13 queries changed their top result on the first real store it was audited against, so it is off by default and the honest advice is to leave it off until your own audit says otherwise. `rerank audit` judges it on your store before you turn it on.
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
@@ -62,7 +62,7 @@ every tool and LLM you run.
 | Export, inspect, back up | ❌ | ✅ |
 | Tags, categories, custom metadata | ❌ | ✅ |
 | Semantic **and** keyword search | opaque | ✅ hybrid, fused |
-| Relational (multi-hop) recall | ❌ | ✅ entity graph, on by default |
+| Relational (multi-hop) recall | ❌ | ✅ entity graph, opt-in |
 | Dedup & contradiction resolution | ❌ | ✅ |
 | Importance scoring & memory aging | ❌ | ✅ |
 | Multiple users & agents, one shared store | ❌ | ✅ |
@@ -331,7 +331,7 @@ It recalls the preference without being told. ✨
 | | |
 |---|---|
 | **Hybrid recall** | Semantic (ONNX embeddings) + keyword (BM25) + a graph hop, fused by reciprocal rank. Paraphrases, exact identifiers, *and* connections. |
-| **Relational recall** | A third leg walks an entity/relation graph, so "who owns the billing service's data?" reaches the memory naming the database — no shared words needed. Bi-temporal, so you can ask what was true *before* a change. On by default; the eval put relational recall@5 at 85.7% (vs 71.4% without it). |
+| **Relational recall** | A third leg walks an entity/relation graph, so "who owns the billing service's data?" reaches the memory naming the database — no shared words needed. Bi-temporal, so you can ask what was true *before* a change. Opt-in since v0.5.0-rc4: the eval puts relational recall@5 at 85.7% with it (42.9% without), but on a real personal store it lowered precision@1 from 83.3% to 66.7% — turn it on if your memories are about people, teams and ownership chains. |
 | **Optional rerank** | A local cross-encoder re-scores the head of the fused list, reading query and memory jointly — the only stage that ever looks at both at once. Opt-in (`[rerank]`): the eval measured +5.8 precision@1 and +2.7 MRR, at 1.1 GB of weights and ~70 ms. On the first real store it was audited against, none of the 13 queries changed its top result and precision@1 was identical, so the default is off and the recommendation is to stay there until `rerank audit` on your own memories shows a gain. |
 | **Understands what it stores** | Raw text in, atomic labelled memories out. One sentence with two unrelated facts becomes two separately recallable memories. |
 | **Resolves contradictions** | "We moved to Hetzner" supersedes "we deploy on Fly.io" — the old one is retained for audit, gone from recall. |
@@ -489,8 +489,9 @@ cleanly across every phase.
 | 6 — Release | SDK, docs, packaging | ✅ |
 
 **Shipped in `v0.2.0`:** a relational recall layer — a bi-temporal
-entity/relation graph that recall hops over as a third leg, on by default
-(the eval put relational recall@5 at 85.7%, up from 71.4% without it). See
+entity/relation graph that recall hops over as a third leg (on by default
+until v0.5.0-rc4, opt-in since; the eval put relational recall@5 at 85.7%,
+up from 71.4% without it). See
 the [CHANGELOG](docs/CHANGELOG.md#v020--graph-strategy-b-relational-recall).
 
 **Shipped in `v0.4.0`:** the recall-quality release. The keyword leg
