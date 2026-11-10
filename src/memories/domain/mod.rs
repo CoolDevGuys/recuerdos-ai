@@ -10,6 +10,7 @@ pub mod entity_key;
 pub mod graph_backfill_state;
 pub mod memory;
 pub mod memory_change_observer;
+pub mod memory_map;
 pub mod memory_repository;
 pub mod recall_query;
 pub mod recall_ranker;

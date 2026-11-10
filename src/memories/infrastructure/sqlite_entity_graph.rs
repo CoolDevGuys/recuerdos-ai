@@ -26,7 +26,9 @@
 #![allow(dead_code)]
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::entity_graph::{EntityGraph, Relation, normalise_predicate};
+use crate::memories::domain::entity_graph::{
+    EntityGraph, MemoryLink, Relation, normalise_predicate,
+};
 use crate::memories::domain::entity_key::EntityKey;
 use crate::memories::domain::memory::Entity;
 use crate::shared::error::{RaError, Result};
@@ -299,6 +301,63 @@ impl EntityGraph for SqliteEntityGraph {
             // is idempotent on a canonical string, so this rebuilds the key
             // without a second normalisation pass changing it.
             Ok(found.iter().map(|key| EntityKey::new(key)).collect())
+        })
+    }
+
+    fn memory_links(&self, context: &UserContext, limit: usize) -> Result<Vec<MemoryLink>> {
+        self.database.with_connection(|connection| {
+            // A relation's memory to every *other* memory naming its subject
+            // or object. Ordered so the cut at `limit` is deterministic.
+            let mut statement = connection
+                .prepare(
+                    "SELECT DISTINCT r.memory_id, e.memory_id, r.predicate, e.name
+                     FROM memory_relations r
+                     JOIN memory_entities e
+                       ON e.user_id = r.user_id
+                      AND (e.entity_key = r.object_key OR e.entity_key = r.subject_key)
+                     WHERE r.user_id = ?1 AND r.invalid_at IS NULL AND e.memory_id != r.memory_id
+                     ORDER BY r.memory_id, e.memory_id, r.predicate",
+                )
+                .map_err(|e| map_sqlite_error(e, "graph read conflict"))?;
+            let rows = statement
+                .query_map(rusqlite::params![context.user_id().to_string()], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|e| map_sqlite_error(e, "graph read conflict"))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| map_sqlite_error(e, "graph read conflict"))?;
+
+            let parse = |raw: &str| {
+                MemoryId::from_str(raw)
+                    .map_err(|e| RaError::Internal(format!("graph memory id {raw:?}: {e}")))
+            };
+            let mut seen = HashSet::new();
+            let mut links = Vec::new();
+            for (from, to, predicate, entity) in rows {
+                let pair = if from <= to {
+                    (from.clone(), to.clone())
+                } else {
+                    (to.clone(), from.clone())
+                };
+                if !seen.insert(pair) {
+                    continue;
+                }
+                links.push(MemoryLink {
+                    from: parse(&from)?,
+                    to: parse(&to)?,
+                    predicate,
+                    entity,
+                });
+                if links.len() >= limit {
+                    break;
+                }
+            }
+            Ok(links)
         })
     }
 

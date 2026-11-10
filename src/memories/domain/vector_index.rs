@@ -20,6 +20,10 @@ pub trait VectorIndex: Send + Sync {
     /// rather than always returning the top of the list. Ranks alone
     /// cannot express that: a rank-1 hit out of a corpus of noise still
     /// looks like a rank-1 hit.
+    /// Every vector this user has, for the map (`memory_map.rs`), which
+    /// compares memories with each other rather than with a query.
+    fn all(&self, context: &UserContext) -> Result<Vec<(MemoryId, Vec<f32>)>>;
+
     fn search(
         &self,
         context: &UserContext,

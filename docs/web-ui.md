@@ -5,9 +5,43 @@ The daemon serves a browser UI at **`/ui`** on its API port, at
 compiled into the binary. It reads and writes memories through the same `/v1` API
 as every other client, under the same API-key scopes.
 
-> **Status:** phases P0–P1 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
-> You can sign in, browse and filter your memories, and correct, add and
-> forget them. The mental map and category management come in later phases.
+> **Status:** phases P0–P2 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+> You can sign in, browse, filter, correct, add and forget memories, and
+> explore them as a zoomable mental map with a recall preview. Category
+> management (create, rename, merge) comes next.
+
+## The mental map
+
+**Map** (`/ui/map`) draws your memories as a graph you zoom through.
+
+- **Zoomed out:** one disc per category, sized by how many memories it holds,
+  with lines between categories whose memories resemble each other.
+- **Zooming in:** each category dissolves into its *clusters*:
+  - its sub-labels, when most of its memories have one;
+  - otherwise groups of similar memories, named after the tag they share most.
+- **Zoomed in:** clusters dissolve into the individual memories:
+  - solid lines join memories with similar meaning, thicker when more similar;
+  - arrows show relations the entity graph recorded, when `[graph]` is on.
+
+Use the scroll wheel or a pinch to zoom, or **Categories / Clusters /
+Memories** to jump to a level. Clicking a category or cluster opens it.
+Clicking a memory opens it in the editor.
+
+Every category has a colour, a glyph and its name, so colour is never the
+only cue. The legend's buttons hide and show categories. **Links** turns the
+two kinds of line on and off, and raises the minimum similarity shown.
+
+**Recall preview.** Type a question the way an agent would ("how does the user
+approach testing?"):
+- you see what recall returns, best first, with its relevance and which
+  search found it (*meaning* is the vector search, *words* the keyword search,
+  *graph* the entity hop);
+- the answers light up on the map in their real places, at any zoom, while
+  everything else steps back;
+- clicking an answer opens it.
+
+The map needs WebGL. Where it is missing, the page says so; the list view
+shows the same memories as text.
 
 ## Managing memories
 
@@ -77,6 +111,13 @@ cargo build --release --bin recuerdos-ai
 - **Release binaries and the Docker image** always build the bundle first.
 - **`--no-default-features`** drops the `ui` feature, and with it the embed,
   entirely.
+
+End-to-end tests (Playwright, real browser against a real daemon) need a
+fresh user's read/write key; they seed and change that user's memories:
+
+```bash
+RECUERDOS_KEY=ra_live_… pnpm --dir web e2e
+```
 
 For UI development, run the daemon on `:7070` and start Vite's dev server.
 Vite proxies `/v1` to the daemon:

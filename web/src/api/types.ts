@@ -63,3 +63,37 @@ export interface IngestRequest {
 export interface ApiErrorBody {
   error: { code: string; message: string };
 }
+
+/** `GET /v1/map` (web-ui-plan.md §4.1). */
+export interface MapData {
+  generation: string;
+  /** The least weight a similarity edge here carries. */
+  minWeight: number;
+  /** The store is too large for similarity edges. */
+  edgesOmitted: boolean;
+  nodes: Memory[];
+  edges: MapEdge[];
+  categories: MapCategory[];
+  categoryEdges: { source: string; target: string; weight: number }[];
+}
+
+export type MapEdge =
+  | { kind: "similar"; source: string; target: string; weight: number }
+  | { kind: "relation"; source: string; target: string; predicate: string; entity: string };
+
+export interface MapCategory {
+  id: string;
+  label: string;
+  built_in: boolean;
+  count: number;
+  subcategories: { name: string; count: number }[];
+}
+
+/** One recall result (`POST /v1/memories/search`), for the map's recall preview. */
+export interface RecallHit {
+  memory: Memory;
+  /** How well it matches, 0–1. */
+  relevance: number;
+  /** Which legs found it, 1-based ranks. */
+  matched: { vector: number | null; keyword: number | null; graph: number | null; rerank: number | null };
+}

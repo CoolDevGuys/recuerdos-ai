@@ -4,9 +4,12 @@ import type {
   Identity,
   IngestRequest,
   IngestResult,
+  MapData,
+  MapEdge,
   Memory,
   MemoryFields,
   MemoryPatch,
+  RecallHit,
 } from "./types";
 
 interface Account {
@@ -41,6 +44,8 @@ export class FakeServer {
   /** What `ingest` answers; `stored` writes one memory with the submitted text. */
   ingestOutcome: IngestResult["outcome"] = "stored";
   understanding = true;
+  /** The edges `getMap` reports, between whatever memories exist. */
+  mapEdges: MapEdge[] = [];
   /** Requests seen, for assertions about what was (not) sent. */
   readonly calls: { method: string; id?: string; version?: string | null; patch?: MemoryPatch }[] = [];
 
@@ -189,6 +194,50 @@ class FakeClient implements ApiClient {
     account.forgotten = account.forgotten.filter((m) => m.id !== id);
     account.memories.push(memory);
     return copy(memory);
+  }
+
+  async getMap(): Promise<MapData> {
+    const account = this.readable();
+    const present = new Set(account.memories.map((m) => m.id));
+    const categories = new Map<string, { count: number; subs: Map<string, number> }>();
+    for (const m of account.memories) {
+      const entry = categories.get(m.category) ?? { count: 0, subs: new Map<string, number>() };
+      entry.count += 1;
+      if (m.subcategory !== null) entry.subs.set(m.subcategory, (entry.subs.get(m.subcategory) ?? 0) + 1);
+      categories.set(m.category, entry);
+    }
+    const label = (id: string) => BUILT_IN.find(([b]) => b === id)?.[1] ?? id;
+    return {
+      generation: String(this.server.calls.length),
+      minWeight: 0.15,
+      edgesOmitted: false,
+      nodes: account.memories.map(copy),
+      edges: this.server.mapEdges.filter((e) => present.has(e.source) && present.has(e.target)),
+      categories: [...categories].map(([id, entry]) => ({
+        id,
+        label: label(id),
+        built_in: BUILT_IN.some(([b]) => b === id),
+        count: entry.count,
+        subcategories: [...entry.subs].map(([name, count]) => ({ name, count })),
+      })),
+      categoryEdges: [],
+    };
+  }
+
+  async recall(query: string, limit: number): Promise<RecallHit[]> {
+    const account = this.readable();
+    this.server.calls.push({ method: "recall" });
+    const words = query.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+    return account.memories
+      .map((m) => ({ m, hits: words.filter((w) => m.content.toLowerCase().includes(w)).length }))
+      .filter(({ hits }) => hits > 0)
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, limit)
+      .map(({ m, hits }, i) => ({
+        memory: copy(m),
+        relevance: Math.min(1, hits / Math.max(1, words.length)),
+        matched: { vector: i + 1, keyword: i + 1, graph: null, rerank: null },
+      }));
   }
 
   private readable(): Account {

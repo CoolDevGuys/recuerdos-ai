@@ -512,6 +512,18 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn generation(&self, context: &UserContext) -> Result<i64> {
+        self.database.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM memory_audit WHERE user_id = ?1",
+                    rusqlite::params![context.user_id().to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|e| map_sqlite_error(e, "generation read conflict"))
+        })
+    }
+
     fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
         if scores.is_empty() {
             return Ok(());

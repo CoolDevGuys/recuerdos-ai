@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { ApiError, type ApiClient } from "../api/client";
-import type { Category, IngestResult, Memory } from "../api/types";
+import type { Category, IngestResult, MapData, Memory, RecallHit } from "../api/types";
 import { fieldsOf, patchOf, type FormValues } from "../domain/memoryForm";
 import { describeError } from "./errors";
 
@@ -11,6 +11,18 @@ export function memoriesQueryKey(user: string) {
 
 export function categoriesQueryKey(user: string) {
   return ["categories", user] as const;
+}
+
+export function mapQueryKey(user: string) {
+  return ["map", user] as const;
+}
+
+/** The map: memories, how they link, and the categories. */
+export function useMap(client: ApiClient, user: string) {
+  return useQuery<MapData, Error>({
+    queryKey: mapQueryKey(user),
+    queryFn: () => client.getMap(),
+  });
 }
 
 /** Every active memory of the signed-in user. */
@@ -51,6 +63,7 @@ export function useMemoryActions(client: ApiClient, user: string) {
       Promise.all([
         queryClient.invalidateQueries({ queryKey: memoriesQueryKey(user) }),
         queryClient.invalidateQueries({ queryKey: categoriesQueryKey(user) }),
+        queryClient.invalidateQueries({ queryKey: mapQueryKey(user) }),
       ]);
 
     async function attempt<T>(run: () => Promise<T>): Promise<Outcome<T>> {
@@ -89,6 +102,14 @@ export function useMemoryActions(client: ApiClient, user: string) {
         );
       },
       forget: (id: string) => attempt(() => client.forgetMemory(id)),
+      /** Read-only; no refresh needed, but the same never-throw shape. */
+      recall: async (query: string, limit = 10): Promise<Outcome<RecallHit[]>> => {
+        try {
+          return { kind: "ok", value: await client.recall(query, limit) };
+        } catch (error) {
+          return { kind: "failed", message: describeError(error) };
+        }
+      },
       restore: (id: string) => attempt(() => client.restoreMemory(id)),
     };
   }, [client, user, queryClient]);

@@ -5,9 +5,12 @@ import type {
   IngestOutcome,
   IngestRequest,
   IngestResult,
+  MapData,
+  MapEdge,
   Memory,
   MemoryFields,
   MemoryPatch,
+  RecallHit,
   Scope,
 } from "./types";
 
@@ -33,6 +36,9 @@ export interface ApiClient {
   updateMemory(id: string, patch: MemoryPatch, version: string | null): Promise<Memory>;
   forgetMemory(id: string): Promise<void>;
   restoreMemory(id: string): Promise<Memory>;
+  getMap(): Promise<MapData>;
+  /** What recall returns for `query`, as an agent would see it. */
+  recall(query: string, limit: number): Promise<RecallHit[]>;
 }
 
 /** A failed request, carrying the daemon's own error code and message. */
@@ -134,6 +140,16 @@ export class HttpApiClient implements ApiClient {
 
   async restoreMemory(id: string): Promise<Memory> {
     return parseMemory(await this.request(`/v1/memories/${encodeURIComponent(id)}/restore`, { method: "POST" }));
+  }
+
+  async getMap(): Promise<MapData> {
+    return parseMap(await this.request("/v1/map"));
+  }
+
+  async recall(query: string, limit: number): Promise<RecallHit[]> {
+    const body = await this.request("/v1/memories/search", { method: "POST", body: { query, limit } });
+    if (!isObject(body) || !Array.isArray(body.results)) throw malformed("recall result");
+    return body.results.map(parseRecallHit);
   }
 
   private async request(path: string, options: RequestOptions = {}): Promise<unknown> {
@@ -248,5 +264,75 @@ export function parseIngestResult(body: unknown): IngestResult {
     outcome: body.outcome as IngestOutcome,
     memoryIds: body.memory_ids.filter((id): id is string => typeof id === "string"),
     understanding: body.understanding !== false,
+  };
+}
+
+function rank(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
+export function parseRecallHit(item: unknown): RecallHit {
+  if (!isObject(item) || typeof item.relevance !== "number") throw malformed("recall result");
+  const matched = isObject(item.matched) ? item.matched : {};
+  return {
+    memory: parseMemory(item),
+    relevance: item.relevance,
+    matched: {
+      vector: rank(matched.vector_rank),
+      keyword: rank(matched.bm25_rank),
+      graph: rank(matched.graph_rank),
+      rerank: rank(matched.rerank_rank),
+    },
+  };
+}
+
+function parseMapEdge(item: unknown): MapEdge | null {
+  if (!isObject(item) || typeof item.source !== "string" || typeof item.target !== "string") return null;
+  if (item.kind === "similar" && typeof item.weight === "number") {
+    return { kind: "similar", source: item.source, target: item.target, weight: item.weight };
+  }
+  if (item.kind === "relation") {
+    return {
+      kind: "relation",
+      source: item.source,
+      target: item.target,
+      predicate: typeof item.predicate === "string" ? item.predicate : "",
+      entity: typeof item.entity === "string" ? item.entity : "",
+    };
+  }
+  return null; // an edge kind this UI does not know yet
+}
+
+export function parseMap(body: unknown): MapData {
+  if (!isObject(body) || !Array.isArray(body.nodes) || !Array.isArray(body.edges) || !Array.isArray(body.categories)) {
+    throw malformed("map");
+  }
+  return {
+    generation: typeof body.generation === "string" ? body.generation : "",
+    minWeight: typeof body.min_weight === "number" ? body.min_weight : 0,
+    edgesOmitted: body.edges_omitted === true,
+    nodes: body.nodes.map(parseMemory),
+    edges: body.edges.map(parseMapEdge).filter((e): e is MapEdge => e !== null),
+    categories: body.categories.map((c) => {
+      if (!isObject(c) || typeof c.id !== "string" || typeof c.label !== "string") throw malformed("map category");
+      return {
+        id: c.id,
+        label: c.label,
+        built_in: c.built_in === true,
+        count: typeof c.count === "number" ? c.count : 0,
+        subcategories: Array.isArray(c.subcategories)
+          ? c.subcategories.flatMap((s) =>
+              isObject(s) && typeof s.name === "string" ? [{ name: s.name, count: typeof s.count === "number" ? s.count : 0 }] : [],
+            )
+          : [],
+      };
+    }),
+    categoryEdges: Array.isArray(body.category_edges)
+      ? body.category_edges.flatMap((e) =>
+          isObject(e) && typeof e.source === "string" && typeof e.target === "string" && typeof e.weight === "number"
+            ? [{ source: e.source, target: e.target, weight: e.weight }]
+            : [],
+        )
+      : [],
   };
 }

@@ -7,6 +7,8 @@ import type { Memory } from "../api/types";
 import { memoryKeyStore, type KeyStore } from "../state/keyStore";
 import { SessionProvider } from "../state/session";
 import { ToastProvider } from "../state/toasts";
+import { RendererContext } from "../map/rendererContext";
+import { FakeRenderer, fakeRendererLoader } from "./fakeRenderer";
 
 export const ALEX_KEY = "ra_live_1f4c8a209d4e5f6a7b8c9d0e1f2a3b4c5d6e7f80";
 export const READER_KEY = "ra_live_0000000000000000000000000000000000000001";
@@ -27,18 +29,21 @@ export function standardServer(): FakeServer {
 export function renderApp({
   server = standardServer(),
   keyStore = memoryKeyStore(),
-}: { server?: FakeServer; keyStore?: KeyStore } = {}) {
+  renderer = new FakeRenderer(),
+}: { server?: FakeServer; keyStore?: KeyStore; renderer?: FakeRenderer } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider createClient={(key) => server.client(key)} keyStore={keyStore}>
         <ToastProvider>
-          <App />
+          <RendererContext.Provider value={fakeRendererLoader(renderer)}>
+            <App />
+          </RendererContext.Provider>
         </ToastProvider>
       </SessionProvider>
     </QueryClientProvider>,
   );
-  return { server, keyStore };
+  return { server, keyStore, renderer };
 }
 
 export async function signIn(key: string) {

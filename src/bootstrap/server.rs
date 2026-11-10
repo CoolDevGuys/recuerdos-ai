@@ -121,6 +121,7 @@ fn api_router(state: AppState) -> Router {
             "/v1/memories/{id}/restore",
             post(memories_http::handlers::restore_memory),
         )
+        .route("/v1/map", get(memories_http::handlers::read_map))
         .route(
             "/v1/categories",
             get(memories_http::handlers::list_categories),

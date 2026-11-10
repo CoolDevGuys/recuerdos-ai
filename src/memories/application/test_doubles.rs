@@ -215,6 +215,18 @@ impl Fixture {
         )
     }
 
+    pub fn mapper(
+        &self,
+        baseline: f32,
+    ) -> crate::memories::application::memory_mapper::MemoryMapper {
+        crate::memories::application::memory_mapper::MemoryMapper::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            None,
+            baseline,
+        )
+    }
+
     pub fn exporter(&self) -> MemoryExporter {
         MemoryExporter::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
     }
@@ -459,6 +471,11 @@ impl MemoryRepository for InMemoryMemoryRepository {
         Ok(entries)
     }
 
+    fn generation(&self, context: &UserContext) -> Result<i64> {
+        let _ = context;
+        Ok(self.audit.lock().unwrap().len() as i64)
+    }
+
     fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
         let mut memories = self.memories.lock().unwrap();
         for memory in memories.iter_mut() {
@@ -526,6 +543,17 @@ impl VectorIndex for InMemoryVectorIndex {
             .unwrap()
             .remove(&(context.user_id(), id));
         Ok(())
+    }
+
+    fn all(&self, context: &UserContext) -> Result<Vec<(MemoryId, Vec<f32>)>> {
+        Ok(self
+            .vectors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((user, _), _)| *user == context.user_id())
+            .map(|((_, id), vector)| (*id, vector.clone()))
+            .collect())
     }
 
     fn search(

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import type { ApiClient } from "./api/client";
 import type { Memory } from "./api/types";
 import { AddMemory, type Added } from "./components/AddMemory";
@@ -12,7 +12,11 @@ import type { Access } from "./domain/access";
 import { categoryLabel } from "./domain/memories";
 import { useCategories, useMemories, useMemoryActions } from "./state/memories";
 import { describeSignInError, useSession } from "./state/session";
+import { useView, type View } from "./state/route";
 import { useToasts } from "./state/toasts";
+
+// The map pulls in graphology and its layout; the list does not need them.
+const MapView = lazy(() => import("./components/map/MapView"));
 
 /** How long the Undo on a forgotten memory stays offered. */
 const UNDO_WINDOW_MS = 8000;
@@ -70,6 +74,7 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
   const actions = useMemoryActions(client, user);
   const { show } = useToasts();
   const [open, setOpen] = useState<Open>({ kind: "none" });
+  const [view, setView] = useView();
   const [highlighted, setHighlighted] = useState<string | null>(null);
 
   const close = useCallback(() => setOpen({ kind: "none" }), []);
@@ -128,17 +133,25 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
   }
 
   const categoryList = categories.data ?? [];
+  const openMemory = (memory: Memory) => setOpen({ kind: "edit", memory });
 
   return (
     <>
-      <MemoryList
-        memories={memories.data}
-        labelOf={labelOf}
-        highlighted={highlighted}
-        canWrite={access.canWrite}
-        onOpen={(memory) => setOpen({ kind: "edit", memory })}
-        onAdd={() => setOpen({ kind: "add" })}
-      />
+      <ViewTabs view={view} onChange={setView} />
+      {view === "list" ? (
+        <MemoryList
+          memories={memories.data}
+          labelOf={labelOf}
+          highlighted={highlighted}
+          canWrite={access.canWrite}
+          onOpen={openMemory}
+          onAdd={() => setOpen({ kind: "add" })}
+        />
+      ) : (
+        <Suspense fallback={<p role="status" className="text-sm text-slate-600 dark:text-slate-400">Loading the map…</p>}>
+          <MapView client={client} user={user} actions={actions} labelOf={labelOf} onOpenMemory={openMemory} />
+        </Suspense>
+      )}
       {open.kind === "edit" && (
         <Panel title={access.canWrite ? "Edit memory" : "Memory"} onClose={close}>
           <MemoryEditor
@@ -157,5 +170,32 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
         </Panel>
       )}
     </>
+  );
+}
+
+function ViewTabs({ view, onChange }: { view: View; onChange: (view: View) => void }) {
+  const tab = (value: View, label: string) => (
+    <a
+      href={value === "map" ? "/ui/map" : "/ui/"}
+      aria-current={view === value ? "page" : undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        onChange(value);
+      }}
+      className={
+        "border-b-2 px-3 py-2 text-sm font-medium " +
+        (view === value
+          ? "border-indigo-600 text-indigo-700 dark:text-indigo-300"
+          : "border-transparent text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100")
+      }
+    >
+      {label}
+    </a>
+  );
+  return (
+    <nav aria-label="Views" className="mb-5 flex gap-2 border-b border-slate-200 dark:border-slate-800">
+      {tab("list", "List")}
+      {tab("map", "Map")}
+    </nav>
   );
 }

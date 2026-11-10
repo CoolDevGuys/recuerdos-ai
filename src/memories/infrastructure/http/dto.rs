@@ -315,6 +315,64 @@ pub struct CategoriesResponse {
     pub categories: Vec<CategoryResponse>,
 }
 
+/// `GET /v1/map`: everything the mental map draws, in one answer.
+#[derive(Debug, Serialize)]
+pub struct MapResponse {
+    /// Changes whenever the memories do; a client may compare it to know
+    /// whether a cached layout still fits.
+    pub generation: String,
+    pub k: usize,
+    /// The least `weight` a similarity edge here has.
+    pub min_weight: f32,
+    /// True when the store is too large for similarity edges.
+    pub edges_omitted: bool,
+    pub nodes: Vec<MemoryResponse>,
+    pub edges: Vec<MapEdge>,
+    pub categories: Vec<MapCategory>,
+    pub category_edges: Vec<MapCategoryEdge>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MapEdge {
+    /// Mutual nearest neighbours; `weight` is similarity above the model's
+    /// baseline, `0..=1`.
+    Similar {
+        source: String,
+        target: String,
+        weight: f32,
+    },
+    /// `source` asserted a relation about an entity `target` mentions.
+    Relation {
+        source: String,
+        target: String,
+        predicate: String,
+        entity: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapCategory {
+    pub id: String,
+    pub label: String,
+    pub built_in: bool,
+    pub count: usize,
+    pub subcategories: Vec<MapSubcategory>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapSubcategory {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapCategoryEdge {
+    pub source: String,
+    pub target: String,
+    pub weight: f32,
+}
+
 /// serde has no built-in way to distinguish "absent" from "explicit
 /// null", which is exactly the distinction a PATCH needs.
 mod serde_with_double_option {

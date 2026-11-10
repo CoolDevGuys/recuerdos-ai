@@ -4,6 +4,7 @@ pub mod direct_memory_saver;
 pub mod memory_exporter;
 pub mod memory_finder;
 pub mod memory_forgetter;
+pub mod memory_mapper;
 pub mod memory_recaller;
 pub mod memory_restorer;
 pub mod memory_updater;

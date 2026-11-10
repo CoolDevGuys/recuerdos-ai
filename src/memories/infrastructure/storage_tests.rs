@@ -2509,3 +2509,107 @@ fn the_default_build_has_no_graph_and_enabling_it_adds_one() {
     on.graph.enabled = true;
     assert!(on.graph.extract_relations());
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// What the web UI's map reads (web-ui-plan.md §4.1): every vector, a
+// store generation, and memory-to-memory relation links.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn all_vectors_read_back_exactly_and_only_the_callers() {
+    let fixture = fixture();
+    let mine = memory_for(&fixture.alex, "mine");
+    let theirs = memory_for(&fixture.sam, "theirs");
+    fixture
+        .vectors
+        .upsert(&fixture.alex, mine.id(), &[0.25, -0.5, 0.125, 1.0])
+        .unwrap();
+    fixture
+        .vectors
+        .upsert(&fixture.sam, theirs.id(), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+
+    let all = fixture.vectors.all(&fixture.alex).unwrap();
+
+    assert_eq!(all, vec![(mine.id(), vec![0.25, -0.5, 0.125, 1.0])]);
+}
+
+#[test]
+fn the_generation_moves_with_every_mutation_and_only_the_callers() {
+    let fixture = fixture();
+    let start = fixture.memories.generation(&fixture.alex).unwrap();
+    let memory = memory_for(&fixture.alex, "x");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+    let after_insert = fixture.memories.generation(&fixture.alex).unwrap();
+    let sams_before = fixture.memories.generation(&fixture.sam).unwrap();
+
+    fixture
+        .memories
+        .delete(&fixture.alex, memory.id(), "test", "")
+        .unwrap();
+    let after_delete = fixture.memories.generation(&fixture.alex).unwrap();
+
+    assert!(after_insert > start);
+    assert!(after_delete > after_insert, "a delete is a change too");
+    assert_eq!(
+        fixture.memories.generation(&fixture.sam).unwrap(),
+        sams_before
+    );
+}
+
+#[test]
+fn memory_links_join_a_relation_to_memories_naming_its_entities() {
+    let fixture = fixture();
+    let (stack, deploy, unrelated) = (MemoryId::new(), MemoryId::new(), MemoryId::new());
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            stack,
+            &[entity("backend", "service"), entity("Hetzner", "service")],
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now(),
+        )
+        .unwrap();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            deploy,
+            &[entity("Hetzner", "service")],
+            &[],
+            now(),
+        )
+        .unwrap();
+    fixture
+        .graph
+        .record(
+            &fixture.alex,
+            unrelated,
+            &[entity("pnpm", "tool")],
+            &[],
+            now(),
+        )
+        .unwrap();
+    // Sam's identical graph must not show up in alex's links.
+    fixture
+        .graph
+        .record(
+            &fixture.sam,
+            MemoryId::new(),
+            &[entity("Hetzner", "service")],
+            &[rel("backend", "deploys_on", "Hetzner")],
+            now(),
+        )
+        .unwrap();
+
+    let links = fixture.graph.memory_links(&fixture.alex, 100).unwrap();
+
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!((links[0].from, links[0].to), (stack, deploy));
+    assert_eq!(links[0].predicate, "deploys_on");
+    assert_eq!(links[0].entity, "Hetzner");
+}

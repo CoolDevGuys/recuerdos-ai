@@ -6,7 +6,7 @@ them by category, and use zoom as the grouping mechanism: zoomed out, the catego
 in, the categories 'dissolve' into the individual memories — a representation of the mental map. For
 management, the user can edit or correct any memory or category, and add or delete memories."*
 
-Status: **P0 and P1 implemented** (2026-11-10, branch `feat/web-ui`); P2–P4 planned. Phases are ordered so
+Status: **P0–P2 implemented** (2026-11-10, branch `feat/web-ui`); P3–P4 planned. Phases are ordered so
 each one ships something usable (§9). §9.1 records how P0 differed from this plan.
 
 ---
@@ -475,6 +475,44 @@ taxonomy refactor) out of the way of the visible work. Until P3, the UI's catego
   real `App` through every flow against an enforcing fake, and the live check
   above covered the wire. The map is where a real browser earns its keep, since
   WebGL cannot run in jsdom.
+
+### 9.3 What P2 shipped, and where it differs from the plan above
+
+**Shipped:**
+- `GET /v1/map` (§4.1) and the map view (§5) with three-level semantic zoom.
+- The recall preview, filters and the hover neighbourhood.
+- Playwright e2e in CI.
+
+**Measured on a copy of the frozen field store** (222 memories, 179 active,
+re-embedded as `enriched`):
+- 278 similarity links. Mutual kNN at k = 5 capped every memory at 5 links;
+  6 memories have none.
+- 68 relation links.
+- Link weights: p10 0.42 / p50 0.56 / p90 0.67.
+- `/v1/map` took 343 ms cold in a **debug** build and 8 ms once cached.
+
+**Differences, each deliberate:**
+- **Open point 1 is settled:** sub-labels when at least 60 % of a category's
+  memories have one, otherwise Louvain communities named by their most shared
+  tag.
+  - On the field store, 53 of 72 coding preferences had no sub-label. Sub-label
+    clustering left one "other" blob of 53. Communities gave named groups
+    (testing, workflow, security, accessibility, ddd, fastapi, backend,
+    frontend, …) with 3 left over.
+- **Sigma 3, not 4.** Sigma 4 (released recently) replaced reducers and
+  programs with a new styles/primitives model. Sigma 3.0.3 is the mature API
+  the plan was written against.
+- **Layout runs on the main thread, not in a worker.** At this scale it takes
+  well under a second. A worker and a layout cache are P4 work, along with the
+  >5 000-memory aggregate mode.
+- **There is no `[ui]` limit on `/v1/map`.** The cache makes repeat calls cost
+  little, so it has no rate limit of its own yet.
+- **Category anchors are strong** (anchor weight 2.5; links across categories
+  pull at 0.25×). The first tuning let similarity scatter each category across
+  the whole map, and the cluster-level outlines then covered everything.
+- **Highlighted memories show at every zoom level**, in their true place. Without
+  that, a recall whose answers span categories either zooms too close to see
+  them, or leaves them hidden inside category discs.
 
 ## 10. Risks and open points
 

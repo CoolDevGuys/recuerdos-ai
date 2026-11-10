@@ -9,13 +9,14 @@
 //! its call on `spawn_blocking` rather than stalling a runtime worker.
 
 use super::dto::{
-    AuditEntryResponse, AuditResponse, CategoriesResponse, CategoryResponse, MemoryResponse,
-    RerankResponse, SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse,
-    UpdateMemoryRequest,
+    AuditEntryResponse, AuditResponse, CategoriesResponse, CategoryResponse, MapCategory,
+    MapCategoryEdge, MapEdge, MapResponse, MapSubcategory, MemoryResponse, RerankResponse,
+    SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse, UpdateMemoryRequest,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
 use crate::memories::application::memory_exporter::ExportFormat;
+use crate::memories::application::memory_mapper::MapQuery;
 use crate::memories::domain::category::{Category, DEFAULT_CATEGORIES};
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory::MemoryEdit;
@@ -165,6 +166,70 @@ pub async fn restore_memory(
     let memory = blocking(move || memories.restorer.execute(&context, id, ACTOR)).await?;
 
     Ok(with_etag(&memory))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MapParams {
+    #[serde(default)]
+    k: Option<usize>,
+    #[serde(default)]
+    include_superseded: bool,
+}
+
+/// The mental map: every memory, how they link, and the categories.
+pub async fn read_map(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+    Query(params): Query<MapParams>,
+) -> Result<Json<MapResponse>> {
+    let query = MapQuery::new(params.k, params.include_superseded)?;
+    let memories = state.memories.clone();
+    let map = blocking(move || memories.mapper.execute(&context, query)).await?;
+
+    let similar = map.similar.iter().map(|edge| MapEdge::Similar {
+        source: edge.source.to_string(),
+        target: edge.target.to_string(),
+        weight: edge.weight,
+    });
+    let relations = map.links.iter().map(|link| MapEdge::Relation {
+        source: link.from.to_string(),
+        target: link.to.to_string(),
+        predicate: link.predicate.clone(),
+        entity: link.entity.clone(),
+    });
+
+    Ok(Json(MapResponse {
+        generation: map.generation.to_string(),
+        k: map.k,
+        min_weight: map.min_weight,
+        edges_omitted: map.edges_omitted,
+        nodes: map.memories.iter().map(MemoryResponse::from).collect(),
+        edges: similar.chain(relations).collect(),
+        categories: map
+            .categories
+            .into_iter()
+            .map(|c| MapCategory {
+                id: c.id,
+                label: c.label,
+                built_in: c.built_in,
+                count: c.count,
+                subcategories: c
+                    .subcategories
+                    .into_iter()
+                    .map(|(name, count)| MapSubcategory { name, count })
+                    .collect(),
+            })
+            .collect(),
+        category_edges: map
+            .category_edges
+            .into_iter()
+            .map(|e| MapCategoryEdge {
+                source: e.source,
+                target: e.target,
+                weight: e.weight,
+            })
+            .collect(),
+    }))
 }
 
 /// The categories a memory can be filed under, with counts.

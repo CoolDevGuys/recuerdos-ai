@@ -386,6 +386,44 @@ Requires `write`. Undoes a `DELETE`: the memory comes back with its id,
 again. Answers the memory (with an `ETag`). `404` when it is not yours or
 was never forgotten. Audited as `restore`.
 
+### `GET /v1/map`
+
+Requires `read`. Your memories as a graph, for the web UI's mental map:
+
+```json
+{
+  "generation": "4182",
+  "k": 5,
+  "min_weight": 0.15,
+  "edges_omitted": false,
+  "nodes": [{"id": "…", "content": "…", "category": "preference.coding", …}],
+  "edges": [
+    {"kind": "similar", "source": "…", "target": "…", "weight": 0.62},
+    {"kind": "relation", "source": "…", "target": "…", "predicate": "deploys_on", "entity": "Hetzner"}
+  ],
+  "categories": [{"id": "preference.coding", "label": "Coding preference", "built_in": true,
+                  "count": 72, "subcategories": [{"name": "testing", "count": 9}]}],
+  "category_edges": [{"source": "decision", "target": "fact.project", "weight": 0.41}]
+}
+```
+
+- **`nodes`**: your active memories, plus superseded ones with
+  `?include_superseded=true`.
+- **`similar` edges** join *mutual* nearest neighbours: each of the two memories is
+  among the other's `k` most similar (`?k=1..15`, default 5).
+  - "Mutual" stops one generic memory from linking to everything.
+  - `weight` is the similarity above the embedding model's baseline for
+    unrelated text (the same calibration recall uses), from 0 to 1. Only links
+    of at least `min_weight` are returned.
+- **`relation` edges** come from the entity graph, and only when `[graph].enabled`
+  is on. One memory stated a relation about an entity the other mentions.
+- **`category_edges`** add up the similarity between categories, scaled by
+  their sizes.
+- **`generation`** changes whenever your memories do. The similarity links are
+  cached until it changes.
+- **Above 3 000 memories** the pairwise comparison is skipped and
+  `edges_omitted` is `true`.
+
 ### `GET /v1/categories`
 
 Requires `read`. Every category a memory can be filed under, with how many

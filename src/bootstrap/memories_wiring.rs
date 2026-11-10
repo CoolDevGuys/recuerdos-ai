@@ -6,6 +6,7 @@ use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::memory_exporter::MemoryExporter;
 use crate::memories::application::memory_finder::MemoryFinder;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
+use crate::memories::application::memory_mapper::MemoryMapper;
 use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
@@ -47,6 +48,7 @@ pub struct Memories {
     pub updater: Arc<MemoryUpdater>,
     pub forgetter: Arc<MemoryForgetter>,
     pub restorer: Arc<MemoryRestorer>,
+    pub mapper: Arc<MemoryMapper>,
     pub exporter: Arc<MemoryExporter>,
     pub profile_assembler: Arc<ProfileAssembler>,
     /// Exposed for the audit endpoint, which reads the trail directly
@@ -211,7 +213,17 @@ impl Memories {
             );
         }
 
+        // The map's edge floor is the same calibration recall uses, so "more
+        // alike than unrelated text" means the same thing on both.
+        let mapper = Arc::new(MemoryMapper::new(
+            Arc::clone(&repository),
+            Arc::clone(&vectors),
+            graph.clone(),
+            resolve_similarity_baseline(config, embedder.model_id()),
+        ));
+
         Ok(Self {
+            mapper,
             saver: Arc::new(
                 DirectMemorySaver::new(
                     Arc::clone(&repository),

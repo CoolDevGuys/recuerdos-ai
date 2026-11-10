@@ -5,6 +5,39 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P2: the mental map
+
+- **`GET /v1/map`**: memories, links between them, and the category summary in
+  one answer.
+  - Similarity links are **mutual k-nearest neighbours** with a floor above the
+    model's similarity baseline, so a generic "hub" memory cannot wire itself
+    to everything. On a 179-memory store: 278 links, at most 5 per memory, and
+    6 memories with none.
+  - Relation links come from the entity graph when it is enabled.
+  - The links are cached per user until the audit trail moves.
+    `VectorIndex::all`, `EntityGraph::memory_links` and
+    `MemoryRepository::generation` are the new reads.
+- **Map view at `/ui/map`** (Sigma.js 3 / WebGL + graphology, loaded only
+  when the map is opened):
+  - semantic zoom from categories through clusters to memories, each level
+    sliding out of the one above;
+  - deterministic ForceAtlas2 layout, with each category held together as an
+    island;
+  - clusters are sub-labels when most memories have one, otherwise Louvain
+    communities named after their most shared tag;
+  - every category has a colour, a glyph and a name;
+  - category outlines at the cluster level;
+  - hovering a memory shows its neighbourhood;
+  - category, link-kind and minimum-similarity filters.
+- **Recall preview**: run a question through recall from the map. It shows the
+  results with relevance and which search found each one, lights them up in
+  place at any zoom, and opens one on click.
+- **Playwright end-to-end tests** (`web/e2e`): sign-in, edit, forget/undo, the
+  map's real camera reaching each level, and the recall preview. They run in
+  CI's Docker job against the release image.
+- Bundle: 87 KB gzip up front. The map adds 22 KB and the renderer 34 KB, loaded
+  on demand.
+
 ### Web UI, phase P1: correct, add and forget memories
 
 - **Editor panel.** Open a memory to correct its text, category, sub-label and

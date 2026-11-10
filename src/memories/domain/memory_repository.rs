@@ -124,6 +124,11 @@ pub trait MemoryRepository: Send + Sync {
 
     fn audit_trail(&self, context: &UserContext, limit: usize) -> Result<Vec<AuditEntry>>;
 
+    /// A number that changes whenever this user's memories do: every
+    /// mutation writes an audit entry, so the latest entry's position is a
+    /// version of the whole store. Used to cache derived views (the map).
+    fn generation(&self, context: &UserContext) -> Result<i64>;
+
     /// Writes recomputed decay scores.
     ///
     /// Deliberately writes no audit entries and does not touch

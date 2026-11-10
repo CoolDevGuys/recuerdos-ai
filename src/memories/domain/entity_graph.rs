@@ -81,6 +81,18 @@ pub fn normalise_predicate(raw: &str) -> String {
     out
 }
 
+/// Two memories joined by a live relation: `from` asserted
+/// `subject —predicate→ object`, and `to` mentions one of its two entities.
+/// What the map draws as a relation edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryLink {
+    pub from: MemoryId,
+    pub to: MemoryId,
+    pub predicate: String,
+    /// The shared entity's display name.
+    pub entity: String,
+}
+
 pub trait EntityGraph: Send + Sync {
     /// Records a memory's entities and relations, replacing any it had
     /// before — recording is idempotent, so a re-ingest or an edit leaves
@@ -177,4 +189,12 @@ pub trait EntityGraph: Send + Sync {
         at: DateTime<Utc>,
         by: MemoryId,
     ) -> Result<()>;
+
+    /// Every pair of this user's memories joined by a live relation (see
+    /// [`MemoryLink`]), at most `limit`, each unordered pair once. Defaults
+    /// to none, for graphs that cannot enumerate their edges.
+    fn memory_links(&self, context: &UserContext, limit: usize) -> Result<Vec<MemoryLink>> {
+        let _ = (context, limit);
+        Ok(Vec::new())
+    }
 }
