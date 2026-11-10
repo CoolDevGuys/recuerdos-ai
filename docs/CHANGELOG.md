@@ -5,6 +5,21 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+## v0.5.0-rc5 — a web UI: a mental map of your memories, and the tools to curate them
+
+Recall is unchanged from rc4. This release adds a browser UI at `/ui`, served by the daemon itself:
+sign in with an API key, browse and search, correct, add and forget memories, manage your own
+categories, edit many memories at once, and see the store as a map that zooms from categories to
+clusters to single memories. See [`docs/web-ui.md`](web-ui.md).
+
+- *On upgrade:* migration V10 adds the per-user category tables and seeds each user's list from
+  `[understanding.taxonomy].extra_categories` plus the categories already on their memories (P3
+  below). It is forward-only, like every migration: back up the store before upgrading if you might
+  roll back to rc4.
+- *On upgrade:* `/ui` is served by default (`[ui].enabled = true`) on the API port. It is static
+  files only and uses the same `/v1` endpoints as any client, under the key's scopes, so it exposes
+  nothing a key could not already do; set `enabled = false` to leave it unmounted.
+
 ### Web UI, phase P4: large stores, a layout that stays put, keyboard, colour vision
 
 - **Large stores.** `GET /v1/map` takes `?category=` for one category's memories
@@ -180,6 +195,8 @@ The first slice of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
 - CI runs a `web` job: type-check, Vitest, build, and a 400 KB gzip bundle budget.
   The initial bundle is about 84 KB.
 
+## v0.5.0-rc4 — graph off by default, enriched vectors by default, unused knobs gone
+
 ### Enriched vectors by default, and the rerank `replace` strategy removed
 
 A second audit on the pipeline above (concept-recall-plan.md §11) found no unused settings left and two
@@ -248,7 +265,7 @@ single-answer questions better, none worse; recall p50 unchanged.
 ## v0.5.0-rc2 / rc3 — the field host answered the questions rc1 asked, and recall reads a memory's labels
 
 `v0.5.0-rc3` is `rc2` plus the release fix at the end of this list: **use rc3** — rc2's x86_64 Linux
-binary needs glibc 2.43. Both binaries report `0.5.0-rc1` (see Unreleased).
+binary needs glibc 2.43. Both binaries report `0.5.0-rc1` (fixed in rc4).
 
 
 Deployed measurements are in. [`recall-quality-plan.md`](../ai-specs/recall-quality-plan.md) §17 now

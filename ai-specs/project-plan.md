@@ -653,7 +653,7 @@ entity graph, graph-hop retrieval), Redis cache, multi-node workers.
 *The temporal graph layer is ✅ **shipped** in `v0.2.0`
 ([implementation-plan.md Phase 7.3](../implementation-plan.md#phase-7)): bi-temporal
 facts, an entity/relation graph, and graph-hop retrieval as a third recall leg,
-on by default (relational recall@5 85.7% vs 71.4% without it). The performance
+on by default until `v0.5.0-rc4` and opt-in since (relational recall@5 85.7% vs 71.4% without it, but on a store of ordinary preferences it displaced better matches). The performance
 groundwork (consolidation budget, sub-labels) shipped as Phase 7.1–7.2. Still
 open: alternate storage backends, Redis cache, multi-node workers.*
 
@@ -661,6 +661,10 @@ open: alternate storage backends, Redis cache, multi-node workers.*
 Hosted control plane, orgs/teams (shared project memory + private personal
 memory), SSO, per-tenant encryption, usage-based billing, dashboard UI
 (memory browser/editor — surprisingly, the feature non-technical users pay for).
+*The browser/editor half is ✅ **shipped** ahead of SaaS, self-hosted, in `v0.5.0-rc5`:
+a web UI at `/ui` embedded in the daemon ([web-ui-plan.md](web-ui-plan.md),
+[docs/web-ui.md](../docs/web-ui.md)). The hosted control plane, orgs, SSO and billing are
+still not started.*
 
 **Upgrade ideas parked for later:** proactive memory surfacing (push relevant
 memories into context before the agent asks), memory sharing/export between users

@@ -84,6 +84,15 @@ domain.
 > `http://localhost:7070` from your laptop. Fine for one person; a domain
 > + Caddy is nicer once you want it on your phone.
 
+### The web UI behind the proxy
+
+The browser UI is then at `https://memory.example.com/ui`; sign in with the key
+from step 3. It needs nothing extra from Caddy, but it must be served at the root
+of its host: the page asks for `/ui/…` and `/v1/…` by absolute path, so proxying
+the daemon under a sub-path such as `example.com/memory/` breaks it. Don't want it
+reachable at all? Set `[ui] enabled = false` (or `RECUERDOS_AI_UI__ENABLED=false`)
+and `/ui` is not mounted. See [web-ui.md](web-ui.md).
+
 ## 3. Make yourself a user and an API key
 
 The key is minted by the CLI, which runs *inside* the container against

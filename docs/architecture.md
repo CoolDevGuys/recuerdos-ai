@@ -1,8 +1,8 @@
 # Architecture
 
-**Status: Phase 1.** This doc gets a diagram and fuller examples in
-Phase 6; today it states the rules that are already enforced, with
-`identity` as the worked example.
+**Status: current as of `v0.5.0-rc5`.** It states the rules the code is held
+to: `scripts/check-boundaries.sh` enforces the layer and naming rules in CI and
+in `just check-native`. `identity` is the worked example.
 
 ## Bounded contexts
 
@@ -118,18 +118,27 @@ Two things to copy from it:
 ## Where the composition root lives
 
 `bootstrap/` — `config.rs` (typed config), `wiring.rs` (builds the object
-graph), `state.rs` (axum state), `server.rs` (router + shutdown). If a
-module needs to know which implementation it's talking to, that knowledge
-belongs here instead.
+graph, with one `*_wiring.rs` per context that needs more than a few lines:
+`memories_wiring.rs`, `understanding_wiring.rs`, `consolidation_wiring.rs`),
+`state.rs` (axum state), `server.rs` (router + shutdown). The CLI's
+measurement commands live here too, because they need the whole graph:
+`eval.rs`, `calibrate.rs`, `rerank_audit.rs`. If a module needs to know which
+implementation it's talking to, that knowledge belongs here instead.
+
+`bootstrap/web_ui.rs` serves the web UI: the `web/` app (React + Vite),
+built to `web/dist` and embedded into the binary, mounted at `/ui` behind the
+`ui` feature. It is static files only — the page is one more client of `/v1`,
+so the contexts above know nothing about it. See [web-ui.md](web-ui.md).
 
 See [implementation-plan.md §2](../implementation-plan.md#2-architecture)
 for the full rationale.
 
 ## Recall: three legs, two clocks
 
-Recall in `memories` fuses three independent legs by reciprocal rank —
+Recall in `memories` fuses up to three independent legs by reciprocal rank —
 each is a `domain` trait with an `infrastructure` adapter, wired in
-`bootstrap`:
+`bootstrap`. Vector and keyword always run; the graph leg runs only with
+`[graph].enabled = true` (off by default since `v0.5.0-rc4`):
 
 | Leg | Contract | Answers |
 |---|---|---|
@@ -149,13 +158,15 @@ it, and a deadline overrun drops the stage rather than failing the
 request. Because a dropped stage and an absent one look the same in the
 ordering, the leg reports which it was — `applied`, `shadow`, `not_needed`
 or `skipped`, in the response, and per query in `rerank audit`. See
-`reranking-plan.md` for the measurements that set its defaults.
+[reranking-plan.md](../ai-specs/reranking-plan.md) for the measurements that set its defaults.
 
 The graph leg (Task 7.3, "Strategy B") is what reaches a memory that
 answers a question it shares no words with: it scans the query for entity
 mentions, keeps the ones some memory of this user actually declared as
 seeds, and walks up to `[graph].max_hops` edges to the memories those
-seeds connect to. It is additive and self-silencing — `None` graph, or a
+seeds connect to. It is opt-in because on a store of ordinary preferences it
+measured as displacing better matches, while it still wins multi-hop questions
+about people, teams and ownership. It is additive and self-silencing — `None` graph, or a
 query naming no known entity, yields the exact two-leg result. Every
 method takes a `&UserContext`, so a hop cannot compile its way into
 another user's edges, the same rule the other two indexes follow.
