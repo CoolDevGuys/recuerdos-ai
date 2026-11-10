@@ -116,6 +116,30 @@ impl VectorIndex for SqliteVectorIndex {
             .with_connection(|connection| Self::delete_row(connection, context, id))
     }
 
+    fn all(&self, context: &UserContext) -> Result<Vec<(MemoryId, Vec<f32>)>> {
+        self.database.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT memory_id, embedding FROM vec_memories WHERE user_id = ?1")
+                .map_err(|e| map_sqlite_error(e, "vector read conflict"))?;
+            let rows = statement
+                .query_map(rusqlite::params![context.user_id().to_string()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(|e| map_sqlite_error(e, "vector read conflict"))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| map_sqlite_error(e, "vector read conflict"))?;
+
+            rows.into_iter()
+                .map(|(id, bytes)| {
+                    let id = MemoryId::from_str(&id).map_err(|e| {
+                        RaError::Internal(format!("indexed memory id {id:?} is not a uuid: {e}"))
+                    })?;
+                    Ok((id, from_bytes(&bytes)))
+                })
+                .collect()
+        })
+    }
+
     fn search(
         &self,
         context: &UserContext,
@@ -180,6 +204,14 @@ fn similarity_from_l2(distance: f32) -> f32 {
 /// sqlite-vec takes a vector as a little-endian f32 blob. `pub(crate)`
 /// so the reindexer writes vectors in exactly this encoding rather than
 /// its own copy that could drift.
+/// The inverse of [`to_bytes`].
+fn from_bytes(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
 pub(crate) fn to_bytes(embedding: &[f32]) -> Vec<u8> {
     embedding
         .iter()

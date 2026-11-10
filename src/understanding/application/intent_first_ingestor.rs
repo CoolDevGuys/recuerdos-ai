@@ -102,7 +102,10 @@ mod tests {
 
     /// The real verbatim pipeline, over in-memory stores.
     fn verbatim(fixture: &Fixture) -> Arc<dyn IngestPipeline> {
-        Arc::new(VerbatimIngestor::new(Arc::new(fixture.saver()), vec![]))
+        Arc::new(VerbatimIngestor::new(
+            Arc::new(fixture.saver()),
+            Arc::new(Taxonomy::new(vec![])),
+        ))
     }
 
     /// The real extraction pipeline, scripted to rewrite whatever it is

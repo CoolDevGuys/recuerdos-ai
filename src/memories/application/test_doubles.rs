@@ -206,6 +206,65 @@ impl Fixture {
         )
     }
 
+    pub fn restorer(&self) -> crate::memories::application::memory_restorer::MemoryRestorer {
+        crate::memories::application::memory_restorer::MemoryRestorer::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&self.text) as Arc<dyn TextIndex>,
+            Arc::clone(&self.embedder) as Arc<dyn Embedder>,
+        )
+    }
+
+    pub fn mapper(
+        &self,
+        baseline: f32,
+    ) -> crate::memories::application::memory_mapper::MemoryMapper {
+        crate::memories::application::memory_mapper::MemoryMapper::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            None,
+            baseline,
+        )
+    }
+
+    pub fn bulk_editor(
+        &self,
+    ) -> crate::memories::application::memory_bulk_editor::MemoryBulkEditor {
+        crate::memories::application::memory_bulk_editor::MemoryBulkEditor::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&self.text) as Arc<dyn TextIndex>,
+            Arc::clone(&self.embedder) as Arc<dyn Embedder>,
+            fixed_clock(),
+        )
+    }
+
+    /// The real SQLite catalog over the fixture's database, seeded with
+    /// `extras` the way `[understanding.taxonomy]` seeds a new user.
+    pub fn catalog(
+        &self,
+        extras: &[&str],
+    ) -> Arc<crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog> {
+        let extras: Vec<String> = extras.iter().map(ToString::to_string).collect();
+        Arc::new(
+            crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog::new(
+                Arc::clone(&self.database),
+                &extras,
+            ),
+        )
+    }
+
+    pub fn category_curator(
+        &self,
+        extras: &[&str],
+    ) -> crate::memories::application::category_curator::CategoryCurator {
+        crate::memories::application::category_curator::CategoryCurator::new(
+            self.catalog(extras),
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::new(self.bulk_editor()),
+        )
+    }
+
     pub fn exporter(&self) -> MemoryExporter {
         MemoryExporter::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
     }
@@ -307,6 +366,30 @@ impl MemoryRepository for InMemoryMemoryRepository {
         Ok(())
     }
 
+    fn update_many(
+        &self,
+        context: &UserContext,
+        memories: &[Memory],
+        actor: &str,
+        detail: &str,
+    ) -> Result<()> {
+        if let Some(missing) = memories.iter().find(|m| !self.visible(context, m.id())) {
+            return Err(RaError::NotFound(format!(
+                "memory {} not found",
+                missing.id()
+            )));
+        }
+        for memory in memories {
+            let mut stored = self.memories.lock().unwrap();
+            if let Some(slot) = stored.iter_mut().find(|m| m.id() == memory.id()) {
+                *slot = memory.clone();
+            }
+            drop(stored);
+            self.record(context, memory.id(), AuditOperation::Update, actor, detail);
+        }
+        Ok(())
+    }
+
     fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()> {
         if !self.visible(context, id) {
             return Err(RaError::NotFound(format!("memory {id} not found")));
@@ -314,6 +397,24 @@ impl MemoryRepository for InMemoryMemoryRepository {
         self.deleted.lock().unwrap().push(id);
         self.record(context, id, AuditOperation::Delete, actor, reason);
         Ok(())
+    }
+
+    fn restore(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<Memory> {
+        let owned = self
+            .memories
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id() == id && m.user_id() == context.user_id())
+            .cloned();
+        let mut deleted = self.deleted.lock().unwrap();
+        let Some(memory) = owned.filter(|_| deleted.contains(&id)) else {
+            return Err(RaError::NotFound(format!("memory {id} not found")));
+        };
+        deleted.retain(|d| *d != id);
+        drop(deleted);
+        self.record(context, id, AuditOperation::Restore, actor, "");
+        Ok(memory)
     }
 
     fn supersede(
@@ -432,6 +533,11 @@ impl MemoryRepository for InMemoryMemoryRepository {
         Ok(entries)
     }
 
+    fn generation(&self, context: &UserContext) -> Result<i64> {
+        let _ = context;
+        Ok(self.audit.lock().unwrap().len() as i64)
+    }
+
     fn set_importance(&self, context: &UserContext, scores: &[(MemoryId, f32)]) -> Result<()> {
         let mut memories = self.memories.lock().unwrap();
         for memory in memories.iter_mut() {
@@ -499,6 +605,17 @@ impl VectorIndex for InMemoryVectorIndex {
             .unwrap()
             .remove(&(context.user_id(), id));
         Ok(())
+    }
+
+    fn all(&self, context: &UserContext) -> Result<Vec<(MemoryId, Vec<f32>)>> {
+        Ok(self
+            .vectors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((user, _), _)| *user == context.user_id())
+            .map(|((_, id), vector)| (*id, vector.clone()))
+            .collect())
     }
 
     fn search(

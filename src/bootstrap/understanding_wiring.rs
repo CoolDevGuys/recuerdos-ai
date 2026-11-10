@@ -17,6 +17,7 @@ use crate::providers::infrastructure::chat::{
 use crate::shared::error::{RaError, Result};
 use crate::shared::sqlite::SqliteDatabase;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
+use crate::understanding::application::catalog_taxonomy::CatalogTaxonomy;
 use crate::understanding::application::intent_first_ingestor::IntentFirstIngestor;
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
@@ -24,7 +25,7 @@ use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
 use crate::understanding::domain::chat_model::ChatModel;
 use crate::understanding::domain::ingest_job::JobQueue;
 use crate::understanding::domain::ingest_pipeline::IngestPipeline;
-use crate::understanding::domain::taxonomy::Taxonomy;
+use crate::understanding::domain::taxonomy::TaxonomySource;
 use crate::understanding::infrastructure::sqlite_job_queue::SqliteJobQueue;
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -144,7 +145,8 @@ pub struct Understanding {
     /// the same backoff policy rather than each remembering to wrap it.
     /// `None` means no provider is configured.
     pub model: Option<Arc<dyn ChatModel>>,
-    pub taxonomy: Arc<Taxonomy>,
+    /// Each user's categories, read per call (V10).
+    pub taxonomy: Arc<dyn TaxonomySource>,
 }
 
 impl Understanding {
@@ -154,9 +156,8 @@ impl Understanding {
         memories: &Memories,
     ) -> Result<Self> {
         let model = build_chat_model(config)?;
-        let taxonomy = Arc::new(Taxonomy::new(
-            config.understanding.taxonomy.extra_categories.clone(),
-        ));
+        let taxonomy: Arc<dyn TaxonomySource> =
+            Arc::new(CatalogTaxonomy::new(Arc::clone(&memories.catalog)));
 
         // Built in every mode, not just the provider-less one: a submission
         // that names its own category is routed here even with a model
@@ -166,7 +167,7 @@ impl Understanding {
         // giving up reconciliation costs.
         let verbatim: Arc<dyn IngestPipeline> = Arc::new(VerbatimIngestor::new(
             Arc::clone(&memories.saver),
-            config.understanding.taxonomy.extra_categories.clone(),
+            Arc::clone(&taxonomy),
         ));
 
         let pipeline: Arc<dyn IngestPipeline> = match &model {

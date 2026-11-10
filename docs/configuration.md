@@ -2,7 +2,7 @@
 
 **Status: Phase 2.** Every key below is loaded and validated today.
 `[auth]`, `[storage]`, `[embeddings]`, `[retrieval]` and
-`[understanding.taxonomy].extra_categories` are enforced; the remaining
+`[understanding.taxonomy].extra_categories` (a seed, see [Categories](#categories)) are enforced; the remaining
 `[understanding]` and `[consolidation]` configure the model-backed
 features; both degrade to something useful without a provider.
 
@@ -113,6 +113,14 @@ with its default and an explanatory comment. Highlights:
   pipeline where only the indexes place a result. Nothing happens at all when a query
   names no entity the store knows — which, because seeds are exact, is most queries.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
+- `[ui].enabled` defaults to `true`: the web UI is served at `/ui` on the API
+  port. It is static files only and signs in with an API key; turning it off
+  unmounts the route and changes nothing about the API. See
+  [web-ui.md](web-ui.md).
+- `[ui].map_detail_limit` (default `5000`): above this many memories, the map
+  opens on your categories only and loads one category's memories at a time.
+  Laying out and drawing every memory of a very large store at once would stall
+  the browser. Must be at least 1.
 
 ## Validation
 
@@ -642,6 +650,25 @@ almost never the ranking. Three checks, in this order:
 Turning the reranker on is not a fix for any of these. It reorders what
 retrieval already found; it cannot surface a memory the legs missed, and
 `depth` is not a knob for "wider" — candidates outside it are never judged.
+
+## Categories
+
+Each user has their own categories: the eight built-ins, plus custom ones
+they create, relabel, rename, merge or delete in the web UI's Categories tab
+or through [`/v1/categories`](api.md#categories-you-can-change). They are
+stored in the database (migration V10), not in this file.
+
+```toml
+[understanding.taxonomy]
+extra_categories = ["health.sleep", "homelab"]
+```
+
+`extra_categories` is a **seed**. The first time a user's list is read it
+gets these, plus every custom category already on one of their memories, so
+upgrading never hides a category anyone was using. It happens once per user:
+someone who deletes a seeded category does not get it back on restart, and
+changing this list later only affects users whose list has not been read
+yet.
 
 ## Storage
 

@@ -166,10 +166,12 @@ to do it by hand? Grab the tarball straight from the
 
 ```bash
 git clone https://github.com/CoolDevGuys/recuerdos-ai && cd recuerdos-ai
+just web-build   # optional: the browser UI at /ui (needs Node 22 + pnpm)
 cargo build --release --bin recuerdos-ai
 ```
 
-Needs a Rust toolchain (1.85+); the Docker path avoids that.
+Needs a Rust toolchain (1.85+); the Docker path avoids that. Skipping
+`just web-build` still gives a working daemon; `/ui` then says how to build it.
 
 ### 🐍 Python client
 
@@ -463,6 +465,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 | 🌐 [api.md](docs/api.md) | Every REST endpoint and field |
 | 🔌 [mcp.md](docs/mcp.md) | MCP tools and the `memory://profile` resource |
 | ⚙️ [configuration.md](docs/configuration.md) | Every config key |
+| 🖥️ [web-ui.md](docs/web-ui.md) | The browser UI at `/ui` |
 | 🐍 [sdk-python.md](docs/sdk-python.md) | The Python client |
 | 🔒 [security.md](docs/security.md) | Isolation guarantees and threat model |
 | 📊 [performance.md](docs/performance.md) | Benchmarks and how they were run |

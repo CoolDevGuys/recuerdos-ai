@@ -153,8 +153,10 @@ workers = 2
 max_attempts = 3
 
 [understanding.taxonomy]
-# Extend the default category list (see docs/architecture.md) without
-# replacing it.
+# Custom categories every user starts with, beside the eight built-ins.
+# Each user's list lives in the database since 0.5 and is changed in the web
+# UI or with /v1/categories; this seeds it the first time it is read, and a
+# user who deletes a seeded category does not get it back.
 extra_categories = []
 
 [consolidation]
@@ -413,6 +415,16 @@ max_memories = 5000
 # api-key | none. "none" is an explicit single-user opt-out: every request
 # is treated as the built-in `default` user. Logged loudly at startup.
 mode = "api-key"
+
+[ui]
+# The web UI at /ui: browse, edit and map your memories in a browser,
+# signed in with an API key. Static files only — the page talks to /v1 like
+# any client, under the key's scopes. Off, /ui is not mounted. See
+# docs/web-ui.md.
+enabled = true
+# Above this many memories the map opens on categories only and loads one
+# category's memories at a time (GET /v1/map?category=).
+map_detail_limit = 5000
 
 [rate_limit]
 # Per-caller request budget, enforced before routing, tracing, or an API-key

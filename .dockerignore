@@ -1,0 +1,4 @@
+# Host-side web UI artifacts: the release image builds the bundle in its own
+# stage (docker/Dockerfile), and macOS node_modules are useless in Linux.
+web/node_modules
+web/dist

@@ -300,6 +300,155 @@ pub struct AuditResponse {
     pub entries: Vec<AuditEntryResponse>,
 }
 
+/// One category a memory can be filed under, with how many of the caller's
+/// active memories are.
+#[derive(Debug, Serialize)]
+pub struct CategoryResponse {
+    pub id: String,
+    /// What to show: the user's label, else the default wording.
+    pub label: String,
+    /// The default wording, so a UI can offer "reset to default".
+    pub default_label: String,
+    pub built_in: bool,
+    /// False for a category still on a stored memory but not in the
+    /// user's catalog: shown so its memories can be moved.
+    pub known: bool,
+    pub count: usize,
+}
+
+/// `POST /v1/categories`.
+#[derive(Debug, Deserialize)]
+pub struct CreateCategoryRequest {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// `PATCH /v1/categories/{id}`: `label` (any category; `null` resets it)
+/// and/or `id` (custom only: a rename that re-files the members).
+#[derive(Debug, Deserialize)]
+pub struct UpdateCategoryRequest {
+    #[serde(default, with = "serde_with_double_option")]
+    pub label: Option<Option<String>>,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `POST /v1/categories/{id}/merge`.
+#[derive(Debug, Deserialize)]
+pub struct MergeCategoryRequest {
+    pub into: String,
+}
+
+/// The answer to a change that moved memories between categories.
+#[derive(Debug, Serialize)]
+pub struct CategoryChangeResponse {
+    pub category: Option<CategoryResponse>,
+    /// Memories re-filed.
+    pub moved: usize,
+    /// Of those, re-embedded because their embedded text changed.
+    pub reembedded: usize,
+}
+
+/// `POST /v1/memories:bulk`.
+#[derive(Debug, Deserialize)]
+pub struct BulkRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub set: BulkSet,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BulkSet {
+    #[serde(default)]
+    pub category: Option<String>,
+    /// `null` clears the sub-label; omitting it leaves it alone.
+    #[serde(default, with = "serde_with_double_option")]
+    pub subcategory: Option<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkResponse {
+    pub memories: Vec<MemoryResponse>,
+    pub changed: usize,
+    pub reembedded: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CategoriesResponse {
+    pub categories: Vec<CategoryResponse>,
+}
+
+/// `GET /v1/map`: everything the mental map draws, in one answer.
+#[derive(Debug, Serialize)]
+pub struct MapResponse {
+    /// Changes whenever the memories do; a client may compare it to know
+    /// whether a cached layout still fits.
+    pub generation: String,
+    pub k: usize,
+    /// The least `weight` a similarity edge here has.
+    pub min_weight: f32,
+    /// True when the store is too large for similarity edges.
+    pub edges_omitted: bool,
+    /// `memories` when `nodes` holds every memory in scope; `categories`
+    /// when the store is above the detail limit and only the category
+    /// summary is sent.
+    pub detail: &'static str,
+    /// Memories in scope, whether or not `nodes` carries them.
+    pub total: usize,
+    /// The category this map is limited to, if any.
+    pub category: Option<String>,
+    pub nodes: Vec<MemoryResponse>,
+    pub edges: Vec<MapEdge>,
+    pub categories: Vec<MapCategory>,
+    pub category_edges: Vec<MapCategoryEdge>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MapEdge {
+    /// Mutual nearest neighbours; `weight` is similarity above the model's
+    /// baseline, `0..=1`.
+    Similar {
+        source: String,
+        target: String,
+        weight: f32,
+    },
+    /// `source` asserted a relation about an entity `target` mentions.
+    Relation {
+        source: String,
+        target: String,
+        predicate: String,
+        entity: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapCategory {
+    pub id: String,
+    pub label: String,
+    pub built_in: bool,
+    pub count: usize,
+    pub subcategories: Vec<MapSubcategory>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapSubcategory {
+    pub name: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MapCategoryEdge {
+    pub source: String,
+    pub target: String,
+    pub weight: f32,
+}
+
 /// serde has no built-in way to distinguish "absent" from "explicit
 /// null", which is exactly the distinction a PATCH needs.
 mod serde_with_double_option {

@@ -74,6 +74,7 @@ impl HttpMemoryToolbox {
             403 => RaError::Forbidden(message),
             404 => RaError::NotFound(message),
             409 => RaError::Conflict(message),
+            412 => RaError::PreconditionFailed(message),
             _ => RaError::Internal(format!("daemon returned {status}: {message}")),
         })
     }

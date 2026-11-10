@@ -521,7 +521,9 @@ fn to_mcp_error(error: RaError) -> ErrorData {
             "this Recuerdos AI API key is not permitted to do that",
             None,
         ),
-        RaError::Conflict(message) => ErrorData::invalid_request(message, None),
+        RaError::Conflict(message) | RaError::PreconditionFailed(message) => {
+            ErrorData::invalid_request(message, None)
+        }
         // A busy second stage is not a client's mistake and never reaches
         // here anyway — the recaller serves the pre-rerank order (invariant
         // I-2) — so it answers with the same opaque internal error as any

@@ -30,6 +30,30 @@ pub struct AppConfig {
     pub rerank: RerankConfig,
     pub auth: AuthConfig,
     pub rate_limit: RateLimitConfig,
+    pub ui: UiConfig,
+}
+
+/// `[ui]`: the web UI served at `/ui` (ai-specs/web-ui-plan.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Whether `/ui` is mounted. Off, the routes do not exist (404) — the
+    /// API is unaffected either way, and the UI holds no data of its own.
+    pub enabled: bool,
+    /// Above this many memories, `GET /v1/map` answers with categories and
+    /// their counts only, and the map loads one category's memories at a
+    /// time (`?category=`). Laying out and drawing every memory of a very
+    /// large store at once would stall the browser.
+    pub map_detail_limit: usize,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            map_detail_limit: crate::memories::application::memory_mapper::DEFAULT_DETAIL_LIMIT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -846,6 +870,10 @@ impl AppConfig {
                 "[rate_limit].requests_per_minute is 0 — use enabled = false to turn the limit off"
                     .to_string(),
             );
+        }
+        if self.ui.map_detail_limit == 0 {
+            issues
+                .push("[ui].map_detail_limit is 0 — the map would never show a memory".to_string());
         }
         if self.rate_limit.enabled && self.rate_limit.burst == 0 {
             issues.push("[rate_limit].burst is 0 — every request would be refused".to_string());

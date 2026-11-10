@@ -66,6 +66,25 @@ check-native:
 test-native:
     cargo test
 
+# Build the web UI bundle (web/dist) that the daemon embeds at /ui. Run it
+# before `cargo build` for a binary that serves the UI; without it the
+# daemon still builds and /ui answers 503 with this command.
+web-build:
+    pnpm --dir web install --frozen-lockfile
+    pnpm --dir web build
+
+# Type-check, lint and test the web UI.
+web-test:
+    pnpm --dir web install --frozen-lockfile
+    pnpm --dir web typecheck
+    pnpm --dir web lint
+    pnpm --dir web test
+
+# The web UI's dev server on :5173, proxying /v1 to a daemon on :7070.
+web-dev:
+    pnpm --dir web install --frozen-lockfile
+    pnpm --dir web dev
+
 fmt-native:
     cargo fmt
 

@@ -242,6 +242,7 @@ mod tests {
             mcp_http: false,
             mcp_allowed_hosts: Vec::new(),
             ingest_timeout: std::time::Duration::from_secs(180),
+            ui: false,
         };
 
         let router = Router::new()

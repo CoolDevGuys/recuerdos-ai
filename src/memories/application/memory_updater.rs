@@ -58,6 +58,15 @@ impl MemoryUpdater {
             .find(context, id)?
             .ok_or_else(|| RaError::NotFound(format!("memory {id} not found")))?;
 
+        if let Some(expected) = edit.expected_updated_at
+            && expected != existing.updated_at()
+        {
+            return Err(RaError::PreconditionFailed(format!(
+                "memory {id} changed since it was read (now updated at {})",
+                existing.updated_at().to_rfc3339()
+            )));
+        }
+
         let content_changed = edit
             .content
             .as_ref()
@@ -150,6 +159,55 @@ mod tests {
 
         assert_eq!(results.len(), 1, "the new wording should be findable");
         assert_eq!(results[0].memory.content(), "deploys on hetzner");
+    }
+
+    #[test]
+    fn an_edit_based_on_the_current_version_applies() {
+        let fixture = Fixture::new();
+        let memory = fixture.save(&fixture.alex, "original");
+
+        let updated = fixture
+            .updater()
+            .execute(
+                &fixture.alex,
+                memory.id(),
+                MemoryEdit {
+                    expected_updated_at: Some(memory.updated_at()),
+                    ..content_edit("revised")
+                },
+                "test",
+            )
+            .unwrap();
+
+        assert_eq!(updated.content(), "revised");
+    }
+
+    #[test]
+    fn an_edit_based_on_a_stale_version_is_refused_and_changes_nothing() {
+        let fixture = Fixture::new();
+        let memory = fixture.save(&fixture.alex, "original");
+        let stale = memory.updated_at() - chrono::Duration::seconds(5);
+
+        let err = fixture
+            .updater()
+            .execute(
+                &fixture.alex,
+                memory.id(),
+                MemoryEdit {
+                    expected_updated_at: Some(stale),
+                    ..content_edit("overwrite")
+                },
+                "test",
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, RaError::PreconditionFailed(_)), "got {err:?}");
+        let kept = fixture
+            .memories
+            .find(&fixture.alex, memory.id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.content(), "original");
     }
 
     #[test]

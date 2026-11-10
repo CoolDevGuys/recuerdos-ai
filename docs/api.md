@@ -357,16 +357,178 @@ therefore return fewer than `limit` results even when more exist.
 Requires `read`. `404` both when the memory doesn't exist and when it
 belongs to another user — the two are deliberately indistinguishable.
 
+The response carries an `ETag`: the memory's `updated_at`, quoted. Send it
+back as `If-Match` on a `PATCH` to make the edit conditional.
+
 ### `PATCH /v1/memories/{id}`
 
-Requires `write`. Any of `content`, `category`, `tags`, `expires_at`.
-Omitting a field leaves it alone; sending `"expires_at": null` clears it.
-Editing content re-embeds and re-indexes.
+Requires `write`. Any of `content`, `category`, `subcategory`, `tags`,
+`expires_at`. Omitting a field leaves it alone; sending `null` for
+`subcategory` or `expires_at` clears it. Editing content re-embeds and
+re-indexes; so does editing the labels under `document_text = "enriched"`.
+
+**Conditional edits.** With `If-Match: "<updated_at>"` (the `ETag` of a
+`GET`, `PATCH` or restore, or the `updated_at` of any listing), the edit
+applies only if the memory has not changed since. If it has, the answer is
+`412 {"error": {"code": "precondition_failed", …}}` and nothing changes:
+re-read it and decide. `If-Match: *` or no header edits unconditionally,
+as before. The response carries the new `ETag`.
 
 ### `DELETE /v1/memories/{id}`
 
 Requires `write`. Responds `204`. A soft delete: the memory stops being
 recalled, and the audit trail keeps what happened to it.
+
+### `POST /v1/memories/{id}/restore`
+
+Requires `write`. Undoes a `DELETE`: the memory comes back with its id,
+`created_at` and history, is re-embedded and re-indexed, and is recalled
+again. Answers the memory (with an `ETag`). `404` when it is not yours or
+was never forgotten. Audited as `restore`.
+
+### `GET /v1/map`
+
+Requires `read`. Your memories as a graph, for the web UI's mental map:
+
+```json
+{
+  "generation": "4182",
+  "k": 5,
+  "min_weight": 0.15,
+  "edges_omitted": false,
+  "detail": "memories",
+  "total": 222,
+  "category": null,
+  "nodes": [{"id": "…", "content": "…", "category": "preference.coding", …}],
+  "edges": [
+    {"kind": "similar", "source": "…", "target": "…", "weight": 0.62},
+    {"kind": "relation", "source": "…", "target": "…", "predicate": "deploys_on", "entity": "Hetzner"}
+  ],
+  "categories": [{"id": "preference.coding", "label": "Coding preference", "built_in": true,
+                  "count": 72, "subcategories": [{"name": "testing", "count": 9}]}],
+  "category_edges": [{"source": "decision", "target": "fact.project", "weight": 0.41}]
+}
+```
+
+- **`nodes`**: your active memories, plus superseded ones with
+  `?include_superseded=true`.
+- **`similar` edges** join *mutual* nearest neighbours: each of the two memories is
+  among the other's `k` most similar (`?k=1..15`, default 5).
+  - "Mutual" stops one generic memory from linking to everything.
+  - `weight` is the similarity above the embedding model's baseline for
+    unrelated text (the same calibration recall uses), from 0 to 1. Only links
+    of at least `min_weight` are returned.
+- **`relation` edges** come from the entity graph, and only when `[graph].enabled`
+  is on. One memory stated a relation about an entity the other mentions.
+- **`category_edges`** add up the similarity between categories, scaled by
+  their sizes.
+- **`generation`** changes whenever your memories do. The similarity links are
+  cached until it changes.
+- **Above 3 000 memories** the pairwise comparison is skipped and
+  `edges_omitted` is `true`.
+- **`?category=<id>`** limits the map to one category's memories, with the
+  similarity links among them. A category nobody uses gives an empty map,
+  not an error. `category` in the answer echoes it.
+- **Above the detail limit** (`[ui].map_detail_limit`, 5 000 by default), a
+  whole-store map comes back as `"detail": "categories"`:
+  - `nodes` and `edges` are empty;
+  - `categories` carries every category with its count;
+  - `category_edges` link each category to its 3 most similar, by comparing the
+    categories' mean vectors.
+
+  Ask with `?category=` for each category's memories. A category map is
+  always `"detail": "memories"`, whatever its size.
+- **`total`** is how many memories are in scope, whether or not `nodes`
+  carries them.
+
+### `POST /v1/memories:bulk`
+
+Requires `write`. One edit applied to many memories:
+
+```json
+{"ids": ["…", "…"],
+ "set": {"category": "skill", "subcategory": null},
+ "add_tags": ["rust"], "remove_tags": ["misc"]}
+```
+
+- **`set`** fields are optional. `subcategory: null` clears the sub-label;
+  leaving it out leaves it alone. `category` must be one of yours.
+- **All or nothing.** Every id must be one of your active memories, or
+  nothing changes and the answer is `404` naming the ones that were not.
+  Unchanged memories are left alone.
+- **At most 500 ids**, and the edit must change something (`400` otherwise).
+- Memories whose embedded text changed are re-embedded (under the default
+  `document_text = "enriched"`, a re-file or re-tag does that). The new
+  vectors are computed before anything is written, so a failing embedder
+  changes nothing.
+- One audit entry per memory, all with the same `detail`
+  (`bulk edit of 2 memories: category → skill; +tags rust`).
+
+Answers `{"memories": [...], "changed": 2, "reembedded": 2}`.
+
+## Categories you can change
+
+Each user has their own taxonomy: the eight built-ins, plus custom
+categories they create. A category created here is valid at once for
+`memory_save`, `POST /v1/memories:direct`, search filters, and the AI
+classifier, which is offered it on that user's next ingest.
+
+### `GET /v1/categories`
+
+Requires `read`. Every category, with how many of your active memories are
+filed under it:
+
+```json
+{"categories": [
+  {"id": "preference.coding", "label": "How I code", "default_label": "Coding preference",
+   "built_in": true, "known": true, "count": 12},
+  {"id": "health.sleep", "label": "Sleep log", "default_label": "Health sleep",
+   "built_in": false, "known": true, "count": 3}
+]}
+```
+
+Built-ins come first, in taxonomy order, even when empty, then your custom
+categories by id. Last come any categories still on one of your memories but
+not in your list (`known: false`), so they can be found and moved, or added
+back with `POST /v1/categories`.
+
+### `POST /v1/categories`
+
+Requires `write`. `{"id": "health.sleep", "label": "Sleep log"}` (label
+optional). The id is lowercased and must start with a letter and use only
+`a–z`, `0–9`, `.`, `_` and `-`, up to 64 characters. `409` when you already
+have it or it is a built-in's id. Answers `201` and the category.
+
+### `PATCH /v1/categories/{id}`
+
+Requires `write`. Either field, or both:
+
+- **`label`**: what the UI shows, for any category, built-ins included.
+  `null` or blank goes back to the default wording. Display only: nothing is
+  re-embedded, and agents keep filtering by the id.
+- **`id`**: renames a custom category (`409` for a built-in, whose id never
+  changes). Every memory filed under it moves to the new id and is
+  re-embedded, because the enriched vector's text names the category. Agents
+  filtering by the old id need the new one.
+
+Answers `{"category": {...}, "moved": 5, "reembedded": 5}`.
+
+### `POST /v1/categories/{id}/merge`
+
+Requires `write`. `{"into": "fact.project"}`: moves every memory of custom
+category `id` into `into` (a built-in or another of yours), then deletes
+`id`. Answers like `PATCH`.
+
+### `DELETE /v1/categories/{id}`
+
+Requires `write`. Deletes a custom category. While memories are still filed
+under it the answer is `409`, unless `?move_to=<category>` says where they
+go (then it is a merge). Built-ins cannot be deleted.
+
+All category writes and bulk edits are audited per memory moved. The audit
+`actor` is the client's own name from an `X-Recuerdos-Client` header when it
+sends one (the web UI sends `web-ui`), else `rest`. It is informational: any
+client can send any name.
 
 ### `GET /v1/memories/export`
 
@@ -375,6 +537,9 @@ Requires `read`. `?format=markdown` (default) or `?format=json`, plus
 
 Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
+
+JSON items carry `id`, `content`, `category`, `subcategory` (or `null`),
+`tags`, `confidence`, `created_at`, `updated_at` and `superseded_by`.
 
 ### `POST /v1/sessions/distill`
 
@@ -436,15 +601,17 @@ and a shell script see one profile.
 Requires `read`. `?limit=` (default 100, max 500). Every mutation this
 user has made, newest first, including deletions.
 
-## Categories
+## The taxonomy
 
-A closed taxonomy, extensible via `[understanding.taxonomy]`:
+Eight built-in categories, always valid:
 
 `preference.coding` · `preference.personal` · `decision` ·
 `fact.project` · `fact.person` · `experience` · `skill` · `reference`
 
-Unknown category names are rejected rather than silently created — a typo
-would otherwise produce a category nothing ever matches.
+Each user adds their own with `POST /v1/categories`.
+`[understanding.taxonomy].extra_categories` seeds every user's list the first
+time it is read. Unknown category names are rejected rather than silently
+created: a typo would otherwise produce a category nothing ever matches.
 
 ## Not yet implemented
 

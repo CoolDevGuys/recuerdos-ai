@@ -24,6 +24,13 @@ pub enum RaError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The caller edited on the strength of a version that is no longer the
+    /// current one (`If-Match` named an older `updated_at`). Distinct from
+    /// `Conflict` because the remedy differs: re-read and decide, rather than
+    /// retry — and the ingest pipeline retries a `Conflict`.
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
+
     /// Every rerank session was busy for as long as the caller was willing
     /// to wait (`Reranker::score_before`), so the stage was given up on
     /// *before* it started rather than part-way through its inference.

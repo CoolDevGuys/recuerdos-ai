@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
@@ -49,6 +49,20 @@ pub fn init_tracing() {
 }
 
 pub fn router(state: AppState) -> Router {
+    let ui = state.ui;
+    let api = api_router(state);
+    if ui {
+        // Static files only, no state and no auth (web_ui.rs explains why).
+        // Outside the request-timeout layer, which has nothing to cut short.
+        api.merge(crate::bootstrap::web_ui::routes(
+            crate::bootstrap::web_ui::built_in(),
+        ))
+    } else {
+        api
+    }
+}
+
+fn api_router(state: AppState) -> Router {
     // The write routes run the LLM ingest pipeline — extraction plus a
     // reconciliation call per candidate — and a `wait: true` request runs
     // it inline; a batch runs it once per item. That is seconds to minutes
@@ -61,6 +75,27 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/memories/batch",
             post(understanding_http::handlers::ingest_batch),
+        )
+        // Curation that may re-embed many memories in the request: renaming
+        // or merging a category re-files every member, and a bulk edit up to
+        // 500. They share the ingest timeout rather than the 30 s cap.
+        .route(
+            "/v1/memories:bulk",
+            post(memories_http::handlers::bulk_edit_memories),
+        )
+        .route(
+            "/v1/categories",
+            get(memories_http::handlers::list_categories)
+                .post(memories_http::handlers::create_category),
+        )
+        .route(
+            "/v1/categories/{id}",
+            patch(memories_http::handlers::update_category)
+                .delete(memories_http::handlers::delete_category),
+        )
+        .route(
+            "/v1/categories/{id}/merge",
+            post(memories_http::handlers::merge_category),
         )
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -103,6 +138,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/profile",
             get(consolidation_http::handlers::read_profile),
         )
+        .route(
+            "/v1/memories/{id}/restore",
+            post(memories_http::handlers::restore_memory),
+        )
+        .route("/v1/map", get(memories_http::handlers::read_map))
         .route("/v1/audit", get(memories_http::handlers::read_audit))
         // The 30s cap covers only the routes added above it. The write
         // routes are merged in afterwards so they keep their own longer
@@ -257,7 +297,11 @@ impl Gate {
 /// unhealthy service, and a healthy daemon gets restarted — the limiter would
 /// have caused the outage it was preventing.
 async fn rate_limit(State(gate): State<Gate>, request: Request, next: Next) -> Response {
-    if request.uri().path() == "/healthz" {
+    // The UI's static files are exempt too: loading the page fetches several
+    // of them at once, each a map lookup with no data behind it, and charging
+    // them would spend a browser's budget before its first API call.
+    let path = request.uri().path();
+    if path == "/healthz" || crate::bootstrap::web_ui::is_ui_path(path) {
         return next.run(request).await;
     }
 

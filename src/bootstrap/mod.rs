@@ -11,4 +11,5 @@ pub mod rerank_audit;
 pub mod server;
 pub mod state;
 pub mod understanding_wiring;
+pub mod web_ui;
 pub mod wiring;

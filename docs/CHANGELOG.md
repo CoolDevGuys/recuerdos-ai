@@ -5,6 +5,181 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P4: large stores, a layout that stays put, keyboard, colour vision
+
+- **Large stores.** `GET /v1/map` takes `?category=` for one category's memories
+  and their links. Above `[ui].map_detail_limit` (new, default 5 000), a
+  whole-store map comes back as `"detail": "categories"`: counts only, with
+  category links computed from each category's mean vector (`O(n·d)`, not `n²`).
+  New fields: `detail`, `total`, `category`. The cache keeps whole-store and
+  per-category answers side by side, and drops older generations.
+  - In the UI, such a store opens on its categories. Opening one shows that
+    category's own map, starting at its clusters. **All categories** goes back.
+- **The layout runs in a Web Worker** (inline where workers are missing, as in
+  jsdom), and **the browser keeps the last layout** of each map in
+  `localStorage`: ids and coordinates only, cleared on sign-out.
+  - Reopening an unchanged map takes 5–16 ms instead of 0.4–1.3 s.
+  - After an edit, new or re-filed memories are placed by their pinned
+    neighbours and nothing else moves. For 5 000 memories that takes 10 ms,
+    where a fresh layout took 1.3 s.
+- **Keyboard.** The map is focusable: `+`/`-` zoom, `0` fits, `1`–`3` jump to
+  a level, the arrows pan, Escape clears a selection. Jumping to a closer level
+  now closes in on the nearest category or cluster. Before, zooming in on the
+  centre of the category ring could show an empty view.
+- **Colour vision.** The palette was re-chosen so the built-ins stay at least
+  ΔE 14 apart under simulated protanopia, deuteranopia and tritanopia (before:
+  as close as 2.1). Every colour now keeps 3:1 on both backgrounds (one custom
+  colour was 2.94:1 on white). A test enforces both.
+- **Dark mode**: the map's labels follow a theme switch while it is open.
+- **Lint**: `pnpm --dir web lint` (oxlint, with the React-hooks and jsx-a11y
+  rules) gates CI and `just web-test`. It caught the map rebuilding its
+  highlight set, and so re-styling every node, on every render.
+- **Docs**: `docs/web-ui.md` gains screenshots from a demo store
+  (`web/scripts/seed-demo.mjs`, `web/scripts/screenshots.mjs`), the keyboard
+  table, large stores, dark mode and phone width.
+
+### Web UI, phase P3: your own categories, and editing many memories at once
+
+- **Each user's taxonomy lives in the database** (migration V10: `categories`,
+  `category_seeds`), behind a `CategoryCatalog` port.
+  - Every place that validates a category reads the caller's list: HTTP saves,
+    edits and search filters, MCP (through HTTP), the verbatim ingestor, the AI
+    classifier's prompt and schema, and consolidation's merge prompt. The
+    pipelines take a per-call `TaxonomySource` instead of one list fixed at
+    startup.
+  - `[understanding.taxonomy].extra_categories` becomes a **seed**. The first
+    time a user's list is read, it gets the extras plus every custom category
+    already on their memories, once. On a copy of the field store, all 179
+    active memories kept their categories.
+- **Category endpoints:** `POST /v1/categories`, `PATCH /v1/categories/{id}`
+  (relabel any; rename a custom one's id), `POST /v1/categories/{id}/merge`,
+  and `DELETE /v1/categories/{id}` (`409` while non-empty, unless `?move_to=`).
+  - A label is display-only and never re-embeds.
+  - A rename or merge re-files the members through the same path as a bulk
+    edit, and re-embeds them. On the field-store copy, renaming a 5-memory
+    category took 68 ms in a debug build, and recall filtered to the new id
+    found them at 0.81.
+  - `GET /v1/categories` adds `default_label` and `known`. `/v1/map` shows the
+    user's labels.
+- **`POST /v1/memories:bulk`**: set the category or sub-label and add or remove
+  tags on up to 500 memories.
+  - All or nothing, in one transaction (`MemoryRepository::update_many`).
+  - It embeds before it writes, so a failing embedder changes nothing.
+  - One audit entry per memory with a shared detail.
+- **The audit trail names the client.** REST writes record the
+  `X-Recuerdos-Client` name when it is well-formed (the UI sends `web-ui`),
+  else `rest`, as before.
+- **UI:**
+  - a **Categories** tab: create, relabel, rename, merge and delete, with
+    counts, and each move spelled out before it happens;
+  - **Select** mode in the list;
+  - **Lasso select** on the map: Shift-drag, or the toggle. A lasso around a
+    disc takes its members, and the selection lights up in place without
+    burying the map in labels;
+  - one bulk editor serves both.
+- **Tests:**
+  - Rust: 988 unit tests (catalog seeding and isolation, the curator,
+    all-or-nothing bulk edits, taxonomy per user) and a new `tests/categories.rs`
+    with 10 HTTP tests;
+  - web: 162 tests, plus a fifth Playwright test (create → bulk-move → rename
+    → recall → merge against a real daemon);
+  - the eval baseline is unchanged (recall@5 83.3 %, P@1 73.1 %, MRR 77.7 %).
+
+### Web UI, phase P2: the mental map
+
+- **`GET /v1/map`**: memories, links between them, and the category summary in
+  one answer.
+  - Similarity links are **mutual k-nearest neighbours** with a floor above the
+    model's similarity baseline, so a generic "hub" memory cannot wire itself
+    to everything. On a 179-memory store: 278 links, at most 5 per memory, and
+    6 memories with none.
+  - Relation links come from the entity graph when it is enabled.
+  - The links are cached per user until the audit trail moves.
+    `VectorIndex::all`, `EntityGraph::memory_links` and
+    `MemoryRepository::generation` are the new reads.
+- **Map view at `/ui/map`** (Sigma.js 3 / WebGL + graphology, loaded only
+  when the map is opened):
+  - semantic zoom from categories through clusters to memories, each level
+    sliding out of the one above;
+  - deterministic ForceAtlas2 layout, with each category held together as an
+    island;
+  - clusters are sub-labels when most memories have one, otherwise Louvain
+    communities named after their most shared tag;
+  - every category has a colour, a glyph and a name;
+  - category outlines at the cluster level;
+  - hovering a memory shows its neighbourhood;
+  - category, link-kind and minimum-similarity filters.
+- **Recall preview**: run a question through recall from the map. It shows the
+  results with relevance and which search found each one, lights them up in
+  place at any zoom, and opens one on click.
+- **Playwright end-to-end tests** (`web/e2e`): sign-in, edit, forget/undo, the
+  map's real camera reaching each level, and the recall preview. They run in
+  CI's Docker job against the release image.
+- Bundle: 87 KB gzip up front. The map adds 22 KB and the renderer 34 KB, loaded
+  on demand.
+
+### Web UI, phase P1: correct, add and forget memories
+
+- **Editor panel.** Open a memory to correct its text, category, sub-label and
+  tags. Only the changed fields are sent.
+  - Fields are validated on blur and on submit, against the daemon's own limits.
+  - Typed text is never cleared on failure.
+- **Conditional edits, end to end.**
+  - `GET`, `PATCH` and restore answer an `ETag` (the memory's `updated_at`).
+  - `PATCH` honours `If-Match` and answers **`412 precondition_failed`** when the
+    memory changed since.
+  - The editor then offers "Load the latest" or "Save mine anyway".
+  - Without the header, `PATCH` behaves exactly as before.
+- **`POST /v1/memories/{id}/restore`** undoes a forget. It keeps the id,
+  `created_at` and history, and re-embeds and re-indexes the memory.
+  - If re-embedding fails, the memory is forgotten again rather than left
+    half-restored.
+  - Audited as the new `restore` operation.
+  - The UI's forget shows an 8-second **Undo** that calls it.
+- **`GET /v1/categories`** lists the built-ins, the configured extras, and any
+  stored category no longer configured, each with its label and the caller's
+  count. Category wording now lives on `Category::label`, which the enriched
+  vector header also uses; the embedded text is unchanged.
+- **Add memory**, two ways:
+  - saved exactly as written (`/v1/memories:direct`);
+  - or through the AI pipeline (`POST /v1/memories`, `wait: true`), whose outcome
+    is reported in words: saved N, already known, nothing lasting, or changed
+    existing memories.
+- A `read`-only key opens memories without edit controls.
+- MCP: a `412` from the daemon maps to an invalid-request error, like `409`.
+
+### Web UI, phase P0: sign in and browse at `/ui`
+
+The first slice of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+
+- **The daemon serves a browser UI at `/ui`.** It is a React + TypeScript app
+  (`web/`), built with Vite and compiled into the binary via `rust-embed`
+  behind a default `ui` cargo feature.
+  - Sign in with an API key. The UI checks the key's shape on blur and verifies
+    it with `GET /v1/ping`.
+  - The header shows a badge with what the key may do (read-only, read & write,
+    admin).
+  - Memories appear as a list you can filter by text and by category and sort
+    three ways.
+  - On a daemon with `[auth].mode = "none"`, sign-in is skipped and a banner
+    warns that anyone who can reach the port is the `default` user.
+- **`[ui].enabled`** (default `true`). Off, `/ui` is not mounted.
+- **Without the bundle, the daemon still builds.** If `web/dist` was never built,
+  `/ui` answers `503` with the command that builds it (`just web-build`), so
+  tests, the eval and the dev container need no Node.
+  - Release binaries and the Docker image build the bundle first. The release
+    workflow fails if it is missing.
+  - CI's Docker smoke test checks that `/ui/` is the app.
+- **Security.**
+  - Strict CSP: `script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`.
+  - `nosniff` and `no-referrer`.
+  - The key is held in `sessionStorage` only.
+  - Asset requests are not charged to the rate limiter.
+- `GET /v1/memories/export?format=json` now includes each memory's `subcategory`.
+- New `just web-build`, `just web-test` and `just web-dev` recipes.
+- CI runs a `web` job: type-check, Vitest, build, and a 400 KB gzip bundle budget.
+  The initial bundle is about 84 KB.
+
 ### Enriched vectors by default, and the rerank `replace` strategy removed
 
 A second audit on the pipeline above (concept-recall-plan.md §11) found no unused settings left and two

@@ -332,7 +332,10 @@ mod tests {
         // and it is spent from a context window every time it matches.
         let fixture = Fixture::new();
         let distiller = SessionDistiller::new(
-            Arc::new(VerbatimIngestor::new(Arc::new(fixture.saver()), vec![])),
+            Arc::new(VerbatimIngestor::new(
+                Arc::new(fixture.saver()),
+                Arc::new(Taxonomy::new(vec![])),
+            )),
             false,
         );
 

@@ -27,6 +27,8 @@ pub enum AuditOperation {
     /// and the store tidied itself. "Why did five of my memories become
     /// one overnight?" is only answerable if those two look different.
     Merge,
+    /// A forgotten memory brought back (the web UI's undo).
+    Restore,
 }
 
 impl AuditOperation {
@@ -37,6 +39,7 @@ impl AuditOperation {
             AuditOperation::Delete => "delete",
             AuditOperation::Supersede => "supersede",
             AuditOperation::Merge => "merge",
+            AuditOperation::Restore => "restore",
         }
     }
 }
@@ -57,6 +60,17 @@ pub trait MemoryRepository: Send + Sync {
 
     fn update(&self, context: &UserContext, memory: &Memory, actor: &str) -> Result<()>;
 
+    /// Writes many edited memories in one transaction, one audit entry each
+    /// carrying `detail`. All or nothing: if any of them is not this user's
+    /// active memory, nothing is written and the answer is `NotFound`.
+    fn update_many(
+        &self,
+        context: &UserContext,
+        memories: &[Memory],
+        actor: &str,
+        detail: &str,
+    ) -> Result<()>;
+
     /// Soft delete: the row is retained and the audit entry written, but
     /// the memory stops appearing in recall. Hard deletion belongs to the
     /// governance path (project-plan.md §15), not to ordinary use.
@@ -65,6 +79,12 @@ pub trait MemoryRepository: Send + Sync {
     /// is the question the trail exists to answer, and it can only do so
     /// if whoever removed the memory said why.
     fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()>;
+
+    /// Undoes [`delete`](Self::delete): clears the soft-delete marker and
+    /// returns the memory as it was, id and timestamps intact. `NotFound`
+    /// when the memory is not this user's or is not forgotten — the same
+    /// answer either way, like every other lookup here.
+    fn restore(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<Memory>;
 
     /// Marks `superseded` as replaced by `replacement`.
     ///
@@ -114,6 +134,11 @@ pub trait MemoryRepository: Send + Sync {
     fn list(&self, context: &UserContext, include_inactive: bool) -> Result<Vec<Memory>>;
 
     fn audit_trail(&self, context: &UserContext, limit: usize) -> Result<Vec<AuditEntry>>;
+
+    /// A number that changes whenever this user's memories do: every
+    /// mutation writes an audit entry, so the latest entry's position is a
+    /// version of the whole store. Used to cache derived views (the map).
+    fn generation(&self, context: &UserContext) -> Result<i64>;
 
     /// Writes recomputed decay scores.
     ///
