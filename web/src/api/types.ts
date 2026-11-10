@@ -107,6 +107,16 @@ export interface MapData {
   minWeight: number;
   /** The store is too large for similarity edges. */
   edgesOmitted: boolean;
+  /**
+   * `memories` when `nodes` holds every memory in scope; `categories` when the
+   * store is above the daemon's detail limit and only the category summary
+   * came back — ask for one category to see its memories.
+   */
+  detail: "memories" | "categories";
+  /** Memories in scope, whether or not `nodes` carries them. */
+  total: number;
+  /** The category this map is limited to, or `null` for the whole store. */
+  category: string | null;
   nodes: Memory[];
   edges: MapEdge[];
   categories: MapCategory[];

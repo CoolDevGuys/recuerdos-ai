@@ -68,6 +68,8 @@ export class FakeServer {
   understanding = true;
   /** The edges `getMap` reports, between whatever memories exist. */
   mapEdges: MapEdge[] = [];
+  /** Above this many memories the whole-store map is categories only, as the daemon's `[ui].map_detail_limit`. */
+  mapDetailLimit = Number.POSITIVE_INFINITY;
   /** Requests seen, for assertions about what was (not) sent. */
   readonly calls: { method: string; id?: string; version?: string | null; patch?: MemoryPatch }[] = [];
 
@@ -307,11 +309,16 @@ class FakeClient implements ApiClient {
     return copy(memory);
   }
 
-  async getMap(): Promise<MapData> {
+  async getMap(category: string | null = null): Promise<MapData> {
     const account = this.readable();
-    const present = new Set(account.memories.map((m) => m.id));
+    const generation = String(this.server.calls.length);
+    this.server.calls.push({ method: "map", ...(category !== null && { id: category }) });
+    const inScope = account.memories.filter((m) => category === null || m.category === category);
+    const aggregate = category === null && inScope.length > this.server.mapDetailLimit;
+    const nodes = aggregate ? [] : inScope;
+    const present = new Set(nodes.map((m) => m.id));
     const categories = new Map<string, { count: number; subs: Map<string, number> }>();
-    for (const m of account.memories) {
+    for (const m of inScope) {
       const entry = categories.get(m.category) ?? { count: 0, subs: new Map<string, number>() };
       entry.count += 1;
       if (m.subcategory !== null) entry.subs.set(m.subcategory, (entry.subs.get(m.subcategory) ?? 0) + 1);
@@ -319,10 +326,13 @@ class FakeClient implements ApiClient {
     }
     const label = (id: string) => account.relabelled.get(id) ?? account.custom.get(id) ?? defaultLabel(id);
     return {
-      generation: String(this.server.calls.length),
+      generation,
       minWeight: 0.15,
       edgesOmitted: false,
-      nodes: account.memories.map(copy),
+      detail: aggregate ? "categories" : "memories",
+      total: inScope.length,
+      category,
+      nodes: nodes.map(copy),
       edges: this.server.mapEdges.filter((e) => present.has(e.source) && present.has(e.target)),
       categories: [...categories].map(([id, entry]) => ({
         id,

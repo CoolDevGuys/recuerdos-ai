@@ -162,6 +162,8 @@ export function MemoryList({
               }
             >
               {selecting && canSelect ? (
+                // The memory's text inside is the label; the rule cannot see text from an expression.
+                // oxlint-disable-next-line jsx-a11y/label-has-associated-control
                 <label className="flex cursor-pointer gap-3 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                   <input
                     type="checkbox"

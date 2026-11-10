@@ -183,7 +183,7 @@ describe("lasso selection on the map", () => {
     renderApp({ keyStore: memoryKeyStore(key), renderer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("link", { name: "Map" }));
-    await screen.findByRole("img", { name: /Map of 3 memories/ });
+    await screen.findByRole("application", { name: /Map of 3 memories/ });
     await waitFor(() => expect(renderer.model).not.toBeNull());
     return { renderer, user };
   }

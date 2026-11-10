@@ -21,7 +21,7 @@ use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAcce
 use crate::memories::application::category_curator::{CategoryCurator, CategoryView};
 use crate::memories::application::memory_bulk_editor::BulkEdit;
 use crate::memories::application::memory_exporter::ExportFormat;
-use crate::memories::application::memory_mapper::MapQuery;
+use crate::memories::application::memory_mapper::{MapDetail, MapQuery};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory::MemoryEdit;
@@ -227,15 +227,21 @@ pub struct MapParams {
     k: Option<usize>,
     #[serde(default)]
     include_superseded: bool,
+    /// Only this category's memories.
+    #[serde(default)]
+    category: Option<String>,
 }
 
-/// The mental map: every memory, how they link, and the categories.
+/// The mental map: every memory, how they link, and the categories. Above
+/// the detail limit, the categories alone (`detail: "categories"`); ask with
+/// `?category=` for one category's memories.
 pub async fn read_map(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
     Query(params): Query<MapParams>,
 ) -> Result<Json<MapResponse>> {
-    let query = MapQuery::new(params.k, params.include_superseded)?;
+    let query = MapQuery::new(params.k, params.include_superseded)?.in_category(params.category)?;
+    let scope = query.category.clone();
     let memories = state.memories.clone();
     let (map, labels) = blocking(move || {
         let map = memories.mapper.execute(&context, query)?;
@@ -269,6 +275,12 @@ pub async fn read_map(
         k: map.k,
         min_weight: map.min_weight,
         edges_omitted: map.edges_omitted,
+        detail: match map.detail {
+            MapDetail::Memories => "memories",
+            MapDetail::Categories => "categories",
+        },
+        total: map.total,
+        category: scope,
         nodes: map.memories.iter().map(MemoryResponse::from).collect(),
         edges: similar.chain(relations).collect(),
         categories: map

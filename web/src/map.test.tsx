@@ -13,7 +13,7 @@ async function openMap(server: FakeServer = standardServer()) {
   renderApp({ server, keyStore: memoryKeyStore(ALEX_KEY), renderer });
   const user = userEvent.setup();
   await user.click(await screen.findByRole("link", { name: "Map" }));
-  await screen.findByRole("img", { name: /Map of 3 memories/ });
+  await screen.findByRole("application", { name: /Map of 3 memories/ });
   await waitFor(() => expect(renderer.model).not.toBeNull());
   return { server, renderer, user };
 }
@@ -36,7 +36,7 @@ describe("the map view", () => {
     const renderer = new FakeRenderer();
     renderApp({ keyStore: memoryKeyStore(ALEX_KEY), renderer });
 
-    expect(await screen.findByRole("img", { name: /Map of 3 memories/ })).toBeInTheDocument();
+    expect(await screen.findByRole("application", { name: /Map of 3 memories/ })).toBeInTheDocument();
   });
 
   it("lists each category with its glyph, label and count, and filters it out on click", async () => {
@@ -61,7 +61,7 @@ describe("the map view", () => {
 
     renderer.reachLevel("clusters");
     await waitFor(() => expect(within(levels).getByRole("button", { name: "Clusters" })).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.getByRole("img")).toHaveAccessibleName(/showing clusters/);
+    expect(screen.getByRole("application")).toHaveAccessibleName(/showing clusters/);
 
     await user.click(screen.getByRole("button", { name: "Zoom in" }));
     await user.click(screen.getByRole("button", { name: "Fit" }));
@@ -173,3 +173,109 @@ describe("recall preview", () => {
     expect(await screen.findByText("Recall returns nothing for this.")).toBeInTheDocument();
   });
 });
+
+describe("the map from the keyboard", () => {
+  it("zooms, fits, jumps to a level and pans with keys once focused", async () => {
+    const { renderer, user } = await openMap();
+
+    screen.getByRole("application", { name: /Map of 3 memories/ }).focus();
+    await user.keyboard("+-0");
+    await user.keyboard("3");
+    await user.keyboard("{ArrowRight}{ArrowUp}");
+
+    expect(renderer.zooms).toEqual(["in", "out", "reset", "memories"]);
+    expect(renderer.pans).toEqual([
+      [0.2, 0],
+      [0, -0.2],
+    ]);
+  });
+
+  it("explains the keys next to the map", async () => {
+    await openMap();
+
+    expect(screen.getByRole("application", { name: /Map of 3 memories/ })).toHaveAccessibleDescription(/arrow keys pan/);
+  });
+
+  it("leaves lasso mode and clears a selection on Escape", async () => {
+    const { renderer, user } = await openMap();
+    await user.click(screen.getByRole("button", { name: "Lasso select" }));
+    renderer.lasso(["a"]);
+    await screen.findByRole("region", { name: "1 memory selected" });
+
+    screen.getByRole("application", { name: /Map of 3 memories/ }).focus();
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("region", { name: /selected/ })).not.toBeInTheDocument();
+    expect(renderer.lassoModes.at(-1)).toBe(false);
+  });
+});
+
+describe("a store above the detail limit", () => {
+  function bigServer() {
+    const server = standardServer();
+    server.mapDetailLimit = 2;
+    return server;
+  }
+
+  async function openAggregate() {
+    const renderer = new FakeRenderer();
+    const server = bigServer();
+    renderApp({ server, keyStore: memoryKeyStore(ALEX_KEY), renderer });
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("link", { name: "Map" }));
+    await screen.findByRole("application", { name: /showing categories only/ });
+    await waitFor(() => expect(renderer.model?.aggregate).toBe(true));
+    return { server, renderer, user };
+  }
+
+  it("shows the categories and says why", async () => {
+    const { renderer } = await openAggregate();
+
+    expect(screen.getByText(/You have 3 memories, more than the map draws at once/)).toBeInTheDocument();
+    expect(renderer.model?.categories.map((c) => [c.category, c.count])).toEqual([
+      ["preference.coding", 2],
+      ["fact.project", 1],
+    ]);
+    expect(screen.queryByRole("group", { name: "Zoom level" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lasso select" })).not.toBeInTheDocument();
+  });
+
+  it("opens one category's map from the list, and comes back", async () => {
+    const { server, renderer, user } = await openAggregate();
+
+    await user.click(screen.getByRole("button", { name: "Open Coding preference, 2 memories" }));
+
+    expect(await screen.findByRole("heading", { name: /Coding preference · 2 memories/ })).toBeInTheDocument();
+    await waitFor(() => expect(renderer.model?.scope).toBe("preference.coding"));
+    expect(renderer.model?.memories.map((m) => m.id).sort()).toEqual(["a", "b"]);
+    expect(server.calls.filter((c) => c.method === "map").map((c) => c.id ?? "*")).toEqual(["*", "preference.coding"]);
+
+    await user.click(screen.getByRole("button", { name: /All categories/ }));
+    await waitFor(() => expect(renderer.model?.aggregate).toBe(true));
+  });
+
+  it("opens a category clicked on the map", async () => {
+    const { renderer } = await openAggregate();
+
+    renderer.clickCategory("fact.project");
+
+    await waitFor(() => expect(renderer.model?.memories.map((m) => m.id)).toEqual(["c"]));
+  });
+});
+
+describe("the layout cache", () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it("keeps the last layout per user, without memory text, and forgets it on sign-out", async () => {
+    const { user } = await openMap();
+
+    const raw = window.localStorage.getItem("recuerdos.map-layout.v1:alex:*");
+    expect(raw).not.toBeNull();
+    expect(Object.keys(JSON.parse(raw!).positions).sort()).toEqual(["a", "b", "c"]);
+    expect(raw).not.toContain("pnpm");
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(window.localStorage.getItem("recuerdos.map-layout.v1:alex:*")).toBeNull();
+  });
+});
+

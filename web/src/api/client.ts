@@ -40,7 +40,8 @@ export interface ApiClient {
   updateMemory(id: string, patch: MemoryPatch, version: string | null): Promise<Memory>;
   forgetMemory(id: string): Promise<void>;
   restoreMemory(id: string): Promise<Memory>;
-  getMap(): Promise<MapData>;
+  /** The whole store's map, or one category's with `category`. */
+  getMap(category?: string | null): Promise<MapData>;
   /** What recall returns for `query`, as an agent would see it. */
   recall(query: string, limit: number): Promise<RecallHit[]>;
   /** Creates a custom category. */
@@ -156,8 +157,9 @@ export class HttpApiClient implements ApiClient {
     return parseMemory(await this.request(`/v1/memories/${encodeURIComponent(id)}/restore`, { method: "POST" }));
   }
 
-  async getMap(): Promise<MapData> {
-    return parseMap(await this.request("/v1/map"));
+  async getMap(category: string | null = null): Promise<MapData> {
+    const query = category === null ? "" : `?category=${encodeURIComponent(category)}`;
+    return parseMap(await this.request(`/v1/map${query}`));
   }
 
   async recall(query: string, limit: number): Promise<RecallHit[]> {
@@ -375,6 +377,9 @@ export function parseMap(body: unknown): MapData {
     generation: typeof body.generation === "string" ? body.generation : "",
     minWeight: typeof body.min_weight === "number" ? body.min_weight : 0,
     edgesOmitted: body.edges_omitted === true,
+    detail: body.detail === "categories" ? "categories" : "memories",
+    total: typeof body.total === "number" ? body.total : body.nodes.length,
+    category: typeof body.category === "string" ? body.category : null,
     nodes: body.nodes.map(parseMemory),
     edges: body.edges.map(parseMapEdge).filter((e): e is MapEdge => e !== null),
     categories: body.categories.map((c) => {

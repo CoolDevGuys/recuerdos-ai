@@ -16,6 +16,8 @@ export interface MapRenderer {
   zoomIn(): void;
   zoomOut(): void;
   reset(): void;
+  /** Move the camera by a fraction of the view's width and height (keyboard panning). */
+  pan(dx: number, dy: number): void;
   /**
    * In lasso mode a drag draws a selection outline instead of panning. Shift
    * plus drag lassos in either mode.
@@ -26,6 +28,8 @@ export interface MapRenderer {
 
 export interface RendererCallbacks {
   onOpenMemory(id: string): void;
+  /** A category disc was clicked on an aggregate map: open that category's own map. */
+  onOpenCategory(category: string): void;
   onLevelChange(level: Level): void;
   /**
    * The memories a lasso enclosed: those drawn inside it, plus every member

@@ -417,11 +417,14 @@ max_memories = 5000
 mode = "api-key"
 
 [ui]
-# The web UI at /ui: browse (and, as later phases land, edit and map) your
-# memories in a browser, signed in with an API key. Static files only — the
-# page talks to /v1 like any client, under the key's scopes. Off, /ui is not
-# mounted. See docs/web-ui.md.
+# The web UI at /ui: browse, edit and map your memories in a browser,
+# signed in with an API key. Static files only — the page talks to /v1 like
+# any client, under the key's scopes. Off, /ui is not mounted. See
+# docs/web-ui.md.
 enabled = true
+# Above this many memories the map opens on categories only and loads one
+# category's memories at a time (GET /v1/map?category=).
+map_detail_limit = 5000
 
 [rate_limit]
 # Per-caller request budget, enforced before routing, tracing, or an API-key

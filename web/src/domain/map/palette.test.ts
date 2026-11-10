@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { categoryStyle, glyphImage, withAlpha } from "./palette";
+import { contrast, distance, VISIONS } from "../../test/colourVision";
+import { BUILT_IN_STYLES, CUSTOM_COLORS, categoryStyle, glyphImage, withAlpha } from "./palette";
 
 describe("category styles", () => {
   it("gives every built-in its own colour and glyph", () => {
@@ -28,3 +29,34 @@ describe("category styles", () => {
     expect(withAlpha("#000000", 2)).toBe("rgba(0,0,0,1)");
   });
 });
+
+describe("the palette for every viewer", () => {
+  const builtIns = Object.entries(BUILT_IN_STYLES);
+
+  it("keeps 3:1 against the light and the dark canvas", () => {
+    for (const color of [...builtIns.map(([, s]) => s.color), ...CUSTOM_COLORS]) {
+      expect(contrast(color, "#ffffff"), `${color} on white`).toBeGreaterThanOrEqual(3);
+      expect(contrast(color, "#020617"), `${color} on slate-950`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it.each(VISIONS)("keeps the built-ins apart with %s", (vision) => {
+    for (let i = 0; i < builtIns.length; i += 1) {
+      for (let j = i + 1; j < builtIns.length; j += 1) {
+        const [[a, sa], [b, sb]] = [builtIns[i]!, builtIns[j]!];
+        expect(distance(sa.color, sb.color, vision), `${a} / ${b}`).toBeGreaterThanOrEqual(14);
+      }
+    }
+  });
+
+  it("keeps custom colours apart from each other and from the built-ins", () => {
+    const all = [...builtIns.map(([, s]) => s.color), ...CUSTOM_COLORS];
+    const pairs = CUSTOM_COLORS.flatMap((custom) => all.filter((other) => other !== custom).map((other) => [custom, other] as const));
+    for (const vision of VISIONS) {
+      for (const [custom, other] of pairs) {
+        expect(distance(custom, other, vision), `${custom} / ${other}, ${vision}`).toBeGreaterThanOrEqual(8);
+      }
+    }
+  });
+});
+

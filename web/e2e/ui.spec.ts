@@ -71,7 +71,7 @@ test("corrects a memory, then forgets it and takes it back", async ({ page }) =>
 test("draws the map and zooms through its levels", async ({ page }) => {
   const violations = await signIn(page, "/ui/map");
 
-  const map = page.getByRole("img", { name: /Map of \d+ memories/ });
+  const map = page.getByRole("application", { name: /Map of \d+ memories/ });
   await expect(map).toBeVisible();
   // Sigma draws into canvases inside the container.
   await expect(map.locator("canvas").first()).toBeAttached();
@@ -139,4 +139,26 @@ test("creates a category, bulk-moves memories into it, renames it and merges it 
     data: { into: "preference.coding" },
   });
   expect((await merged.json()).moved).toBe(2);
+});
+
+test("lays the map out in a worker, keeps the layout, and answers the keyboard", async ({ page }) => {
+  const violations = await signIn(page, "/ui/map");
+  const map = page.getByRole("application", { name: /Map of/ });
+  await expect(map).toBeVisible();
+
+  // The layout ran off the main thread, under the CSP.
+  const workers = await page.evaluate(() =>
+    performance.getEntriesByType("resource").filter((e) => e.name.includes("layout.worker")).length,
+  );
+  expect(workers).toBeGreaterThan(0);
+  await expect
+    .poll(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("recuerdos.map-layout.v1:"))))
+    .toBe(true);
+
+  await map.focus();
+  await page.keyboard.press("3");
+  await expect(page.getByRole("button", { name: "Memories" })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("0");
+  await expect(page.getByRole("button", { name: "Categories" })).toHaveAttribute("aria-pressed", "true");
+  expect(violations).toEqual([]);
 });

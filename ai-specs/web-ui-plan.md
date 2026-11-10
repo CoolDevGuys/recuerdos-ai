@@ -6,7 +6,7 @@ them by category, and use zoom as the grouping mechanism: zoomed out, the catego
 in, the categories 'dissolve' into the individual memories — a representation of the mental map. For
 management, the user can edit or correct any memory or category, and add or delete memories."*
 
-Status: **P0–P3 implemented** (2026-11-10, branch `feat/web-ui`); P4 planned. Phases are ordered so
+Status: **P0–P4 implemented** (2026-11-10, branch `feat/web-ui`): the plan is complete. Phases are ordered so
 each one ships something usable (§9). §9.1 records how P0 differed from this plan.
 
 ---
@@ -590,3 +590,72 @@ re-embedded as `enriched`):
    the UI doubles as a tuning tool.
 3. Purging forgotten memories: out of scope here. If a purge ever exists, `:restore` returns 410 for
    purged rows, as specified.
+
+### 9.5 What P4 shipped, and where it differs from the plan above
+
+**Shipped:**
+- **Large stores.**
+  - `GET /v1/map?category=`.
+  - A categories-only answer above `[ui].map_detail_limit` (5 000), with
+    centroid category links.
+  - The UI's drill-in to one category's map.
+- **The layout:**
+  - runs in a Web Worker;
+  - starts warm from a per-user, per-scope seed in `localStorage`;
+  - places memories by their neighbours after small edits.
+- **Keyboard navigation of the map**, and level jumps that land on the nearest group.
+- **A re-chosen palette** with a colour-vision test, live theme switching on the
+  map, and oxlint in CI.
+- **Docs:** screenshots from a demo store, and the scripts that make them.
+- **Tests:**
+  - Rust: 2 domain, 4 mapper and 1 HTTP test;
+  - web: 22 Vitest (184 in all);
+  - 1 Playwright (6 in all).
+
+**Acceptance:**
+- **Keyboard-only walk-through** (Playwright, demo store):
+  - Tab reaches the header, the tabs, the level and zoom buttons, the map
+    (`role="application"`, keys described by `aria-describedby`), recall,
+    the legend and the filters, in reading order.
+  - Every map function has a key or a button. The editor opens from the
+    list with Enter and closes with Escape.
+  - Phone width (375 px) has no sideways scroll.
+- **Colour-blind simulation:**
+  - The built-ins are at least CIELAB ΔE 14 apart under the Machado 2009
+    matrices for protanopia, deuteranopia and tritanopia. They were as
+    close as 2.1 (Decision / Skill, deuteranopia).
+  - Screenshots of the map under each simulation were checked by eye.
+    Glyphs and labels stay readable; some colours do converge (Coding
+    preference and Skill both read as blue with deuteranopia), which the
+    glyphs cover.
+- **Layout time:**
+
+  | | 1 000 | 3 000 | 5 000 |
+  |---|---|---|---|
+  | Cold | 0.36 s | 0.76 s | 1.3 s |
+  | One new memory | 6 ms | 18 ms | 10 ms |
+  | Unchanged | 5 ms | 16 ms | 10 ms |
+
+  Measured on synthetic stores, in Node, on a laptop.
+
+**Differences, each deliberate:**
+- **Oxlint, not ESLint.** The web app is on TypeScript 7, the native
+  compiler, which has no JavaScript API. `typescript-eslint` supports
+  TypeScript up to 6.0 and cannot parse the code without a second, older
+  TypeScript pinned beside it. Oxlint parses TypeScript itself and has the
+  React-hooks and jsx-a11y rules this pass needed.
+- **Entering a category opens its own map rather than laying its memories out
+  "in place"** on the overview. The category map is an ordinary map, so every
+  tool (clusters, lasso, recall highlights) works on it unchanged. Placing
+  thousands of memories inside one disc of an overview drawn without them
+  would have needed a second layout mode. The overview remains one click away.
+- **The seed keeps each category's anchor, not the ring order.** Sizes change
+  the order whenever two categories cross. A seed keyed on order would be
+  thrown away by the edit that most needs it to stay.
+- **A recall on a categories-only map lists its answers** but has no memories
+  to light up. Opening an answer still works.
+- **Still open:** category labels on the full map can overlap when two small
+  categories land side by side (P2 behaviour). The categories-only map
+  separates its labels; the full map's discs sit at their members' centroid
+  and cannot be moved without moving the memories.
+

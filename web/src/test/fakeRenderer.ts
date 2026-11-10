@@ -31,6 +31,10 @@ export class FakeRenderer implements MapRenderer {
   reset(): void {
     this.zooms.push("reset");
   }
+  pans: [number, number][] = [];
+  pan(dx: number, dy: number): void {
+    this.pans.push([dx, dy]);
+  }
   setLassoMode(on: boolean): void {
     this.lassoModes.push(on);
   }
@@ -50,6 +54,11 @@ export class FakeRenderer implements MapRenderer {
   /** Simulates a click on a memory node. */
   clickMemory(id: string): void {
     this.callbacks?.onOpenMemory(id);
+  }
+
+  /** Simulates a click on a category disc of an aggregate map. */
+  clickCategory(category: string): void {
+    this.callbacks?.onOpenCategory(category);
   }
 
   /** Simulates the camera reaching a level. */

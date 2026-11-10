@@ -102,7 +102,7 @@ describe("HttpApiClient", () => {
 
     expect(calls[0]?.url).toBe("/v1/memories/mem_1");
     expect(calls[0]?.init?.method).toBe("PATCH");
-    expect((calls[0]?.init?.headers as Record<string, string>)["If-Match"]).toBe('"2026-08-11T10:00:00Z"');
+    expect((calls[0]!.init!.headers as Record<string, string>)["If-Match"]).toBe('"2026-08-11T10:00:00Z"');
     expect(calls[0]?.init?.body).toBe('{"content":"x"}');
   });
 
@@ -117,7 +117,7 @@ describe("HttpApiClient", () => {
 
     await new HttpApiClient("k", fetcher).updateMemory("mem_1", { content: "x" }, null);
 
-    expect((calls[0]?.init?.headers as Record<string, string>)["If-Match"]).toBeUndefined();
+    expect((calls[0]!.init!.headers as Record<string, string>)["If-Match"]).toBeUndefined();
   });
 
   it("reports a stale edit as a 412", async () => {

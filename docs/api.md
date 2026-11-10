@@ -396,6 +396,9 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
   "k": 5,
   "min_weight": 0.15,
   "edges_omitted": false,
+  "detail": "memories",
+  "total": 222,
+  "category": null,
   "nodes": [{"id": "…", "content": "…", "category": "preference.coding", …}],
   "edges": [
     {"kind": "similar", "source": "…", "target": "…", "weight": 0.62},
@@ -423,6 +426,20 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
   cached until it changes.
 - **Above 3 000 memories** the pairwise comparison is skipped and
   `edges_omitted` is `true`.
+- **`?category=<id>`** limits the map to one category's memories, with the
+  similarity links among them. A category nobody uses gives an empty map,
+  not an error. `category` in the answer echoes it.
+- **Above the detail limit** (`[ui].map_detail_limit`, 5 000 by default), a
+  whole-store map comes back as `"detail": "categories"`:
+  - `nodes` and `edges` are empty;
+  - `categories` carries every category with its count;
+  - `category_edges` link each category to its 3 most similar, by comparing the
+    categories' mean vectors.
+
+  Ask with `?category=` for each category's memories. A category map is
+  always `"detail": "memories"`, whatever its size.
+- **`total`** is how many memories are in scope, whether or not `nodes`
+  carries them.
 
 ### `POST /v1/memories:bulk`
 

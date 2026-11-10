@@ -394,6 +394,14 @@ pub struct MapResponse {
     pub min_weight: f32,
     /// True when the store is too large for similarity edges.
     pub edges_omitted: bool,
+    /// `memories` when `nodes` holds every memory in scope; `categories`
+    /// when the store is above the detail limit and only the category
+    /// summary is sent.
+    pub detail: &'static str,
+    /// Memories in scope, whether or not `nodes` carries them.
+    pub total: usize,
+    /// The category this map is limited to, if any.
+    pub category: Option<String>,
     pub nodes: Vec<MemoryResponse>,
     pub edges: Vec<MapEdge>,
     pub categories: Vec<MapCategory>,

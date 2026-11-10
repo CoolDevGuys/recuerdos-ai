@@ -9,6 +9,9 @@ const model = layoutMap(
     generation: "1",
     minWeight: 0.15,
     edgesOmitted: false,
+    detail: "memories",
+    total: 4,
+    category: null,
     nodes: [
       memory({ id: "a", content: "Vitest for unit tests", subcategory: "testing" }),
       memory({ id: "b", content: "TDD first", subcategory: "testing" }),
@@ -25,7 +28,7 @@ const model = layoutMap(
     ],
     categoryEdges: [{ source: "decision", target: "preference.coding", weight: 0.3 }],
   } satisfies MapData,
-  50,
+  { iterations: 50 },
 );
 
 const view: ViewState = {

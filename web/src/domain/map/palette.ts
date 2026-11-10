@@ -2,8 +2,15 @@ import { hashUnit } from "./geometry";
 
 /**
  * How a category looks on the map: a colour *and* a glyph and its label,
- * never colour alone (owner's accessibility rule; plan §5.3). Colours are
- * mid-tones that keep ≥ 3:1 against both the light and the dark canvas.
+ * never colour alone (owner's accessibility rule; plan §5.3).
+ *
+ * Every colour keeps at least 3:1 against both the light canvas (white)
+ * and the dark one (slate-950). The eight built-ins were chosen from
+ * Tailwind's mid-tones to stay apart under simulated protanopia,
+ * deuteranopia and tritanopia as well as normal vision (CIELAB ΔE ≥ 14
+ * for every pair, checked in palette.test.ts). Eight hues at one
+ * lightness cannot all stay far apart for every viewer, which is why the
+ * glyph and the label carry the meaning and colour only helps.
  */
 export interface CategoryStyle {
   color: string;
@@ -13,17 +20,21 @@ export interface CategoryStyle {
 export type Glyph = "code" | "heart" | "diamond" | "folder" | "person" | "star" | "bolt" | "link" | "letter";
 
 const BUILT_IN: Record<string, CategoryStyle> = {
-  "preference.coding": { color: "#6366f1", glyph: "code" },
-  "preference.personal": { color: "#db2777", glyph: "heart" },
-  decision: { color: "#d97706", glyph: "diamond" },
-  "fact.project": { color: "#0891b2", glyph: "folder" },
-  "fact.person": { color: "#16a34a", glyph: "person" },
-  experience: { color: "#8b5cf6", glyph: "star" },
-  skill: { color: "#ea580c", glyph: "bolt" },
+  "preference.coding": { color: "#7c3aed", glyph: "code" },
+  "preference.personal": { color: "#be123c", glyph: "heart" },
+  decision: { color: "#b45309", glyph: "diamond" },
+  "fact.project": { color: "#0369a1", glyph: "folder" },
+  "fact.person": { color: "#059669", glyph: "person" },
+  experience: { color: "#c026d3", glyph: "star" },
+  skill: { color: "#3b82f6", glyph: "bolt" },
   reference: { color: "#64748b", glyph: "link" },
 };
 
-const CUSTOM_COLORS = ["#0d9488", "#e11d48", "#65a30d", "#a855f7", "#ca8a04", "#2563eb"];
+/** For custom categories, picked by id hash; their glyph is their initial. */
+export const CUSTOM_COLORS = ["#65a30d", "#78716c", "#d97706", "#ec4899", "#4d7c0f", "#ef4444"];
+
+/** The built-in categories' styles, for checks and legends. */
+export const BUILT_IN_STYLES: Readonly<Record<string, CategoryStyle>> = BUILT_IN;
 
 export function categoryStyle(id: string): CategoryStyle {
   const builtIn = BUILT_IN[id];

@@ -23,15 +23,16 @@ export function categoriesQueryKey(user: string) {
   return ["categories", user] as const;
 }
 
-export function mapQueryKey(user: string) {
-  return ["map", user] as const;
+/** Every map of the user's; with `category`, the map of that category (`null` = the whole store). */
+export function mapQueryKey(user: string, category?: string | null) {
+  return category === undefined ? (["map", user] as const) : (["map", user, category ?? "*"] as const);
 }
 
-/** The map: memories, how they link, and the categories. */
-export function useMap(client: ApiClient, user: string) {
+/** The map: memories, how they link, and the categories — of the whole store, or of one category. */
+export function useMap(client: ApiClient, user: string, category: string | null = null) {
   return useQuery<MapData, Error>({
-    queryKey: mapQueryKey(user),
-    queryFn: () => client.getMap(),
+    queryKey: mapQueryKey(user, category),
+    queryFn: () => client.getMap(category),
   });
 }
 

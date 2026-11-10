@@ -5,10 +5,16 @@ The daemon serves a browser UI at **`/ui`** on its API port, at
 compiled into the binary. It reads and writes memories through the same `/v1` API
 as every other client, under the same API-key scopes.
 
-> **Status:** phases P0–P3 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+> **Status:** complete: phases P0–P4 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
 > You can sign in, browse, filter, correct, add and forget memories, explore
 > them as a zoomable mental map with a recall preview, manage your categories,
 > and edit many memories at once from the list or with a lasso on the map.
+> It works from the keyboard, in light and dark mode, and at phone width.
+
+![The list of memories](images/web-ui-list.png)
+
+The screenshots on this page show a demo store of made-up memories
+(`web/scripts/seed-demo.mjs`); `web/scripts/screenshots.mjs` retakes them.
 
 ## The mental map
 
@@ -23,12 +29,42 @@ as every other client, under the same API-key scopes.
   - solid lines join memories with similar meaning, thicker when more similar;
   - arrows show relations the entity graph recorded, when `[graph]` is on.
 
+![The map zoomed out: one disc per category](images/web-ui-map-categories.png)
+
+![Zooming in: categories split into named clusters](images/web-ui-map-clusters.png)
+
 Use the scroll wheel or a pinch to zoom, or **Categories / Clusters /
 Memories** to jump to a level. Clicking a category or cluster opens it.
 Clicking a memory opens it in the editor.
 
+**From the keyboard**, Tab to the map, then:
+
+| Key | Does |
+|---|---|
+| `+` / `-` | zoom in / out |
+| `0` | fit the whole map |
+| `1` `2` `3` | jump to Categories / Clusters / Memories |
+| arrow keys | pan |
+| Escape | clear a lasso selection and leave lasso mode |
+
+Jumping to a closer level closes in on the category or cluster nearest the
+middle of the view. Everything else on the page is a regular button, link or
+field, in reading order. The list view is the text equivalent of the map.
+
+**The map remembers its layout.** The browser keeps the last layout of each
+map in `localStorage`: memory ids, category ids and coordinates, never memory
+text. It is cleared on sign-out. Reopening the map, or reloading the page,
+puts everything back where it was. After an edit, only the new or re-filed
+memories are placed, next to the memories they link to, and the rest stay
+put. The layout is computed in a background worker, so a large store never
+freezes the page.
+
 Every category has a colour, a glyph and its name, so colour is never the
-only cue. The legend's buttons hide and show categories. **Links** turns the
+only cue. The colours keep 3:1 contrast on both the light and the dark
+background. The built-ins' colours were chosen to stay distinguishable with
+protanopia, deuteranopia and tritanopia, and a test checks that (see
+`web/src/domain/map/palette.test.ts`). With some colour-vision deficiencies,
+a few colours still look alike, which is why each category also carries its glyph and label. The legend's buttons hide and show categories. **Links** turns the
 two kinds of line on and off, and raises the minimum similarity shown.
 
 **Recall preview.** Type a question the way an agent would ("how does the user
@@ -42,6 +78,35 @@ approach testing?"):
 
 The map needs WebGL. Where it is missing, the page says so; the list view
 shows the same memories as text.
+
+### Large stores
+
+Above 5 000 memories (`[ui].map_detail_limit`, see
+[configuration](configuration.md)), the map opens on your categories only:
+one disc each, placed so that related categories sit together. Click a
+category, or pick it from the list beside the map, to open that category's
+own map. It opens split into its clusters, and zooms down to its memories.
+**All categories** goes back.
+
+![A large store opens on its categories](images/web-ui-map-aggregate.png)
+
+![One category's own map](images/web-ui-map-drill-in.png)
+
+### Dark mode and small screens
+
+The UI follows the system's light or dark setting, the map included, and
+switches live when the system does.
+
+![The map in dark mode](images/web-ui-map-dark.png)
+
+At phone width the list, the filters and the editor stack into one column
+with no sideways scrolling. The map works there too, though the list is the
+easier view on a small screen.
+
+<p>
+  <img src="images/web-ui-phone-list.png" alt="The list at phone width" width="280">
+  <img src="images/web-ui-phone-editor.png" alt="The editor at phone width" width="280">
+</p>
 
 ## Managing memories
 
@@ -125,6 +190,8 @@ reminder that anyone who can reach the port acts as the `default` user.
 ```toml
 [ui]
 enabled = false
+# Above this many memories the map opens on categories only (default 5000).
+map_detail_limit = 5000
 ```
 
 With the UI off, `/ui` is not mounted and answers like any path that does not exist. The
@@ -159,7 +226,7 @@ Vite proxies `/v1` to the daemon:
 
 ```bash
 just web-dev       # http://localhost:5173/ui/
-just web-test      # type-check + unit tests
+just web-test      # type-check, lint (oxlint) + unit tests
 ```
 
 ## Security

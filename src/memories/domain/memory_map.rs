@@ -199,6 +199,73 @@ pub fn category_edges(memories: &[Memory], edges: &[SimilarityEdge]) -> Vec<Cate
         .collect()
 }
 
+/// Category links for a store too large to compare memory by memory: each
+/// category's mean (normalised) vector against the others', keeping every
+/// category's `neighbours` closest. `O(n·d)` to build the means, then
+/// `c²` comparisons for `c` categories.
+///
+/// The weight is the cosine of the two means rescaled above `baseline`,
+/// like a memory link. Means sit closer together than single memories do,
+/// so these weights run high; they rank and size links, nothing more.
+/// Memories without a vector are left out of their category's mean.
+pub fn centroid_category_edges(
+    memories: &[Memory],
+    vectors: &HashMap<MemoryId, Vec<f32>>,
+    neighbours: usize,
+    baseline: f32,
+) -> Vec<CategoryEdge> {
+    let mut sums: BTreeMap<&str, Vec<f32>> = BTreeMap::new();
+    for memory in memories {
+        let Some(vector) = vectors.get(&memory.id()) else {
+            continue;
+        };
+        let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm == 0.0 {
+            continue;
+        }
+        let sum = sums
+            .entry(memory.category().as_str())
+            .or_insert_with(|| vec![0.0; vector.len()]);
+        if sum.len() != vector.len() {
+            continue;
+        }
+        for (s, x) in sum.iter_mut().zip(vector) {
+            *s += x / norm;
+        }
+    }
+    let means: Vec<(&str, Vec<f32>)> = sums
+        .into_iter()
+        .filter_map(|(id, sum)| {
+            let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
+            (norm > 0.0).then(|| (id, sum.iter().map(|x| x / norm).collect()))
+        })
+        .collect();
+
+    let span = (1.0 - baseline).max(f32::EPSILON);
+    let mut kept: BTreeMap<(&str, &str), f32> = BTreeMap::new();
+    for (i, (a, mean_a)) in means.iter().enumerate() {
+        let mut row: Vec<(usize, f32)> = means
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(j, (_, mean_b))| (j, mean_a.iter().zip(mean_b).map(|(x, y)| x * y).sum()))
+            .collect();
+        row.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+        for (j, cosine) in row.into_iter().take(neighbours) {
+            let b = means[j].0;
+            let key = if *a < b { (*a, b) } else { (b, *a) };
+            kept.insert(key, ((cosine - baseline) / span).clamp(0.0, 1.0));
+        }
+    }
+    kept.into_iter()
+        .map(|((source, target), weight)| CategoryEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            weight,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,5 +438,56 @@ mod tests {
         assert_eq!(categories[0].source, "decision");
         assert_eq!(categories[0].target, "preference.coding");
         assert!((categories[0].weight - 0.8 / 2f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn centroid_links_join_each_category_to_its_closest() {
+        let memories = vec![
+            memory(Category::PreferenceCoding, None),
+            memory(Category::PreferenceCoding, None),
+            memory(Category::Skill, None),
+            memory(Category::Decision, None),
+        ];
+        let vectors: HashMap<MemoryId, Vec<f32>> = [
+            (memories[0].id(), vec![1.0, 0.0, 0.0]),
+            (memories[1].id(), vec![0.0, 2.0, 0.0]),
+            // Skill sits between the two coding preferences, decision far off.
+            (memories[2].id(), vec![1.0, 1.0, 0.1]),
+            (memories[3].id(), vec![0.0, 0.0, 1.0]),
+        ]
+        .into_iter()
+        .collect();
+
+        let edges = centroid_category_edges(&memories, &vectors, 1, 0.0);
+
+        let pairs: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|e| (e.source.as_str(), e.target.as_str()))
+            .collect();
+        assert!(pairs.contains(&("preference.coding", "skill")), "{pairs:?}");
+        let coding_skill = edges
+            .iter()
+            .find(|e| e.source == "preference.coding" && e.target == "skill")
+            .unwrap();
+        assert!(coding_skill.weight > 0.9, "{}", coding_skill.weight);
+        // Decision's closest is still linked: every category keeps one.
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.source == "decision" || e.target == "decision")
+        );
+        assert!(edges.iter().all(|e| e.source < e.target));
+    }
+
+    #[test]
+    fn centroid_links_skip_memories_without_vectors() {
+        let memories = vec![
+            memory(Category::PreferenceCoding, None),
+            memory(Category::Skill, None),
+        ];
+        let vectors: HashMap<MemoryId, Vec<f32>> =
+            [(memories[0].id(), vec![1.0, 0.0])].into_iter().collect();
+
+        assert!(centroid_category_edges(&memories, &vectors, 3, 0.0).is_empty());
     }
 }

@@ -290,6 +290,9 @@ jobs:
       - name: Type-check
         run: pnpm --dir web typecheck
 
+      - name: Lint (oxlint, with the React-hooks and accessibility rules)
+        run: pnpm --dir web lint
+
       - name: Test
         run: pnpm --dir web test
 

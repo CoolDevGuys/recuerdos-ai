@@ -223,12 +223,15 @@ impl Memories {
 
         // The map's edge floor is the same calibration recall uses, so "more
         // alike than unrelated text" means the same thing on both.
-        let mapper = Arc::new(MemoryMapper::new(
-            Arc::clone(&repository),
-            Arc::clone(&vectors),
-            graph.clone(),
-            resolve_similarity_baseline(config, embedder.model_id()),
-        ));
+        let mapper = Arc::new(
+            MemoryMapper::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                graph.clone(),
+                resolve_similarity_baseline(config, embedder.model_id()),
+            )
+            .with_detail_limit(config.ui.map_detail_limit),
+        );
 
         let catalog: Arc<dyn CategoryCatalog> = Arc::new(SqliteCategoryCatalog::new(
             Arc::clone(&database),

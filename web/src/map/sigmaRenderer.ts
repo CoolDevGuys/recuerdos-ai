@@ -22,6 +22,11 @@ import type { MapRenderer, RendererCallbacks, RendererFactory } from "./renderer
 
 type NodeKind = "memory" | "category" | "cluster";
 
+/** Label text on the map's background: slate-200 on dark, slate-900 on light. */
+function labelColor(dark: boolean): string {
+  return dark ? "#e2e8f0" : "#0f172a";
+}
+
 /**
  * Sigma adapter: puts the model into a graphology graph and lets the pure
  * look functions (domain/map/appearance.ts) decide every node and edge on
@@ -61,11 +66,15 @@ class SigmaMapRenderer implements MapRenderer {
     private readonly callbacks: RendererCallbacks,
   ) {
     this.view = view;
-    this.mix = quantize(zoomMix(1));
-    this.level = "categories";
+    // One category's own map already fills the view with that category: its
+    // zoom bands start one level in, so it opens split into its clusters.
+    this.bandScale = model.scope !== null ? LEVEL_RATIO.clusters : 1;
+    this.mix = quantize(zoomMix(this.bandScale));
+    this.level = levelAt(this.bandScale);
     this.populate();
 
-    const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+    this.scheme = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+    const dark = this.scheme?.matches ?? false;
     this.sigma = new Sigma(this.graph, container, {
       defaultNodeType: "pictogram",
       nodeProgramClasses: { pictogram: PictogramProgram },
@@ -75,7 +84,7 @@ class SigmaMapRenderer implements MapRenderer {
       labelFont: "ui-sans-serif, system-ui, sans-serif",
       labelSize: 13,
       labelWeight: "500",
-      labelColor: { color: dark ? "#e2e8f0" : "#0f172a" },
+      labelColor: { color: labelColor(dark) },
       labelRenderedSizeThreshold: 7,
       minCameraRatio: 0.02,
       maxCameraRatio: 3,
@@ -100,8 +109,19 @@ class SigmaMapRenderer implements MapRenderer {
     this.sigma.on("clickNode", ({ node }) => this.onClick(node));
     this.sigma.on("enterNode", ({ node }) => this.onHover(node));
     this.sigma.on("leaveNode", () => this.onHover(null));
+    // Follow the system theme while the map is open, not only when it is created.
+    this.scheme?.addEventListener("change", this.onScheme);
     this.sigma.refresh();
+    this.callbacks.onLevelChange(this.level);
   }
+
+  /** Camera ratio × this = the ratio the zoom bands read (see constructor). */
+  private readonly bandScale: number;
+
+  private readonly scheme: MediaQueryList | null;
+  private readonly onScheme = (event: MediaQueryListEvent) => {
+    this.sigma.setSetting("labelColor", { color: labelColor(event.matches) });
+  };
 
   update(view: ViewState): void {
     this.view = view;
@@ -132,7 +152,30 @@ class SigmaMapRenderer implements MapRenderer {
   }
 
   zoomTo(level: Level): void {
-    void this.sigma.getCamera().animate({ ratio: LEVEL_RATIO[level] }, { duration: 500 });
+    const camera = this.sigma.getCamera();
+    const ratio = LEVEL_RATIO[level] / this.bandScale;
+    // Zooming in on the view's centre can land in the empty middle of the
+    // category ring. Close in on the category (or cluster) nearest the
+    // centre instead, so there is always something to see.
+    const groups = level === "clusters" ? this.model.categories : level === "memories" ? this.model.clusters : [];
+    const target = ratio < camera.getState().ratio ? this.nearest(groups, camera.getState()) : null;
+    void camera.animate(target === null ? { ratio } : { ...target, ratio }, { duration: 500 });
+  }
+
+  /** The framed-graph position of the shown group closest to `point`. */
+  private nearest(groups: readonly GroupNode[], point: Point): Point | null {
+    let best: Point | null = null;
+    let distance = Number.POSITIVE_INFINITY;
+    for (const m of groups) {
+      if (this.view.hiddenCategories.has(m.category)) continue;
+      const at = this.sigma.viewportToFramedGraph(this.sigma.graphToViewport(m.position));
+      const d = Math.hypot(at.x - point.x, at.y - point.y);
+      if (d < distance) {
+        distance = d;
+        best = at;
+      }
+    }
+    return best;
   }
 
   zoomIn(): void {
@@ -147,12 +190,23 @@ class SigmaMapRenderer implements MapRenderer {
     void this.sigma.getCamera().animatedReset({ duration: 500 });
   }
 
+  pan(dx: number, dy: number): void {
+    const camera = this.sigma.getCamera();
+    const { width, height } = this.sigma.getDimensions();
+    const state = camera.getState();
+    // Move by a share of what is on screen, so a key press feels the same at every zoom.
+    const from = this.sigma.viewportToFramedGraph({ x: width / 2, y: height / 2 });
+    const to = this.sigma.viewportToFramedGraph({ x: width / 2 + dx * width, y: height / 2 + dy * height });
+    void camera.animate({ x: state.x + (to.x - from.x), y: state.y + (to.y - from.y) }, { duration: 150 });
+  }
+
   setLassoMode(on: boolean): void {
     this.lassoMode = on;
     this.sigma.getContainer().style.cursor = on ? "crosshair" : "";
   }
 
   destroy(): void {
+    this.scheme?.removeEventListener("change", this.onScheme);
     this.sigma.kill();
   }
 
@@ -239,6 +293,7 @@ class SigmaMapRenderer implements MapRenderer {
       const style = categoryStyle(category);
       this.graph.addNode(id, {
         kind,
+        category,
         x: position.x,
         y: position.y,
         size,
@@ -308,12 +363,14 @@ class SigmaMapRenderer implements MapRenderer {
   // --- interaction
 
   private onCamera(ratio: number): void {
-    const mix = quantize(zoomMix(ratio));
+    // An aggregate map has nothing to dissolve into: it stays on its categories at any zoom.
+    if (this.model.aggregate) return;
+    const mix = quantize(zoomMix(ratio * this.bandScale));
     if (mix.cluster !== this.mix.cluster || mix.memory !== this.mix.memory) {
       this.mix = mix;
       this.sigma.refresh();
     }
-    const level = levelAt(ratio);
+    const level = levelAt(ratio * this.bandScale);
     if (level !== this.level) {
       this.level = level;
       this.callbacks.onLevelChange(level);
@@ -326,12 +383,16 @@ class SigmaMapRenderer implements MapRenderer {
       this.callbacks.onOpenMemory(node);
       return;
     }
+    if (kind === "category" && this.model.aggregate) {
+      this.callbacks.onOpenCategory(this.graph.getNodeAttribute(node, "category") as string);
+      return;
+    }
     const display = this.sigma.getNodeDisplayData(node);
     if (display === undefined) return;
     void this.sigma
       .getCamera()
       .animate(
-        { x: display.x, y: display.y, ratio: kind === "category" ? LEVEL_RATIO.clusters : LEVEL_RATIO.memories },
+        { x: display.x, y: display.y, ratio: (kind === "category" ? LEVEL_RATIO.clusters : LEVEL_RATIO.memories) / this.bandScale },
         { duration: 600 },
       );
   }
@@ -364,7 +425,7 @@ class SigmaMapRenderer implements MapRenderer {
     const alpha = this.mix.cluster * (1 - 0.7 * this.mix.memory);
     if (alpha < 0.04) return;
     for (const category of this.model.categories) {
-      if (this.view.hiddenCategories.has(category.category)) continue;
+      if (this.view.hiddenCategories.has(category.category) || category.members.length === 0) continue;
       const points = category.members
         .map((id) => this.model.byId.get(id)!)
         .map((m) => this.sigma.graphToViewport(memoryPosition(m, this.model, { cluster: 1, memory: 1 })));

@@ -161,3 +161,50 @@ async fn k_out_of_range_is_rejected_and_a_write_only_key_cannot_read_the_map() {
     );
     assert_eq!(map(&app, &writer, "").await.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn a_store_above_the_detail_limit_maps_categories_then_one_category_at_a_time() {
+    let app = TestApp::spawn_with(&[("RECUERDOS_AI_UI__MAP_DETAIL_LIMIT", "2")]).await;
+    let key = app.create_user_with_key("alex", "read,write");
+    let vitest = save(
+        &app,
+        &key,
+        "Unit tests are written with Vitest",
+        "preference.coding",
+        None,
+    )
+    .await;
+    let jest = save(
+        &app,
+        &key,
+        "Jest was replaced by Vitest for unit tests",
+        "preference.coding",
+        None,
+    )
+    .await;
+    save(&app, &key, "Chose SQLite for storage", "decision", None).await;
+
+    let whole = map(&app, &key, "").await;
+    assert_eq!(whole.status(), StatusCode::OK);
+    let whole: Value = whole.json().await.unwrap();
+    assert_eq!(whole["detail"], "categories");
+    assert_eq!(whole["total"], 3);
+    assert!(whole["nodes"].as_array().unwrap().is_empty());
+    assert_eq!(whole["categories"][0]["id"], "preference.coding");
+    assert_eq!(whole["categories"][0]["count"], 2);
+    assert_eq!(whole["category_edges"].as_array().unwrap().len(), 1);
+
+    let coding: Value = map(&app, &key, "?category=preference.coding&k=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(coding["detail"], "memories");
+    assert_eq!(coding["category"], "preference.coding");
+    assert_eq!(coding["total"], 2);
+    assert_eq!(coding["nodes"].as_array().unwrap().len(), 2);
+    assert!(linked(&coding, &vitest, &jest), "{coding}");
+
+    let blank = map(&app, &key, "?category=").await;
+    assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+}

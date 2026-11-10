@@ -1,12 +1,13 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { ApiClient } from "../../api/client";
 import type { Category, Memory, RecallHit } from "../../api/types";
 import { memoriesCount } from "../../domain/categories";
 import type { ViewState } from "../../domain/map/appearance";
-import { layoutMap } from "../../domain/map/layout";
+import { seedOf, type MapModel } from "../../domain/map/layout";
 import { categoryStyle, glyphImage } from "../../domain/map/palette";
 import { LEVELS, type Level } from "../../domain/map/zoom";
-import { useRendererLoader } from "../../map/rendererContext";
+import { readLayoutSeed, writeLayoutSeed } from "../../map/layoutCache";
+import { useLayoutRunner, useRendererLoader } from "../../map/rendererContext";
 import type { MapRenderer } from "../../map/renderer";
 import { useMap, type MemoryActions } from "../../state/memories";
 import { BulkEditor } from "../BulkEditor";
@@ -18,7 +19,14 @@ const LEVEL_NAMES: Record<Level, string> = { categories: "Categories", clusters:
  * The mental map (plan §5): categories when zoomed out, dissolving into
  * sub-label clusters and then into individual memories as you zoom in.
  * Presentation and wiring only — layout and looks are in domain/map, the
- * drawing in the lazily loaded renderer.
+ * drawing in the lazily loaded renderer, the layout itself in a worker.
+ *
+ * A store above the daemon's detail limit comes back as categories only;
+ * the map then shows the category discs, and opening one shows that
+ * category's own map.
+ *
+ * Keyboard, with the map focused: `+` / `-` zoom, `0` fits, `1` `2` `3`
+ * jump to a level, the arrow keys pan, Escape clears a selection.
  */
 export default function MapView({
   client,
@@ -39,8 +47,12 @@ export default function MapView({
   canWrite?: boolean;
 }) {
   const sliderId = useId();
-  const map = useMap(client, user);
+  const [scope, setScope] = useState<string | null>(null);
+  const map = useMap(client, user, scope);
   const loadRenderer = useRendererLoader();
+  const runLayout = useLayoutRunner();
+  const [model, setModel] = useState<MapModel | null>(null);
+  const [layoutFailed, setLayoutFailed] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const renderer = useRef<MapRenderer | null>(null);
   const [rendererFailed, setRendererFailed] = useState(false);
@@ -58,7 +70,26 @@ export default function MapView({
     hovered: null,
   });
 
-  const model = useMemo(() => (map.data === undefined ? null : layoutMap(map.data)), [map.data]);
+  // Lay out each answer off the main thread, starting from the last layout of the same scope.
+  useEffect(() => {
+    const data = map.data;
+    if (data === undefined) return;
+    let cancelled = false;
+    const seed = data.detail === "memories" ? readLayoutSeed(user, data.category) : null;
+    runLayout(data, seed)
+      .then((laid) => {
+        if (cancelled) return;
+        setModel(laid);
+        setLayoutFailed(false);
+        if (!laid.aggregate && laid.memories.length > 0) writeLayoutSeed(user, laid.scope, seedOf(laid));
+      })
+      .catch(() => {
+        if (!cancelled) setLayoutFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [map.data, user, runLayout]);
   const relationCount = model?.edges.filter((e) => e.kind === "relation").length ?? 0;
   const similarCount = model?.edges.filter((e) => e.kind === "similar").length ?? 0;
   const floor = Math.max(view.minWeight, model?.minWeight ?? 0);
@@ -68,7 +99,8 @@ export default function MapView({
   latest.current = { model, onOpenMemory, view };
 
   useEffect(() => {
-    if (model === null || container.current === null || model.memories.length === 0) return;
+    if (model === null || container.current === null) return;
+    if (model.memories.length === 0 && model.categories.length === 0) return;
     let cancelled = false;
     let created: MapRenderer | null = null;
     loadRenderer()
@@ -80,6 +112,7 @@ export default function MapView({
             if (node !== undefined) latest.current.onOpenMemory(node.memory);
           },
           onLevelChange: setLevel,
+          onOpenCategory: (category) => openCategory(category),
           onLasso: (ids) => {
             setSelected(ids);
             setLassoNote(ids.length === 0 ? "The lasso caught no memories. Draw around the dots or discs you want." : null);
@@ -97,7 +130,7 @@ export default function MapView({
   }, [model, loadRenderer]);
 
   // A search's answers take precedence; otherwise the lassoed selection is what stands out.
-  const highlighted = recallHits ?? (selected.length > 0 ? new Set(selected) : null);
+  const highlighted = useMemo(() => recallHits ?? (selected.length > 0 ? new Set(selected) : null), [recallHits, selected]);
   const shown: ViewState = useMemo(
     () => ({ ...view, highlighted, labelHighlighted: recallHits !== null, minWeight: floor }),
     [view, highlighted, recallHits, floor],
@@ -115,6 +148,44 @@ export default function MapView({
   const clearSelection = () => {
     setSelected([]);
     setLassoNote(null);
+  };
+
+  function openCategory(category: string | null) {
+    clearSelection();
+    setLassoMode(false);
+    setRecallHits(null);
+    setLevel("categories");
+    setScope(category);
+  }
+
+  const onMapKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    const r = renderer.current;
+    if (r === null || event.altKey || event.ctrlKey || event.metaKey) return;
+    const step = 0.2;
+    const actions: Record<string, () => void> = {
+      "+": () => r.zoomIn(),
+      "=": () => r.zoomIn(),
+      "-": () => r.zoomOut(),
+      _: () => r.zoomOut(),
+      "0": () => r.reset(),
+      ArrowLeft: () => r.pan(-step, 0),
+      ArrowRight: () => r.pan(step, 0),
+      ArrowUp: () => r.pan(0, -step),
+      ArrowDown: () => r.pan(0, step),
+      Escape: () => {
+        clearSelection();
+        setLassoMode(false);
+      },
+    };
+    if (model?.aggregate !== true) {
+      LEVELS.forEach((l, i) => {
+        actions[String(i + 1)] = () => r.zoomTo(l);
+      });
+    }
+    const action = actions[event.key];
+    if (action === undefined) return;
+    event.preventDefault();
+    action();
   };
 
   const toggleCategory = (id: string) =>
@@ -142,7 +213,31 @@ export default function MapView({
       </div>
     );
   }
-  if (model === null || model.memories.length === 0) {
+  if (layoutFailed) {
+    return (
+      <p role="alert" className="text-sm text-red-700 dark:text-red-400">
+        <span aria-hidden="true">⚠ </span>The map could not be laid out. The list view shows the same memories.
+      </p>
+    );
+  }
+  if (model === null || model.scope !== scope) {
+    return (
+      <p role="status" className="text-sm text-slate-600 dark:text-slate-400">
+        Laying out {map.data.detail === "categories" ? "your categories" : memoriesCount(map.data.total)}…
+      </p>
+    );
+  }
+  if (model.total === 0) {
+    if (scope !== null) {
+      return (
+        <div className="space-y-2">
+          <p className="text-sm text-slate-600 dark:text-slate-400">This category has no memories any more.</p>
+          <button type="button" onClick={() => openCategory(null)} className="text-sm font-medium text-indigo-700 underline dark:text-indigo-300">
+            Back to all categories
+          </button>
+        </div>
+      );
+    }
     return (
       <p className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-600 dark:border-slate-700 dark:text-slate-400">
         No memories stored yet, so there is nothing to map.
@@ -150,13 +245,32 @@ export default function MapView({
     );
   }
 
+  const aggregate = model.aggregate;
+  const scopeLabel = scope === null ? null : (model.categories[0]?.label ?? labelOf(scope));
   const control =
     "rounded-md border border-slate-300 bg-white px-2.5 py-1 text-sm text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800";
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
       <section aria-label="Mental map" className="min-w-0">
+        {scope !== null && (
+          <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <button type="button" onClick={() => openCategory(null)} className="text-sm font-medium text-indigo-700 hover:underline dark:text-indigo-300">
+              <span aria-hidden="true">← </span>All categories
+            </button>
+            <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+              {scopeLabel} <span className="font-normal text-slate-600 dark:text-slate-400">· {memoriesCount(model.total)}</span>
+            </h2>
+          </div>
+        )}
+        {aggregate && (
+          <p className="mb-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">
+            You have {memoriesCount(model.total)}, more than the map draws at once. It shows your categories; open one to see
+            its memories.
+          </p>
+        )}
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          {!aggregate && (
           <div role="group" aria-label="Zoom level" className="flex overflow-hidden rounded-md border border-slate-300 dark:border-slate-600">
             {LEVELS.map((l) => (
               <button
@@ -175,6 +289,7 @@ export default function MapView({
               </button>
             ))}
           </div>
+          )}
           <div className="flex gap-1">
             <button type="button" aria-label="Zoom in" onClick={() => renderer.current?.zoomIn()} className={control}>
               +
@@ -185,7 +300,7 @@ export default function MapView({
             <button type="button" onClick={() => renderer.current?.reset()} className={control}>
               Fit
             </button>
-            {canWrite && (
+            {canWrite && !aggregate && (
               <button
                 type="button"
                 aria-pressed={lassoMode}
@@ -198,23 +313,49 @@ export default function MapView({
           </div>
         </div>
 
+        {/* An application: the keys below drive the camera, so screen readers should pass them through. */}
+        {/* oxlint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
         <div
           ref={container}
-          role="img"
-          aria-label={`Map of ${model.memories.length} memories in ${model.categories.length} categories, showing ${LEVEL_NAMES[level].toLowerCase()}. The list view has the same memories as text.`}
-          className="relative h-[62vh] min-h-80 w-full overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-950"
+          role="application"
+          aria-roledescription="map"
+          tabIndex={0}
+          onKeyDown={onMapKey}
+          aria-label={
+            aggregate
+              ? `Map of ${model.total} memories in ${model.categories.length} categories, showing categories only. The categories list beside it opens each one.`
+              : `Map of ${model.memories.length} memories in ${model.categories.length} categories, showing ${LEVEL_NAMES[level].toLowerCase()}. The list view has the same memories as text.`
+          }
+          aria-describedby={`${sliderId}-keys`}
+          className="relative h-[62vh] min-h-80 w-full overflow-hidden rounded-lg border border-slate-200 bg-white outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2 dark:border-slate-800 dark:bg-slate-950 dark:focus-visible:ring-offset-slate-950"
         />
         {rendererFailed && (
           <p role="alert" className="mt-2 text-sm text-red-700 dark:text-red-400">
             <span aria-hidden="true">⚠ </span>The map could not start in this browser (it needs WebGL). The list view shows the same memories.
           </p>
         )}
-        <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
-          {model.memories.length} memories · {similarCount} similarity links
-          {relationCount > 0 && ` · ${relationCount} stated relations`}
-          {map.data.edgesOmitted && " · too many memories to compare, links omitted"}. Scroll or pinch to zoom; click a
-          category to open it, a memory to edit it.
-          {canWrite && " To select memories for a bulk edit, turn on Lasso select (or hold Shift) and draw around them."}
+        {aggregate ? (
+          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+            {model.categories.length} categories · {memoriesCount(model.total)}. Click a category, or pick it from the list,
+            to open its map.
+          </p>
+        ) : (
+          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+            {memoriesCount(model.memories.length)} · {similarCount} similarity links
+            {relationCount > 0 && ` · ${relationCount} stated relations`}
+            {map.data.edgesOmitted && " · too many memories to compare, links omitted"}. Scroll or pinch to zoom; click a
+            category to open it, a memory to edit it.
+            {canWrite && " To select memories for a bulk edit, turn on Lasso select (or hold Shift) and draw around them."}
+          </p>
+        )}
+        <p id={`${sliderId}-keys`} className="mt-1 text-xs text-slate-600 dark:text-slate-400">
+          Keyboard: focus the map, then <kbd>+</kbd> and <kbd>−</kbd> zoom, <kbd>0</kbd> fits
+          {!aggregate && (
+            <>
+              , <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> jump to a level
+            </>
+          )}
+          , the arrow keys pan{canWrite && !aggregate && ", Escape clears a selection"}.
         </p>
         {lassoNote !== null && (
           <p role="status" className="mt-1 text-sm text-amber-800 dark:text-amber-300">
@@ -260,8 +401,10 @@ export default function MapView({
                 <li key={category.id}>
                   <button
                     type="button"
-                    aria-pressed={shown}
-                    onClick={() => toggleCategory(category.category)}
+                    {...(aggregate
+                      ? { "aria-label": `Open ${category.label}, ${memoriesCount(category.count)}` }
+                      : { "aria-pressed": shown })}
+                    onClick={() => (aggregate ? openCategory(category.category) : toggleCategory(category.category))}
                     className={
                       "flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-slate-100 dark:hover:bg-slate-800 " +
                       (shown ? "text-slate-900 dark:text-slate-100" : "text-slate-400 line-through dark:text-slate-500")
@@ -276,7 +419,7 @@ export default function MapView({
                     </span>
                     <span className="flex-1">{category.label}</span>
                     <span className="text-xs text-slate-500">{category.count}</span>
-                    <span className="sr-only">{shown ? "(shown)" : "(hidden)"}</span>
+                    {!aggregate && <span className="sr-only">{shown ? "(shown)" : "(hidden)"}</span>}
                   </button>
                 </li>
               );
@@ -284,6 +427,7 @@ export default function MapView({
           </ul>
         </section>
 
+        {!aggregate && (
         <section aria-labelledby={`${sliderId}-links`}>
           <h2 id={`${sliderId}-links`} className="text-sm font-semibold text-slate-900 dark:text-slate-100">
             Links
@@ -330,6 +474,7 @@ export default function MapView({
             </div>
           </div>
         </section>
+        )}
       </aside>
     </div>
   );

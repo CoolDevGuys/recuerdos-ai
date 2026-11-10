@@ -3,6 +3,7 @@ import { ApiError, NetworkError, type ApiClient } from "../api/client";
 import type { Identity } from "../api/types";
 import { accessFor, type Access } from "../domain/access";
 import type { KeyStore } from "./keyStore";
+import { clearLayoutSeeds } from "../map/layoutCache";
 
 export type ClientFactory = (key: string | null) => ApiClient;
 
@@ -61,6 +62,7 @@ export function SessionProvider({
 
   const signOut = useCallback(() => {
     keyStore.clear();
+    clearLayoutSeeds();
     setSession({ status: "signed-out", notice: null });
   }, [keyStore]);
 

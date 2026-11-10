@@ -5,6 +5,39 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P4: large stores, a layout that stays put, keyboard, colour vision
+
+- **Large stores.** `GET /v1/map` takes `?category=` for one category's memories
+  and their links. Above `[ui].map_detail_limit` (new, default 5 000), a
+  whole-store map comes back as `"detail": "categories"`: counts only, with
+  category links computed from each category's mean vector (`O(n·d)`, not `n²`).
+  New fields: `detail`, `total`, `category`. The cache keeps whole-store and
+  per-category answers side by side, and drops older generations.
+  - In the UI, such a store opens on its categories. Opening one shows that
+    category's own map, starting at its clusters. **All categories** goes back.
+- **The layout runs in a Web Worker** (inline where workers are missing, as in
+  jsdom), and **the browser keeps the last layout** of each map in
+  `localStorage`: ids and coordinates only, cleared on sign-out.
+  - Reopening an unchanged map takes 5–16 ms instead of 0.4–1.3 s.
+  - After an edit, new or re-filed memories are placed by their pinned
+    neighbours and nothing else moves. For 5 000 memories that takes 10 ms,
+    where a fresh layout took 1.3 s.
+- **Keyboard.** The map is focusable: `+`/`-` zoom, `0` fits, `1`–`3` jump to
+  a level, the arrows pan, Escape clears a selection. Jumping to a closer level
+  now closes in on the nearest category or cluster. Before, zooming in on the
+  centre of the category ring could show an empty view.
+- **Colour vision.** The palette was re-chosen so the built-ins stay at least
+  ΔE 14 apart under simulated protanopia, deuteranopia and tritanopia (before:
+  as close as 2.1). Every colour now keeps 3:1 on both backgrounds (one custom
+  colour was 2.94:1 on white). A test enforces both.
+- **Dark mode**: the map's labels follow a theme switch while it is open.
+- **Lint**: `pnpm --dir web lint` (oxlint, with the React-hooks and jsx-a11y
+  rules) gates CI and `just web-test`. It caught the map rebuilding its
+  highlight set, and so re-styling every node, on every render.
+- **Docs**: `docs/web-ui.md` gains screenshots from a demo store
+  (`web/scripts/seed-demo.mjs`, `web/scripts/screenshots.mjs`), the keyboard
+  table, large stores, dark mode and phone width.
+
 ### Web UI, phase P3: your own categories, and editing many memories at once
 
 - **Each user's taxonomy lives in the database** (migration V10: `categories`,

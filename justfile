@@ -73,10 +73,11 @@ web-build:
     pnpm --dir web install --frozen-lockfile
     pnpm --dir web build
 
-# Type-check and test the web UI.
+# Type-check, lint and test the web UI.
 web-test:
     pnpm --dir web install --frozen-lockfile
     pnpm --dir web typecheck
+    pnpm --dir web lint
     pnpm --dir web test
 
 # The web UI's dev server on :5173, proxying /v1 to a daemon on :7070.
