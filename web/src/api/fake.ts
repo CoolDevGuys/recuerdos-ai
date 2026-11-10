@@ -1,6 +1,10 @@
 import { ApiError, type ApiClient } from "./client";
 import type {
+  BulkEdit,
+  BulkResult,
   Category,
+  CategoryChange,
+  CategoryUpdate,
   Identity,
   IngestRequest,
   IngestResult,
@@ -16,6 +20,24 @@ interface Account {
   identity: Identity;
   memories: Memory[];
   forgotten: Memory[];
+  /** Custom categories, id → the user's label (or null for the default wording). */
+  custom: Map<string, string | null>;
+  /** Built-ins the user relabelled. */
+  relabelled: Map<string, string>;
+}
+
+const CUSTOM_ID = /^[a-z][a-z0-9._-]{0,63}$/;
+
+/** The default wording of a category id, as the daemon's `Category::label`. */
+export function defaultLabel(id: string): string {
+  const builtIn = BUILT_IN.find(([b]) => b === id);
+  if (builtIn !== undefined) return builtIn[1];
+  const words = id.replace(/[._-]/g, " ").trim();
+  return words === "" ? "Memory" : words[0]!.toUpperCase() + words.slice(1);
+}
+
+function isBuiltIn(id: string): boolean {
+  return BUILT_IN.some(([b]) => b === id);
 }
 
 const BUILT_IN: [string, string][] = [
@@ -50,7 +72,10 @@ export class FakeServer {
   readonly calls: { method: string; id?: string; version?: string | null; patch?: MemoryPatch }[] = [];
 
   addAccount(key: string | null, identity: Identity, memories: Memory[] = []): this {
-    this.accounts.set(key, { identity, memories: memories.map(copy), forgotten: [] });
+    // Seeded like the daemon's catalog: every custom category already on a memory.
+    const custom = new Map<string, string | null>();
+    for (const m of memories) if (!isBuiltIn(m.category)) custom.set(m.category, null);
+    this.accounts.set(key, { identity, memories: memories.map(copy), forgotten: [], custom, relabelled: new Map() });
     return this;
   }
 
@@ -121,14 +146,100 @@ class FakeClient implements ApiClient {
   }
 
   async listCategories(): Promise<Category[]> {
-    const account = this.readable();
-    const counts = new Map<string, number>();
-    for (const m of account.memories) counts.set(m.category, (counts.get(m.category) ?? 0) + 1);
-    const builtIn = BUILT_IN.map(([id, label]) => ({ id, label, built_in: true, count: counts.get(id) ?? 0 }));
-    const custom = [...counts]
-      .filter(([id]) => !BUILT_IN.some(([b]) => b === id))
-      .map(([id, count]) => ({ id, label: id, built_in: false, count }));
-    return [...builtIn, ...custom];
+    return categoriesOf(this.readable());
+  }
+
+  async createCategory(id: string, label: string | null): Promise<Category> {
+    const account = this.writable();
+    this.server.calls.push({ method: "createCategory", id });
+    const normalised = id.trim().toLowerCase();
+    if (isBuiltIn(normalised) || account.custom.has(normalised)) {
+      throw new ApiError(409, "conflict", `category ${normalised} already exists`);
+    }
+    if (!CUSTOM_ID.test(normalised)) throw new ApiError(400, "validation_failed", `category id ${normalised} is not valid`);
+    account.custom.set(normalised, blankToNull(label));
+    return this.categoryNamed(account, normalised);
+  }
+
+  async updateCategory(id: string, update: CategoryUpdate): Promise<CategoryChange> {
+    const account = this.writable();
+    this.server.calls.push({ method: "updateCategory", id });
+    this.requireKnown(account, id);
+    let current = id;
+    let moved = 0;
+    if (update.id !== undefined) {
+      if (isBuiltIn(id)) throw new ApiError(409, "conflict", `${id} is a built-in category`);
+      const to = update.id.trim().toLowerCase();
+      if (isBuiltIn(to) || account.custom.has(to)) throw new ApiError(409, "conflict", `category ${to} already exists`);
+      if (!CUSTOM_ID.test(to)) throw new ApiError(400, "validation_failed", `category id ${to} is not valid`);
+      account.custom.set(to, account.custom.get(id) ?? null);
+      moved = this.move(account, id, to);
+      account.custom.delete(id);
+      current = to;
+    }
+    if (update.label !== undefined) {
+      const label = blankToNull(update.label);
+      if (isBuiltIn(current)) {
+        if (label === null) account.relabelled.delete(current);
+        else account.relabelled.set(current, label);
+      } else {
+        account.custom.set(current, label);
+      }
+    }
+    return { category: this.categoryNamed(account, current), moved, reembedded: moved };
+  }
+
+  async mergeCategory(id: string, into: string): Promise<CategoryChange> {
+    const account = this.writable();
+    this.server.calls.push({ method: "mergeCategory", id });
+    this.requireKnown(account, id);
+    this.requireKnown(account, into);
+    if (isBuiltIn(id)) throw new ApiError(409, "conflict", `${id} is a built-in category`);
+    if (id === into) throw new ApiError(400, "validation_failed", "a category cannot be merged into itself");
+    const moved = this.move(account, id, into);
+    account.custom.delete(id);
+    return { category: this.categoryNamed(account, into), moved, reembedded: moved };
+  }
+
+  async deleteCategory(id: string, moveTo: string | null): Promise<CategoryChange> {
+    if (moveTo !== null) {
+      const change = await this.mergeCategory(id, moveTo);
+      return { ...change, category: null };
+    }
+    const account = this.writable();
+    this.server.calls.push({ method: "deleteCategory", id });
+    this.requireKnown(account, id);
+    if (isBuiltIn(id)) throw new ApiError(409, "conflict", `${id} is a built-in category`);
+    const members = account.memories.filter((m) => m.category === id).length;
+    if (members > 0) throw new ApiError(409, "conflict", `${id} still holds ${members} memories; move them first`);
+    account.custom.delete(id);
+    return { category: null, moved: 0, reembedded: 0 };
+  }
+
+  async bulkEdit(ids: string[], edit: BulkEdit): Promise<BulkResult> {
+    const account = this.writable();
+    this.server.calls.push({ method: "bulk" });
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) throw new ApiError(400, "validation_failed", "no memories were selected");
+    const missing = unique.filter((id) => !account.memories.some((m) => m.id === id));
+    if (missing.length > 0) {
+      throw new ApiError(404, "not_found", `these memories were not found: ${missing.join(", ")}`);
+    }
+    if (edit.category !== undefined) this.requireKnown(account, edit.category, 400);
+    const removed = new Set((edit.removeTags ?? []).map((t) => t.trim().toLowerCase()));
+    const added = (edit.addTags ?? []).map((t) => t.trim().toLowerCase()).filter((t) => t !== "");
+    const now = this.server.tick();
+    const result = unique.map((id) => {
+      const memory = this.find(account, id);
+      if (edit.category !== undefined) memory.category = edit.category;
+      if (edit.subcategory !== undefined) memory.subcategory = edit.subcategory;
+      if (removed.size > 0 || added.length > 0) {
+        memory.tags = [...new Set([...memory.tags.filter((t) => !removed.has(t)), ...added])];
+      }
+      memory.updated_at = now;
+      return copy(memory);
+    });
+    return { memories: result, changed: result.length, reembedded: 0 };
   }
 
   async createMemory(fields: MemoryFields): Promise<Memory> {
@@ -206,7 +317,7 @@ class FakeClient implements ApiClient {
       if (m.subcategory !== null) entry.subs.set(m.subcategory, (entry.subs.get(m.subcategory) ?? 0) + 1);
       categories.set(m.category, entry);
     }
-    const label = (id: string) => BUILT_IN.find(([b]) => b === id)?.[1] ?? id;
+    const label = (id: string) => account.relabelled.get(id) ?? account.custom.get(id) ?? defaultLabel(id);
     return {
       generation: String(this.server.calls.length),
       minWeight: 0.15,
@@ -240,6 +351,31 @@ class FakeClient implements ApiClient {
       }));
   }
 
+  private requireKnown(account: Account, id: string, status: 400 | 404 = 404): void {
+    if (!isBuiltIn(id) && !account.custom.has(id)) {
+      throw new ApiError(status, status === 404 ? "not_found" : "validation_failed", `unknown category ${id}`);
+    }
+  }
+
+  private move(account: Account, from: string, to: string): number {
+    const now = this.server.tick();
+    let moved = 0;
+    for (const m of account.memories) {
+      if (m.category === from) {
+        m.category = to;
+        m.updated_at = now;
+        moved += 1;
+      }
+    }
+    return moved;
+  }
+
+  private categoryNamed(account: Account, id: string): Category {
+    const category = categoriesOf(account).find((c) => c.id === id);
+    if (category === undefined) throw new ApiError(404, "not_found", `category ${id} not found`);
+    return category;
+  }
+
   private readable(): Account {
     this.server.takeFailure();
     const account = this.server.account(this.key);
@@ -263,6 +399,32 @@ class FakeClient implements ApiClient {
     if (memory === undefined) throw new ApiError(404, "not_found", `memory ${id} not found`);
     return memory;
   }
+}
+
+function blankToNull(label: string | null | undefined): string | null {
+  const trimmed = label?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
+}
+
+/** The category list as the daemon builds it: built-ins, custom, then leftovers. */
+function categoriesOf(account: Account): Category[] {
+  const counts = new Map<string, number>();
+  for (const m of account.memories) counts.set(m.category, (counts.get(m.category) ?? 0) + 1);
+  const entry = (id: string, label: string | null, known: boolean): Category => ({
+    id,
+    label: label ?? defaultLabel(id),
+    default_label: defaultLabel(id),
+    built_in: isBuiltIn(id),
+    known,
+    count: counts.get(id) ?? 0,
+  });
+  const builtIn = BUILT_IN.map(([id]) => entry(id, account.relabelled.get(id) ?? null, true));
+  const custom = [...account.custom].sort(([a], [b]) => a.localeCompare(b)).map(([id, label]) => entry(id, label, true));
+  const leftovers = [...counts.keys()]
+    .filter((id) => !isBuiltIn(id) && !account.custom.has(id))
+    .sort()
+    .map((id) => entry(id, null, false));
+  return [...builtIn, ...custom, ...leftovers];
 }
 
 function copy(memory: Memory): Memory {

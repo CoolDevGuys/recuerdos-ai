@@ -10,7 +10,10 @@
 //! unknown names are pulled to the nearest real category, and the caller
 //! is told it happened.
 
+use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::category::{Category, DEFAULT_CATEGORIES};
+use crate::shared::error::Result;
+use std::collections::HashMap;
 
 /// Where a name that is not a known category ends up.
 ///
@@ -20,10 +23,32 @@ use crate::memories::domain::category::{Category, DEFAULT_CATEGORIES};
 /// how much weight a recall gives a line.
 const FALLBACK: Category = Category::FactProject;
 
+#[derive(Debug, Clone, Default)]
 pub struct Taxonomy {
-    /// Deployment-defined categories from
-    /// `[understanding.taxonomy].extra_categories`.
+    /// The user's own categories (V10), or, in tests and tools that have
+    /// no user, the configured `[understanding.taxonomy].extra_categories`.
     extras: Vec<String>,
+    /// Display labels the user gave their custom categories, offered to
+    /// the model beside the id: "health.sleep (Sleep log)" says more than
+    /// the id alone.
+    labels: HashMap<String, String>,
+}
+
+/// Where a pipeline gets the taxonomy for the user it is working for.
+///
+/// Per call rather than once at startup since V10: a category a user
+/// creates in the web UI must be valid for their very next `memory_save`
+/// and offered to the classifier on their very next ingest.
+pub trait TaxonomySource: Send + Sync {
+    fn for_user(&self, context: &UserContext) -> Result<Taxonomy>;
+}
+
+/// A fixed taxonomy, the same for everyone: tests, and tools with no
+/// per-user catalog.
+impl TaxonomySource for Taxonomy {
+    fn for_user(&self, _context: &UserContext) -> Result<Taxonomy> {
+        Ok(self.clone())
+    }
 }
 
 /// The result of resolving a model-supplied category name.
@@ -38,6 +63,9 @@ pub struct ResolvedCategory {
 }
 
 impl Taxonomy {
+    /// A fixed taxonomy from a list of extras. The daemon reads each user's
+    /// from their catalog ([`CatalogTaxonomy`]); this is for tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(extras: Vec<String>) -> Self {
         Self {
             extras: extras
@@ -45,7 +73,21 @@ impl Taxonomy {
                 .map(|extra| extra.trim().to_ascii_lowercase())
                 .filter(|extra| !extra.is_empty())
                 .collect(),
+            labels: HashMap::new(),
         }
+    }
+
+    /// A user's taxonomy: their custom category ids, and the labels they
+    /// gave some of them.
+    pub fn for_custom(extras: Vec<String>, labels: HashMap<String, String>) -> Self {
+        Self { extras, labels }
+    }
+
+    /// Parses a category a caller named — strictly: unlike
+    /// [`resolve`](Self::resolve), an unknown name is an error, because a
+    /// caller who typed `preference.codeing` should hear about it.
+    pub fn parse(&self, raw: &str) -> Result<Category> {
+        Category::parse_with_extras(raw, &self.extras)
     }
 
     /// Every category name, built-ins first.
@@ -71,9 +113,11 @@ impl Taxonomy {
             .collect();
 
         lines.extend(self.extras.iter().map(|extra| {
-            format!(
-                "- {extra}: a category specific to this deployment; use it when it plainly fits"
-            )
+            let named = match self.labels.get(extra) {
+                Some(label) => format!("{extra} ({label})"),
+                None => extra.clone(),
+            };
+            format!("- {named}: a category this user defined; use it when it plainly fits")
         }));
 
         lines.join("\n")
@@ -212,6 +256,16 @@ mod tests {
             described.contains("pnpm"),
             "descriptions should be concrete"
         );
+    }
+
+    #[test]
+    fn parsing_is_strict_where_resolving_guesses() {
+        let taxonomy = Taxonomy::new(vec!["fact.homelab".to_string()]);
+        assert_eq!(
+            taxonomy.parse("fact.homelab").unwrap().as_str(),
+            "fact.homelab"
+        );
+        assert!(taxonomy.parse("fact.homelabb").is_err());
     }
 
     #[test]

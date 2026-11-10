@@ -9,15 +9,20 @@
 //! its call on `spawn_blocking` rather than stalling a runtime worker.
 
 use super::dto::{
-    AuditEntryResponse, AuditResponse, CategoriesResponse, CategoryResponse, MapCategory,
-    MapCategoryEdge, MapEdge, MapResponse, MapSubcategory, MemoryResponse, RerankResponse,
-    SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse, UpdateMemoryRequest,
+    AuditEntryResponse, AuditResponse, BulkRequest, BulkResponse, CategoriesResponse,
+    CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, MapCategory, MapCategoryEdge,
+    MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest, RerankResponse,
+    SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse, UpdateCategoryRequest,
+    UpdateMemoryRequest,
 };
 use crate::bootstrap::state::AppState;
+use crate::identity::domain::user_context::UserContext;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
+use crate::memories::application::category_curator::{CategoryCurator, CategoryView};
+use crate::memories::application::memory_bulk_editor::BulkEdit;
 use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::application::memory_mapper::MapQuery;
-use crate::memories::domain::category::{Category, DEFAULT_CATEGORIES};
+use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory::MemoryEdit;
 use crate::memories::domain::recall_query::RecallQuery;
@@ -25,7 +30,8 @@ use crate::shared::blocking::blocking;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -34,18 +40,52 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Instant;
 
-/// The client name recorded in the audit trail for REST writes.
+/// The client name recorded in the audit trail for a REST write that does
+/// not name itself.
 const ACTOR: &str = "rest";
+
+/// Who the audit trail says made a REST write: the client's own name from
+/// `X-Recuerdos-Client` when it sends a well-formed one (the web UI sends
+/// `web-ui`), else `rest`. Informational, like a memory's `source.client`:
+/// any caller can claim any name, so nothing is ever decided by it — it
+/// only lets "why did these 25 memories move?" be answered from the trail.
+pub struct Actor(String);
+
+impl<S: Send + Sync> FromRequestParts<S> for Actor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let named = parts
+            .headers
+            .get("x-recuerdos-client")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|name| {
+                (1..=32).contains(&name.len())
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+            });
+        Ok(Actor(named.unwrap_or(ACTOR).to_string()))
+    }
+}
 
 pub async fn save_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
     Json(request): Json<SaveMemoryRequest>,
 ) -> Result<impl IntoResponse> {
     let memories = state.memories.clone();
-    let new = request.into_new_memory(&memories.extra_categories)?;
 
-    let memory = blocking(move || memories.saver.execute(&context, new, ACTOR)).await?;
+    let memory = blocking(move || {
+        let new = request.into_new_memory(&memories.catalog.custom_ids(&context)?)?;
+        memories.saver.execute(&context, new, &actor)
+    })
+    .await?;
 
     Ok((StatusCode::CREATED, Json(MemoryResponse::from(&memory))))
 }
@@ -57,11 +97,21 @@ pub async fn search_memories(
 ) -> Result<Json<SearchResponse>> {
     let memories = state.memories.clone();
 
-    let categories = request
-        .categories
-        .iter()
-        .map(|raw| Category::parse_with_extras(raw, &memories.extra_categories))
-        .collect::<Result<Vec<_>>>()?;
+    let categories = if request.categories.is_empty() {
+        Vec::new()
+    } else {
+        let names = request.categories.clone();
+        let lookup = memories.clone();
+        let filter_context = context.clone();
+        blocking(move || {
+            let custom = lookup.catalog.custom_ids(&filter_context)?;
+            names
+                .iter()
+                .map(|raw| Category::parse_with_extras(raw, &custom))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await?
+    };
 
     // The default floor exists for a caller who can only describe what they
     // want in prose: without it, a weak similarity and a strong one look
@@ -126,6 +176,7 @@ pub async fn get_memory(
 pub async fn update_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(request): Json<UpdateMemoryRequest>,
@@ -134,22 +185,23 @@ pub async fn update_memory(
     let expected_updated_at = if_match(&headers)?;
     let memories = state.memories.clone();
 
-    let category = request
-        .category
-        .as_deref()
-        .map(|raw| Category::parse_with_extras(raw, &memories.extra_categories))
-        .transpose()?;
-
-    let edit = MemoryEdit {
-        content: request.content,
-        category,
-        subcategory: request.subcategory,
-        tags: request.tags,
-        expires_at: request.expires_at,
-        expected_updated_at,
-    };
-
-    let memory = blocking(move || memories.updater.execute(&context, id, edit, ACTOR)).await?;
+    let memory = blocking(move || {
+        let category = request
+            .category
+            .as_deref()
+            .map(|raw| memories.catalog.resolve(&context, raw))
+            .transpose()?;
+        let edit = MemoryEdit {
+            content: request.content,
+            category,
+            subcategory: request.subcategory,
+            tags: request.tags,
+            expires_at: request.expires_at,
+            expected_updated_at,
+        };
+        memories.updater.execute(&context, id, edit, &actor)
+    })
+    .await?;
 
     Ok(with_etag(&memory))
 }
@@ -158,12 +210,13 @@ pub async fn update_memory(
 pub async fn restore_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse> {
     let id = parse_id(&id)?;
     let memories = state.memories.clone();
 
-    let memory = blocking(move || memories.restorer.execute(&context, id, ACTOR)).await?;
+    let memory = blocking(move || memories.restorer.execute(&context, id, &actor)).await?;
 
     Ok(with_etag(&memory))
 }
@@ -184,7 +237,20 @@ pub async fn read_map(
 ) -> Result<Json<MapResponse>> {
     let query = MapQuery::new(params.k, params.include_superseded)?;
     let memories = state.memories.clone();
-    let map = blocking(move || memories.mapper.execute(&context, query)).await?;
+    let (map, labels) = blocking(move || {
+        let map = memories.mapper.execute(&context, query)?;
+        // The user's own labels: the map shows the words the categories
+        // curator shows.
+        let labels: BTreeMap<String, String> = memories
+            .catalog
+            .all(&context)?
+            .into_iter()
+            .filter(|entry| entry.label.is_some())
+            .map(|entry| (entry.category.as_str().to_string(), entry.display_label()))
+            .collect();
+        Ok((map, labels))
+    })
+    .await?;
 
     let similar = map.similar.iter().map(|edge| MapEdge::Similar {
         source: edge.source.to_string(),
@@ -209,8 +275,8 @@ pub async fn read_map(
             .categories
             .into_iter()
             .map(|c| MapCategory {
+                label: labels.get(&c.id).cloned().unwrap_or(c.label),
                 id: c.id,
-                label: c.label,
                 built_in: c.built_in,
                 count: c.count,
                 subcategories: c
@@ -235,55 +301,187 @@ pub async fn read_map(
 /// The categories a memory can be filed under, with counts.
 ///
 /// Built-ins first in taxonomy order (even when empty: they are always
-/// valid), then the configured extras, then any category still on a stored
-/// memory but no longer configured — a row written when the taxonomy was
-/// wider is still the user's, and they need to see it to move it.
+/// valid), then the user's custom categories, then any category still on
+/// a stored memory but missing from their catalog — a row written when
+/// the taxonomy was wider is still the user's, and they need to see it to
+/// move it.
 pub async fn list_categories(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
 ) -> Result<Json<CategoriesResponse>> {
     let memories = state.memories.clone();
-    let extras = memories.extra_categories.clone();
-    let active = blocking(move || memories.repository.list(&context, false)).await?;
+    let views = blocking(move || memories.category_curator.list(&context)).await?;
 
     Ok(Json(CategoriesResponse {
-        categories: categories_with_counts(&active, &extras),
+        categories: views.iter().map(category_response).collect(),
     }))
 }
 
-fn categories_with_counts(memories: &[Memory], extras: &[String]) -> Vec<CategoryResponse> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for memory in memories {
-        *counts
-            .entry(memory.category().as_str().to_string())
-            .or_default() += 1;
+fn category_response(view: &CategoryView) -> CategoryResponse {
+    CategoryResponse {
+        id: view.category.as_str().to_string(),
+        label: view.label.clone(),
+        default_label: view.category.label(),
+        built_in: view.category.is_built_in(),
+        known: view.known,
+        count: view.count,
     }
+}
 
-    let mut categories: Vec<CategoryResponse> = DEFAULT_CATEGORIES
+/// The category `id` as the list now shows it.
+fn listed(curator: &CategoryCurator, context: &UserContext, id: &str) -> Result<CategoryResponse> {
+    curator
+        .list(context)?
         .iter()
-        .map(|category| CategoryResponse {
-            id: category.as_str().to_string(),
-            label: category.label(),
-            built_in: true,
-            count: counts.remove(category.as_str()).unwrap_or(0),
+        .find(|view| view.category.as_str() == id)
+        .map(category_response)
+        .ok_or_else(|| RaError::NotFound(format!("category {id:?} not found")))
+}
+
+pub async fn create_category(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Json(request): Json<CreateCategoryRequest>,
+) -> Result<impl IntoResponse> {
+    let memories = state.memories.clone();
+    let created = blocking(move || {
+        let curator = &memories.category_curator;
+        let entry = curator.create(&context, &request.id, request.label.as_deref())?;
+        listed(curator, &context, entry.category.as_str())
+    })
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+/// Relabels any category, and/or renames a custom one (re-filing and
+/// re-embedding its members).
+pub async fn update_category(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateCategoryRequest>,
+) -> Result<Json<CategoryChangeResponse>> {
+    if request.label.is_none() && request.id.is_none() {
+        return Err(RaError::Validation(
+            "send a new `label`, a new `id`, or both".to_string(),
+        ));
+    }
+    let memories = state.memories.clone();
+    let response = blocking(move || {
+        let curator = &memories.category_curator;
+        let mut current = id;
+        let (mut moved, mut reembedded) = (0, 0);
+        if let Some(to) = request.id.as_deref() {
+            let (entry, outcome) = curator.rename(&context, &current, to, &actor)?;
+            current = entry.category.as_str().to_string();
+            moved = outcome.changed;
+            reembedded = outcome.reembedded;
+        }
+        if let Some(label) = request.label {
+            curator.relabel(&context, &current, label.as_deref())?;
+        }
+        Ok(CategoryChangeResponse {
+            category: Some(listed(curator, &context, &current)?),
+            moved,
+            reembedded,
         })
-        .collect();
+    })
+    .await?;
 
-    let mut custom: BTreeMap<String, usize> = extras
+    Ok(Json(response))
+}
+
+/// Moves every member of a custom category into another, then deletes it.
+pub async fn merge_category(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Path(id): Path<String>,
+    Json(request): Json<MergeCategoryRequest>,
+) -> Result<Json<CategoryChangeResponse>> {
+    let memories = state.memories.clone();
+    let response = blocking(move || {
+        let curator = &memories.category_curator;
+        let outcome = curator.merge(&context, &id, &request.into, &actor)?;
+        let into = memories.catalog.resolve(&context, &request.into)?;
+        Ok(CategoryChangeResponse {
+            category: Some(listed(curator, &context, into.as_str())?),
+            moved: outcome.changed,
+            reembedded: outcome.reembedded,
+        })
+    })
+    .await?;
+
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteCategoryParams {
+    #[serde(default)]
+    move_to: Option<String>,
+}
+
+/// Deletes a custom category: 409 while it has members, unless
+/// `?move_to=` says where they go.
+pub async fn delete_category(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Path(id): Path<String>,
+    Query(params): Query<DeleteCategoryParams>,
+) -> Result<Json<CategoryChangeResponse>> {
+    let memories = state.memories.clone();
+    let moved = blocking(move || {
+        memories
+            .category_curator
+            .delete(&context, &id, params.move_to.as_deref(), &actor)
+    })
+    .await?;
+
+    Ok(Json(CategoryChangeResponse {
+        category: None,
+        moved,
+        reembedded: 0,
+    }))
+}
+
+/// Re-files, re-labels or re-tags many memories in one transaction.
+pub async fn bulk_edit_memories(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Json(request): Json<BulkRequest>,
+) -> Result<Json<BulkResponse>> {
+    let ids = request
+        .ids
         .iter()
-        .map(|extra| (extra.trim().to_ascii_lowercase(), 0))
-        .collect();
-    for (id, count) in counts {
-        *custom.entry(id).or_default() += count;
-    }
-    categories.extend(custom.into_iter().map(|(id, count)| CategoryResponse {
-        label: Category::Custom(id.clone()).label(),
-        id,
-        built_in: false,
-        count,
-    }));
+        .map(|raw| parse_id(raw))
+        .collect::<Result<Vec<_>>>()?;
+    let memories = state.memories.clone();
+    let outcome = blocking(move || {
+        let category = request
+            .set
+            .category
+            .as_deref()
+            .map(|raw| memories.catalog.resolve(&context, raw))
+            .transpose()?;
+        let edit = BulkEdit {
+            category,
+            subcategory: request.set.subcategory,
+            add_tags: request.add_tags,
+            remove_tags: request.remove_tags,
+        };
+        memories.bulk_editor.execute(&context, &ids, &edit, &actor)
+    })
+    .await?;
 
-    categories
+    Ok(Json(BulkResponse {
+        memories: outcome.memories.iter().map(MemoryResponse::from).collect(),
+        changed: outcome.changed,
+        reembedded: outcome.reembedded,
+    }))
 }
 
 /// The memory, with its version as an `ETag` for a later `If-Match`.
@@ -329,12 +527,13 @@ fn if_match(headers: &HeaderMap) -> Result<Option<DateTime<Utc>>> {
 pub async fn forget_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     let id = parse_id(&id)?;
     let memories = state.memories.clone();
 
-    blocking(move || memories.forgetter.execute(&context, id, ACTOR, "")).await?;
+    blocking(move || memories.forgetter.execute(&context, id, &actor, "")).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -422,7 +621,6 @@ fn parse_id(raw: &str) -> Result<MemoryId> {
 mod tests {
     use super::*;
     use crate::memories::application::test_doubles::Fixture;
-    use crate::memories::domain::memory_repository::MemoryRepository;
 
     fn headers_with_if_match(value: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -457,7 +655,8 @@ mod tests {
     }
 
     #[test]
-    fn categories_list_built_ins_extras_and_stored_leftovers() {
+    fn categories_list_built_ins_the_catalog_and_stored_leftovers() {
+        use crate::memories::domain::category::DEFAULT_CATEGORIES;
         let fixture = Fixture::new();
         fixture.save(&fixture.alex, "prefers pnpm");
         fixture.save(&fixture.alex, "prefers vitest");
@@ -467,9 +666,14 @@ mod tests {
             .saver()
             .execute(&fixture.alex, leftover, "test")
             .unwrap();
-        let active = fixture.memories.list(&fixture.alex, false).unwrap();
+        let curator = fixture.category_curator(&["Work.Meetings"]);
 
-        let categories = categories_with_counts(&active, &["Work.Meetings".to_string()]);
+        let categories: Vec<CategoryResponse> = curator
+            .list(&fixture.alex)
+            .unwrap()
+            .iter()
+            .map(category_response)
+            .collect();
 
         let ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(
@@ -479,19 +683,25 @@ mod tests {
                 .map(Category::as_str)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(&ids[8..], ["health.sleep", "work.meetings"]);
+        assert_eq!(&ids[8..], ["work.meetings", "health.sleep"]);
 
         let coding = &categories[0];
         assert_eq!(
             (coding.label.as_str(), coding.count, coding.built_in),
             ("Coding preference", 2, true)
         );
-        let sleep = &categories[8];
+        let meetings = &categories[8];
+        assert_eq!((meetings.count, meetings.known), (0, true));
+        let sleep = &categories[9];
         assert_eq!(
-            (sleep.label.as_str(), sleep.count, sleep.built_in),
-            ("Health sleep", 1, false)
+            (
+                sleep.label.as_str(),
+                sleep.count,
+                sleep.built_in,
+                sleep.known
+            ),
+            ("Health sleep", 1, false, false)
         );
-        assert_eq!(categories[9].count, 0);
         assert!(categories[1..8].iter().all(|c| c.count == 0));
     }
 }

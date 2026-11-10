@@ -1,6 +1,8 @@
 //! Use cases: one doer per file, each exposing a single public `execute`.
 
+pub mod category_curator;
 pub mod direct_memory_saver;
+pub mod memory_bulk_editor;
 pub mod memory_exporter;
 pub mod memory_finder;
 pub mod memory_forgetter;

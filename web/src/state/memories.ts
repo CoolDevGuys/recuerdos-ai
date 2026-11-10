@@ -1,7 +1,17 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { ApiError, type ApiClient } from "../api/client";
-import type { Category, IngestResult, MapData, Memory, RecallHit } from "../api/types";
+import type {
+  BulkEdit,
+  BulkResult,
+  Category,
+  CategoryChange,
+  CategoryUpdate,
+  IngestResult,
+  MapData,
+  Memory,
+  RecallHit,
+} from "../api/types";
 import { fieldsOf, patchOf, type FormValues } from "../domain/memoryForm";
 import { describeError } from "./errors";
 
@@ -111,6 +121,15 @@ export function useMemoryActions(client: ApiClient, user: string) {
         }
       },
       restore: (id: string) => attempt(() => client.restoreMemory(id)),
+      createCategory: (id: string, label: string | null): Promise<Outcome<Category>> =>
+        attempt(() => client.createCategory(id, label)),
+      updateCategory: (id: string, update: CategoryUpdate): Promise<Outcome<CategoryChange>> =>
+        attempt(() => client.updateCategory(id, update)),
+      mergeCategory: (id: string, into: string): Promise<Outcome<CategoryChange>> =>
+        attempt(() => client.mergeCategory(id, into)),
+      deleteCategory: (id: string, moveTo: string | null): Promise<Outcome<CategoryChange>> =>
+        attempt(() => client.deleteCategory(id, moveTo)),
+      bulkEdit: (ids: string[], edit: BulkEdit): Promise<Outcome<BulkResult>> => attempt(() => client.bulkEdit(ids, edit)),
     };
   }, [client, user, queryClient]);
 }

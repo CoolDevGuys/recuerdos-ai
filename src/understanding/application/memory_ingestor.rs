@@ -46,7 +46,10 @@ impl IngestPipeline for MemoryIngestor {
             tags: payload.tags.clone(),
         };
 
-        let candidates = self.extractor.execute(&payload.content, &hints).await?;
+        let candidates = self
+            .extractor
+            .execute(context, &payload.content, &hints)
+            .await?;
         if candidates.is_empty() {
             // Short-circuit rather than calling reconciliation with an
             // empty list: nothing to compare, and it makes the common

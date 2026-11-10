@@ -10,6 +10,7 @@ export class FakeRenderer implements MapRenderer {
   focused: string[][] = [];
   zooms: string[] = [];
   destroyed = false;
+  lassoModes: boolean[] = [];
   callbacks: RendererCallbacks | null = null;
 
   update(view: ViewState): void {
@@ -30,8 +31,16 @@ export class FakeRenderer implements MapRenderer {
   reset(): void {
     this.zooms.push("reset");
   }
+  setLassoMode(on: boolean): void {
+    this.lassoModes.push(on);
+  }
   destroy(): void {
     this.destroyed = true;
+  }
+
+  /** Simulates the user drawing a lasso around these memories. */
+  lasso(ids: string[]): void {
+    this.callbacks?.onLasso(ids);
   }
 
   get lastView(): ViewState | undefined {

@@ -21,6 +21,7 @@
 
 use crate::consolidation::application::consolidation_runner::{BudgetLimits, ConsolidationBudget};
 use crate::identity::application::background_user_resolver::BackgroundUserResolver;
+use crate::identity::domain::user_context::UserContext;
 use crate::identity::domain::user_repository::UserRepository;
 use crate::memories::domain::entity_graph::{EntityGraph, Relation};
 use crate::memories::domain::entity_key::EntityKey;
@@ -214,7 +215,7 @@ impl GraphBackfiller {
                         .extractor
                         .as_ref()
                         .expect("a real relation backfill requires an extractor");
-                    let relations = self.extract_relations(extractor, &memory).await?;
+                    let relations = self.extract_relations(&context, extractor, &memory).await?;
                     self.graph.record_relations(
                         &context,
                         memory.id(),
@@ -248,11 +249,12 @@ impl GraphBackfiller {
     /// merely name-dropped, and caps the count like ingest does.
     async fn extract_relations(
         &self,
+        context: &UserContext,
         extractor: &CandidateExtractor,
         memory: &Memory,
     ) -> Result<Vec<Relation>> {
         let candidates = extractor
-            .execute(memory.content(), &SourceHints::default())
+            .execute(context, memory.content(), &SourceHints::default())
             .await?;
 
         let declared: HashSet<String> = memory

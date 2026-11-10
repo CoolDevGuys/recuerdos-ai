@@ -35,7 +35,7 @@ use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
 use crate::understanding::domain::chat_model::ChatModel;
-use crate::understanding::domain::taxonomy::Taxonomy;
+use crate::understanding::domain::taxonomy::TaxonomySource;
 use std::sync::Arc;
 
 /// Recorded as the actor on everything consolidation writes, so the audit
@@ -61,7 +61,7 @@ pub struct MemoryMerger {
     saver: Arc<DirectMemorySaver>,
     memories: Arc<dyn MemoryRepository>,
     model: Arc<dyn ChatModel>,
-    taxonomy: Arc<Taxonomy>,
+    taxonomy: Arc<dyn TaxonomySource>,
 }
 
 impl MemoryMerger {
@@ -69,7 +69,7 @@ impl MemoryMerger {
         saver: Arc<DirectMemorySaver>,
         memories: Arc<dyn MemoryRepository>,
         model: Arc<dyn ChatModel>,
-        taxonomy: Arc<Taxonomy>,
+        taxonomy: Arc<dyn TaxonomySource>,
     ) -> Self {
         Self {
             saver,
@@ -82,12 +82,14 @@ impl MemoryMerger {
     pub async fn execute(&self, context: &UserContext, cluster: &[Memory]) -> Result<MergeOutcome> {
         check_mergeable(cluster)?;
 
+        // This user's categories: a merge may land in one they created.
+        let taxonomy = self.taxonomy.for_user(context)?;
         let answer = self
             .model
-            .complete_structured(&merge_request(&self.taxonomy, cluster))
+            .complete_structured(&merge_request(&taxonomy, cluster))
             .await?;
 
-        let decision = parse_merge(&answer, &self.taxonomy, cluster);
+        let decision = parse_merge(&answer, &taxonomy, cluster);
         let (content, category, tags, reason) = match decision {
             MergeDecision::Merge {
                 content,
@@ -179,6 +181,7 @@ mod tests {
     use crate::memories::domain::memory_repository::AuditOperation;
     use crate::memories::domain::recall_query::RecallQuery;
     use crate::understanding::application::scripted_chat_model::ScriptedChatModel;
+    use crate::understanding::domain::taxonomy::Taxonomy;
     use serde_json::json;
 
     fn merger(

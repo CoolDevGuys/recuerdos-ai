@@ -16,7 +16,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
@@ -76,6 +76,27 @@ fn api_router(state: AppState) -> Router {
             "/v1/memories/batch",
             post(understanding_http::handlers::ingest_batch),
         )
+        // Curation that may re-embed many memories in the request: renaming
+        // or merging a category re-files every member, and a bulk edit up to
+        // 500. They share the ingest timeout rather than the 30 s cap.
+        .route(
+            "/v1/memories:bulk",
+            post(memories_http::handlers::bulk_edit_memories),
+        )
+        .route(
+            "/v1/categories",
+            get(memories_http::handlers::list_categories)
+                .post(memories_http::handlers::create_category),
+        )
+        .route(
+            "/v1/categories/{id}",
+            patch(memories_http::handlers::update_category)
+                .delete(memories_http::handlers::delete_category),
+        )
+        .route(
+            "/v1/categories/{id}/merge",
+            post(memories_http::handlers::merge_category),
+        )
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             state.ingest_timeout,
@@ -122,10 +143,6 @@ fn api_router(state: AppState) -> Router {
             post(memories_http::handlers::restore_memory),
         )
         .route("/v1/map", get(memories_http::handlers::read_map))
-        .route(
-            "/v1/categories",
-            get(memories_http::handlers::list_categories),
-        )
         .route("/v1/audit", get(memories_http::handlers::read_audit))
         // The 30s cap covers only the routes added above it. The write
         // routes are merged in afterwards so they keep their own longer

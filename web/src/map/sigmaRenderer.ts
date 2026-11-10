@@ -14,7 +14,7 @@ import {
   type Look,
   type ViewState,
 } from "../domain/map/appearance";
-import { convexHull, type Point } from "../domain/map/geometry";
+import { convexHull, lassoed, type Point } from "../domain/map/geometry";
 import type { GroupNode, MapModel } from "../domain/map/layout";
 import { categoryStyle, glyphImage, withAlpha } from "../domain/map/palette";
 import { LEVEL_RATIO, levelAt, quantize, zoomMix, type Level, type ZoomMix } from "../domain/map/zoom";
@@ -49,6 +49,10 @@ class SigmaMapRenderer implements MapRenderer {
   private mix: ZoomMix;
   private level: Level;
   private hovered: string | null = null;
+  private lassoMode = false;
+  /** The outline being drawn, in viewport pixels; `null` when not lassoing. */
+  private lasso: Point[] | null = null;
+  private readonly lassoCanvas: HTMLCanvasElement;
 
   constructor(
     container: HTMLElement,
@@ -88,6 +92,9 @@ class SigmaMapRenderer implements MapRenderer {
     }
 
     this.hulls = this.sigma.createCanvas("hulls", { beforeLayer: "edges" });
+    this.lassoCanvas = this.sigma.createCanvas("lasso", { afterLayer: "mouse" });
+    this.lassoCanvas.style.pointerEvents = "none";
+    this.wireLasso();
     this.sigma.on("afterRender", () => this.drawHulls());
     this.sigma.getCamera().on("updated", (state) => this.onCamera(state.ratio));
     this.sigma.on("clickNode", ({ node }) => this.onClick(node));
@@ -140,8 +147,89 @@ class SigmaMapRenderer implements MapRenderer {
     void this.sigma.getCamera().animatedReset({ duration: 500 });
   }
 
+  setLassoMode(on: boolean): void {
+    this.lassoMode = on;
+    this.sigma.getContainer().style.cursor = on ? "crosshair" : "";
+  }
+
   destroy(): void {
     this.sigma.kill();
+  }
+
+  // --- lasso
+
+  private wireLasso(): void {
+    const captor = this.sigma.getMouseCaptor();
+    captor.on("mousedown", (event) => {
+      if (!this.lassoMode && !event.original.shiftKey) return;
+      this.lasso = [{ x: event.x, y: event.y }];
+    });
+    captor.on("mousemovebody", (event) => {
+      if (this.lasso === null) return;
+      // Draw instead of panning.
+      event.preventSigmaDefault();
+      event.original.preventDefault();
+      event.original.stopPropagation();
+      const last = this.lasso.at(-1)!;
+      if (Math.hypot(event.x - last.x, event.y - last.y) > 3) this.lasso.push({ x: event.x, y: event.y });
+      this.drawLasso();
+    });
+    captor.on("mouseup", () => {
+      if (this.lasso === null) return;
+      const outline = this.lasso;
+      this.lasso = null;
+      this.drawLasso();
+      if (outline.length >= 3) this.callbacks.onLasso(this.enclosed(outline));
+    });
+  }
+
+  /** Memories drawn inside `outline`, plus the members of any group disc drawn inside it. */
+  private enclosed(outline: Point[]): string[] {
+    const visible: { id: string; point: Point }[] = [];
+    this.graph.forEachNode((node) => {
+      const display = this.sigma.getNodeDisplayData(node);
+      if (display === undefined || display.hidden) return;
+      visible.push({ id: node, point: this.sigma.framedGraphToViewport({ x: display.x, y: display.y }) });
+    });
+    const ids = new Set<string>();
+    for (const node of lassoed(visible, outline)) {
+      const kind = this.graph.getNodeAttribute(node, "kind") as NodeKind;
+      if (kind === "memory") ids.add(node);
+      else {
+        const group = kind === "category" ? this.group(this.model.categories, node) : this.model.clusterById.get(node);
+        for (const member of group?.members ?? []) {
+          const memory = this.model.byId.get(member);
+          if (memory !== undefined && !this.view.hiddenCategories.has(memory.category)) ids.add(member);
+        }
+      }
+    }
+    return [...ids];
+  }
+
+  private drawLasso(): void {
+    const canvas = this.lassoCanvas;
+    const { width, height } = this.sigma.getDimensions();
+    const ratio = window.devicePixelRatio || 1;
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+    const context = canvas.getContext("2d");
+    if (context === null) return;
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    if (this.lasso === null || this.lasso.length < 2) return;
+    context.beginPath();
+    this.lasso.forEach((p, i) => (i === 0 ? context.moveTo(p.x, p.y) : context.lineTo(p.x, p.y)));
+    context.closePath();
+    context.fillStyle = "rgba(79, 70, 229, 0.08)";
+    context.strokeStyle = "rgba(79, 70, 229, 0.9)";
+    context.setLineDash([6, 4]);
+    context.lineWidth = 1.5;
+    context.fill();
+    context.stroke();
   }
 
   // --- graph
@@ -252,7 +340,7 @@ class SigmaMapRenderer implements MapRenderer {
     const memory = node !== null && this.graph.getNodeAttribute(node, "kind") === "memory" ? node : null;
     if (memory === this.hovered) return;
     this.hovered = memory;
-    this.sigma.getContainer().style.cursor = node !== null ? "pointer" : "";
+    this.sigma.getContainer().style.cursor = node !== null ? "pointer" : this.lassoMode ? "crosshair" : "";
     this.sigma.refresh();
   }
 

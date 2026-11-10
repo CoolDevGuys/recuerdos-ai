@@ -163,7 +163,7 @@ fn session_pipeline(
         )),
         None => Arc::new(VerbatimIngestor::new(
             Arc::clone(&memories.saver),
-            config.understanding.taxonomy.extra_categories.clone(),
+            Arc::clone(&understanding.taxonomy),
         )),
     }
 }

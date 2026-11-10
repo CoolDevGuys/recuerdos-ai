@@ -153,8 +153,10 @@ workers = 2
 max_attempts = 3
 
 [understanding.taxonomy]
-# Extend the default category list (see docs/architecture.md) without
-# replacing it.
+# Custom categories every user starts with, beside the eight built-ins.
+# Each user's list lives in the database since 0.5 and is changed in the web
+# UI or with /v1/categories; this seeds it the first time it is read, and a
+# user who deletes a seeded category does not get it back.
 extra_categories = []
 
 [consolidation]

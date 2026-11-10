@@ -2,7 +2,9 @@
 
 use crate::bootstrap::config::AppConfig;
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::application::category_curator::CategoryCurator;
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
+use crate::memories::application::memory_bulk_editor::MemoryBulkEditor;
 use crate::memories::application::memory_exporter::MemoryExporter;
 use crate::memories::application::memory_finder::MemoryFinder;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
@@ -11,6 +13,7 @@ use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
+use crate::memories::domain::category_catalog::CategoryCatalog;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
@@ -21,6 +24,7 @@ use crate::memories::domain::recall_ranker::{
 use crate::memories::domain::reranker::{RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
+use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
@@ -69,8 +73,12 @@ pub struct Memories {
     /// results are identical to a build without this field. The write path
     /// consumes it in Task 7.3.2 (ingest) and recall's third leg in 7.3.4.
     pub graph: Option<Arc<dyn EntityGraph>>,
+    /// Each user's taxonomy (V10): what a category a caller names is
+    /// checked against, and what the classifier is offered.
+    pub catalog: Arc<dyn CategoryCatalog>,
+    pub bulk_editor: Arc<MemoryBulkEditor>,
+    pub category_curator: Arc<CategoryCurator>,
     /// Config echoes the handlers need when parsing requests.
-    pub extra_categories: Vec<String>,
     pub default_limit: usize,
     /// The relevance floor every agent-facing read applies unless the
     /// request overrides it. See `[retrieval].min_relevance`.
@@ -222,8 +230,31 @@ impl Memories {
             resolve_similarity_baseline(config, embedder.model_id()),
         ));
 
+        let catalog: Arc<dyn CategoryCatalog> = Arc::new(SqliteCategoryCatalog::new(
+            Arc::clone(&database),
+            &config.understanding.taxonomy.extra_categories,
+        ));
+        let bulk_editor = Arc::new(
+            MemoryBulkEditor::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                Arc::clone(&text),
+                Arc::clone(&embedder),
+                Arc::clone(&clock),
+            )
+            .with_document_text(config.document_text()),
+        );
+        let category_curator = Arc::new(CategoryCurator::new(
+            Arc::clone(&catalog),
+            Arc::clone(&repository),
+            Arc::clone(&bulk_editor),
+        ));
+
         Ok(Self {
             mapper,
+            catalog,
+            bulk_editor,
+            category_curator,
             saver: Arc::new(
                 DirectMemorySaver::new(
                     Arc::clone(&repository),
@@ -269,7 +300,6 @@ impl Memories {
             embedder,
             text_index: text,
             graph,
-            extra_categories: config.understanding.taxonomy.extra_categories.clone(),
             default_limit: config.retrieval.default_limit as usize,
             min_relevance: config.retrieval.min_relevance,
         })

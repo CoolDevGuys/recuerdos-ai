@@ -1,6 +1,10 @@
 import type {
   ApiErrorBody,
+  BulkEdit,
+  BulkResult,
   Category,
+  CategoryChange,
+  CategoryUpdate,
   Identity,
   IngestOutcome,
   IngestRequest,
@@ -39,6 +43,16 @@ export interface ApiClient {
   getMap(): Promise<MapData>;
   /** What recall returns for `query`, as an agent would see it. */
   recall(query: string, limit: number): Promise<RecallHit[]>;
+  /** Creates a custom category. */
+  createCategory(id: string, label: string | null): Promise<Category>;
+  /** Relabels any category and/or renames a custom one (re-filing its memories). */
+  updateCategory(id: string, update: CategoryUpdate): Promise<CategoryChange>;
+  /** Moves every memory of custom category `id` into `into`, then deletes `id`. */
+  mergeCategory(id: string, into: string): Promise<CategoryChange>;
+  /** Deletes a custom category; one with memories needs `moveTo`. */
+  deleteCategory(id: string, moveTo: string | null): Promise<CategoryChange>;
+  /** Applies one edit to many memories, all or nothing. */
+  bulkEdit(ids: string[], edit: BulkEdit): Promise<BulkResult>;
 }
 
 /** A failed request, carrying the daemon's own error code and message. */
@@ -152,6 +166,43 @@ export class HttpApiClient implements ApiClient {
     return body.results.map(parseRecallHit);
   }
 
+  async createCategory(id: string, label: string | null): Promise<Category> {
+    const body = await this.request("/v1/categories", { method: "POST", body: { id, ...(label !== null && { label }) } });
+    return parseCategory(body);
+  }
+
+  async updateCategory(id: string, update: CategoryUpdate): Promise<CategoryChange> {
+    const body = await this.request(`/v1/categories/${encodeURIComponent(id)}`, { method: "PATCH", body: update });
+    return parseCategoryChange(body);
+  }
+
+  async mergeCategory(id: string, into: string): Promise<CategoryChange> {
+    const body = await this.request(`/v1/categories/${encodeURIComponent(id)}/merge`, { method: "POST", body: { into } });
+    return parseCategoryChange(body);
+  }
+
+  async deleteCategory(id: string, moveTo: string | null): Promise<CategoryChange> {
+    const query = moveTo === null ? "" : `?move_to=${encodeURIComponent(moveTo)}`;
+    const body = await this.request(`/v1/categories/${encodeURIComponent(id)}${query}`, { method: "DELETE" });
+    return parseCategoryChange(body);
+  }
+
+  async bulkEdit(ids: string[], edit: BulkEdit): Promise<BulkResult> {
+    const set: Record<string, unknown> = {};
+    if (edit.category !== undefined) set.category = edit.category;
+    if (edit.subcategory !== undefined) set.subcategory = edit.subcategory;
+    const body = await this.request("/v1/memories:bulk", {
+      method: "POST",
+      body: { ids, set, add_tags: edit.addTags ?? [], remove_tags: edit.removeTags ?? [] },
+    });
+    if (!isObject(body) || !Array.isArray(body.memories)) throw malformed("bulk edit result");
+    return {
+      memories: body.memories.map(parseMemory),
+      changed: typeof body.changed === "number" ? body.changed : 0,
+      reembedded: typeof body.reembedded === "number" ? body.reembedded : 0,
+    };
+  }
+
   private async request(path: string, options: RequestOptions = {}): Promise<unknown> {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -243,17 +294,30 @@ export function parseMemory(item: unknown): Memory {
 
 export function parseCategories(body: unknown): Category[] {
   if (!isObject(body) || !Array.isArray(body.categories)) throw malformed("category list");
-  return body.categories.map((item) => {
-    if (!isObject(item) || typeof item.id !== "string" || typeof item.label !== "string") {
-      throw malformed("category");
-    }
-    return {
-      id: item.id,
-      label: item.label,
-      built_in: item.built_in === true,
-      count: typeof item.count === "number" ? item.count : 0,
-    };
-  });
+  return body.categories.map(parseCategory);
+}
+
+export function parseCategory(item: unknown): Category {
+  if (!isObject(item) || typeof item.id !== "string" || typeof item.label !== "string") {
+    throw malformed("category");
+  }
+  return {
+    id: item.id,
+    label: item.label,
+    default_label: typeof item.default_label === "string" ? item.default_label : item.label,
+    built_in: item.built_in === true,
+    known: item.known !== false,
+    count: typeof item.count === "number" ? item.count : 0,
+  };
+}
+
+export function parseCategoryChange(body: unknown): CategoryChange {
+  if (!isObject(body)) throw malformed("category change");
+  return {
+    category: body.category === null || body.category === undefined ? null : parseCategory(body.category),
+    moved: typeof body.moved === "number" ? body.moved : 0,
+    reembedded: typeof body.reembedded === "number" ? body.reembedded : 0,
+  };
 }
 
 export function parseIngestResult(body: unknown): IngestResult {

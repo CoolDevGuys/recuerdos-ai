@@ -2,6 +2,8 @@ import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import type { ApiClient } from "./api/client";
 import type { Memory } from "./api/types";
 import { AddMemory, type Added } from "./components/AddMemory";
+import { BulkEditor } from "./components/BulkEditor";
+import { CategoriesView } from "./components/CategoriesView";
 import { Header } from "./components/Header";
 import { LoginScreen } from "./components/LoginScreen";
 import { MemoryEditor } from "./components/MemoryEditor";
@@ -9,10 +11,11 @@ import { MemoryList } from "./components/MemoryList";
 import { Panel } from "./components/Panel";
 import { Toasts } from "./components/Toasts";
 import type { Access } from "./domain/access";
+import { fileable } from "./domain/categories";
 import { categoryLabel } from "./domain/memories";
 import { useCategories, useMemories, useMemoryActions } from "./state/memories";
 import { describeSignInError, useSession } from "./state/session";
-import { useView, type View } from "./state/route";
+import { useView, VIEW_PATHS, type View } from "./state/route";
 import { useToasts } from "./state/toasts";
 
 // The map pulls in graphology and its layout; the list does not need them.
@@ -76,6 +79,19 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
   const [open, setOpen] = useState<Open>({ kind: "none" });
   const [view, setView] = useView();
   const [highlighted, setHighlighted] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+
+  const select = useCallback((ids: readonly string[], on: boolean) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      for (const id of ids) {
+        if (on) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }, []);
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
 
   const close = useCallback(() => setOpen({ kind: "none" }), []);
   const labelOf = useMemo(() => {
@@ -138,20 +154,45 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
   return (
     <>
       <ViewTabs view={view} onChange={setView} />
-      {view === "list" ? (
-        <MemoryList
-          memories={memories.data}
-          labelOf={labelOf}
-          highlighted={highlighted}
-          canWrite={access.canWrite}
-          onOpen={openMemory}
-          onAdd={() => setOpen({ kind: "add" })}
-        />
-      ) : (
+      {view === "list" && (
+        <>
+          {selected.size > 0 && (
+            <div className="mb-4">
+              <BulkEditor
+                selected={[...selected]}
+                categories={categoryList}
+                actions={actions}
+                onDone={clearSelection}
+                onClear={clearSelection}
+              />
+            </div>
+          )}
+          <MemoryList
+            memories={memories.data}
+            labelOf={labelOf}
+            highlighted={highlighted}
+            canWrite={access.canWrite}
+            onOpen={openMemory}
+            onAdd={() => setOpen({ kind: "add" })}
+            selected={selected}
+            onSelect={select}
+          />
+        </>
+      )}
+      {view === "map" && (
         <Suspense fallback={<p role="status" className="text-sm text-slate-600 dark:text-slate-400">Loading the map…</p>}>
-          <MapView client={client} user={user} actions={actions} labelOf={labelOf} onOpenMemory={openMemory} />
+          <MapView
+            client={client}
+            user={user}
+            actions={actions}
+            labelOf={labelOf}
+            onOpenMemory={openMemory}
+            categories={categoryList}
+            canWrite={access.canWrite}
+          />
         </Suspense>
       )}
+      {view === "categories" && <CategoriesView client={client} user={user} access={access} actions={actions} />}
       {open.kind === "edit" && (
         <Panel title={access.canWrite ? "Edit memory" : "Memory"} onClose={close}>
           <MemoryEditor
@@ -166,7 +207,7 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
       )}
       {open.kind === "add" && (
         <Panel title="Add a memory" onClose={close}>
-          <AddMemory categories={categoryList} actions={actions} onAdded={onAdded} />
+          <AddMemory categories={fileable(categoryList)} actions={actions} onAdded={onAdded} />
         </Panel>
       )}
     </>
@@ -176,7 +217,7 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
 function ViewTabs({ view, onChange }: { view: View; onChange: (view: View) => void }) {
   const tab = (value: View, label: string) => (
     <a
-      href={value === "map" ? "/ui/map" : "/ui/"}
+      href={VIEW_PATHS[value]}
       aria-current={view === value ? "page" : undefined}
       onClick={(event) => {
         event.preventDefault();
@@ -196,6 +237,7 @@ function ViewTabs({ view, onChange }: { view: View; onChange: (view: View) => vo
     <nav aria-label="Views" className="mb-5 flex gap-2 border-b border-slate-200 dark:border-slate-800">
       {tab("list", "List")}
       {tab("map", "Map")}
+      {tab("categories", "Categories")}
     </nav>
   );
 }

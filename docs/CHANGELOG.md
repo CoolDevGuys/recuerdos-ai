@@ -5,6 +5,53 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P3: your own categories, and editing many memories at once
+
+- **Each user's taxonomy lives in the database** (migration V10: `categories`,
+  `category_seeds`), behind a `CategoryCatalog` port.
+  - Every place that validates a category reads the caller's list: HTTP saves,
+    edits and search filters, MCP (through HTTP), the verbatim ingestor, the AI
+    classifier's prompt and schema, and consolidation's merge prompt. The
+    pipelines take a per-call `TaxonomySource` instead of one list fixed at
+    startup.
+  - `[understanding.taxonomy].extra_categories` becomes a **seed**. The first
+    time a user's list is read, it gets the extras plus every custom category
+    already on their memories, once. On a copy of the field store, all 179
+    active memories kept their categories.
+- **Category endpoints:** `POST /v1/categories`, `PATCH /v1/categories/{id}`
+  (relabel any; rename a custom one's id), `POST /v1/categories/{id}/merge`,
+  and `DELETE /v1/categories/{id}` (`409` while non-empty, unless `?move_to=`).
+  - A label is display-only and never re-embeds.
+  - A rename or merge re-files the members through the same path as a bulk
+    edit, and re-embeds them. On the field-store copy, renaming a 5-memory
+    category took 68 ms in a debug build, and recall filtered to the new id
+    found them at 0.81.
+  - `GET /v1/categories` adds `default_label` and `known`. `/v1/map` shows the
+    user's labels.
+- **`POST /v1/memories:bulk`**: set the category or sub-label and add or remove
+  tags on up to 500 memories.
+  - All or nothing, in one transaction (`MemoryRepository::update_many`).
+  - It embeds before it writes, so a failing embedder changes nothing.
+  - One audit entry per memory with a shared detail.
+- **The audit trail names the client.** REST writes record the
+  `X-Recuerdos-Client` name when it is well-formed (the UI sends `web-ui`),
+  else `rest`, as before.
+- **UI:**
+  - a **Categories** tab: create, relabel, rename, merge and delete, with
+    counts, and each move spelled out before it happens;
+  - **Select** mode in the list;
+  - **Lasso select** on the map: Shift-drag, or the toggle. A lasso around a
+    disc takes its members, and the selection lights up in place without
+    burying the map in labels;
+  - one bulk editor serves both.
+- **Tests:**
+  - Rust: 988 unit tests (catalog seeding and isolation, the curator,
+    all-or-nothing bulk edits, taxonomy per user) and a new `tests/categories.rs`
+    with 10 HTTP tests;
+  - web: 162 tests, plus a fifth Playwright test (create → bulk-move → rename
+    → recall → merge against a real daemon);
+  - the eval baseline is unchanged (recall@5 83.3 %, P@1 73.1 %, MRR 77.7 %).
+
 ### Web UI, phase P2: the mental map
 
 - **`GET /v1/map`**: memories, links between them, and the category summary in

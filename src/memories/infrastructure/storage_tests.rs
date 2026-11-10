@@ -2613,3 +2613,173 @@ fn memory_links_join_a_relation_to_memories_naming_its_entities() {
     assert_eq!(links[0].predicate, "deploys_on");
     assert_eq!(links[0].entity, "Hetzner");
 }
+
+mod category_catalog {
+    use super::*;
+    use crate::memories::domain::category_catalog::{CatalogEntry, CategoryCatalog};
+    use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog;
+
+    fn store_in(fixture: &Fixture, context: &UserContext, content: &str, category: &str) -> Memory {
+        let mut memory = memory_for(context, content);
+        memory = memory
+            .edit(
+                crate::memories::domain::memory::MemoryEdit {
+                    category: Some(Category::Custom(category.to_string())),
+                    ..Default::default()
+                },
+                now(),
+            )
+            .unwrap();
+        fixture.memories.insert(context, &memory, "test").unwrap();
+        memory
+    }
+
+    fn ids(catalog: &SqliteCategoryCatalog, context: &UserContext) -> Vec<String> {
+        catalog
+            .entries(context)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.category.as_str().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_first_read_seeds_the_config_extras_and_every_stored_custom_category() {
+        let fixture = fixture();
+        let forgotten = store_in(&fixture, &fixture.alex, "slept 7h", "health.sleep");
+        fixture
+            .memories
+            .delete(&fixture.alex, forgotten.id(), "test", "")
+            .unwrap();
+        store_in(&fixture, &fixture.alex, "runs proxmox", "homelab");
+        store_in(&fixture, &fixture.sam, "sam's", "sams.own");
+        let catalog = SqliteCategoryCatalog::new(
+            Arc::clone(&fixture.database),
+            &["  Work.Meetings ".to_string(), "decision".to_string()],
+        );
+
+        assert_eq!(
+            ids(&catalog, &fixture.alex),
+            ["health.sleep", "homelab", "work.meetings"],
+            "forgotten memories count; a built-in in the extras does not become custom"
+        );
+        assert_eq!(ids(&catalog, &fixture.sam), ["sams.own", "work.meetings"]);
+    }
+
+    #[test]
+    fn seeding_happens_once_so_a_deletion_sticks() {
+        let fixture = fixture();
+        let catalog =
+            SqliteCategoryCatalog::new(Arc::clone(&fixture.database), &["homelab".to_string()]);
+        catalog
+            .remove(&fixture.alex, &Category::Custom("homelab".to_string()))
+            .unwrap();
+
+        let restarted =
+            SqliteCategoryCatalog::new(Arc::clone(&fixture.database), &["homelab".to_string()]);
+
+        assert!(ids(&restarted, &fixture.alex).is_empty());
+    }
+
+    #[test]
+    fn a_built_in_gains_a_row_only_when_relabelled_and_keeps_its_id() {
+        let fixture = fixture();
+        let catalog = SqliteCategoryCatalog::new(Arc::clone(&fixture.database), &[]);
+        assert!(ids(&catalog, &fixture.alex).is_empty());
+
+        catalog
+            .set_label(&fixture.alex, &Category::Decision, Some("Choices"))
+            .unwrap();
+
+        let all = catalog.all(&fixture.alex).unwrap();
+        assert_eq!(all.len(), 8, "still the eight built-ins, no duplicate");
+        let decision = all
+            .iter()
+            .find(|e| e.category == Category::Decision)
+            .unwrap();
+        assert_eq!(decision.display_label(), "Choices");
+        assert!(catalog.custom_ids(&fixture.alex).unwrap().is_empty());
+        assert_eq!(
+            catalog.all(&fixture.sam).unwrap()[2].display_label(),
+            "Decision",
+            "labels are per user"
+        );
+    }
+
+    #[test]
+    fn creating_twice_conflicts_and_another_users_category_is_not_found() {
+        let fixture = fixture();
+        let catalog = SqliteCategoryCatalog::new(Arc::clone(&fixture.database), &[]);
+        let entry = CatalogEntry {
+            category: Category::Custom("homelab".to_string()),
+            label: None,
+        };
+        catalog.create(&fixture.alex, &entry).unwrap();
+
+        assert!(matches!(
+            catalog.create(&fixture.alex, &entry),
+            Err(RaError::Conflict(_))
+        ));
+        assert!(matches!(
+            catalog.set_label(&fixture.sam, &entry.category, Some("x")),
+            Err(RaError::NotFound(_))
+        ));
+        assert!(matches!(
+            catalog.remove(&fixture.sam, &entry.category),
+            Err(RaError::NotFound(_))
+        ));
+        catalog.create(&fixture.sam, &entry).unwrap();
+    }
+}
+
+#[test]
+fn a_bulk_update_is_all_or_nothing() {
+    let fixture = fixture();
+    let mine = memory_for(&fixture.alex, "mine");
+    let theirs = memory_for(&fixture.sam, "theirs");
+    fixture
+        .memories
+        .insert(&fixture.alex, &mine, "test")
+        .unwrap();
+    fixture
+        .memories
+        .insert(&fixture.sam, &theirs, "test")
+        .unwrap();
+    let edit = |memory: &Memory| {
+        memory
+            .clone()
+            .edit(
+                crate::memories::domain::memory::MemoryEdit {
+                    category: Some(Category::Skill),
+                    ..Default::default()
+                },
+                now(),
+            )
+            .unwrap()
+    };
+
+    let err = fixture
+        .memories
+        .update_many(&fixture.alex, &[edit(&mine), edit(&theirs)], "test", "bulk")
+        .unwrap_err();
+
+    assert!(matches!(err, RaError::NotFound(_)));
+    let stored = fixture
+        .memories
+        .find(&fixture.alex, mine.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.category(),
+        &Category::PreferenceCoding,
+        "rolled back"
+    );
+
+    fixture
+        .memories
+        .update_many(&fixture.alex, &[edit(&mine)], "web-ui", "bulk edit of 1")
+        .unwrap();
+    let trail = fixture.memories.audit_trail(&fixture.alex, 5).unwrap();
+    assert_eq!(trail[0].operation, AuditOperation::Update);
+    assert_eq!(trail[0].detail, "bulk edit of 1");
+}

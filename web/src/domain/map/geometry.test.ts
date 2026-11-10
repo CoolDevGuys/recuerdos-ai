@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { centroid, convexHull, hashUnit, lerpPoint, smoothstep } from "./geometry";
+import { centroid, convexHull, hashUnit, lassoed, lerpPoint, pointInPolygon, smoothstep } from "./geometry";
 
 describe("smoothstep", () => {
   it("clamps outside the edges and eases between", () => {
@@ -45,5 +45,48 @@ describe("helpers", () => {
       expect(hashUnit(id)).toBeGreaterThanOrEqual(0);
       expect(hashUnit(id)).toBeLessThan(1);
     }
+  });
+});
+
+describe("pointInPolygon / lassoed", () => {
+  const square = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ];
+
+  it("tells inside from outside", () => {
+    expect(pointInPolygon({ x: 5, y: 5 }, square)).toBe(true);
+    expect(pointInPolygon({ x: 15, y: 5 }, square)).toBe(false);
+    expect(pointInPolygon({ x: 5, y: -1 }, square)).toBe(false);
+  });
+
+  it("handles a concave lasso", () => {
+    // A "U": the notch between the arms is outside.
+    const u = [
+      { x: 0, y: 0 },
+      { x: 3, y: 0 },
+      { x: 3, y: 7 },
+      { x: 7, y: 7 },
+      { x: 7, y: 0 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+      { x: 0, y: 10 },
+    ];
+    expect(pointInPolygon({ x: 5, y: 3 }, u)).toBe(false);
+    expect(pointInPolygon({ x: 1, y: 3 }, u)).toBe(true);
+  });
+
+  it("a lasso of fewer than three points encloses nothing", () => {
+    expect(pointInPolygon({ x: 0, y: 0 }, square.slice(0, 2))).toBe(false);
+  });
+
+  it("returns the enclosed ids", () => {
+    const points = [
+      { id: "a", point: { x: 1, y: 1 } },
+      { id: "b", point: { x: 20, y: 1 } },
+    ];
+    expect(lassoed(points, square)).toEqual(["a"]);
   });
 });

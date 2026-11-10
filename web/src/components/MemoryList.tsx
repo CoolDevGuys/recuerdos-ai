@@ -20,6 +20,8 @@ export function MemoryList({
   canWrite = false,
   onOpen,
   onAdd,
+  selected,
+  onSelect,
 }: {
   memories: readonly Memory[];
   labelOf?: (id: string) => string;
@@ -28,12 +30,18 @@ export function MemoryList({
   canWrite?: boolean;
   onOpen?: (memory: Memory) => void;
   onAdd?: () => void;
+  /** The bulk selection; with `onSelect`, the list offers a "Select" mode. */
+  selected?: ReadonlySet<string>;
+  /** Adds (`on`) or removes these ids from the selection. */
+  onSelect?: (ids: readonly string[], on: boolean) => void;
 }) {
   const searchId = useId();
   const categoryId = useId();
   const sortId = useId();
   const [filter, setFilter] = useState<MemoryFilter>(NO_FILTER);
   const [sort, setSort] = useState<SortKey>("updated");
+  const [selecting, setSelecting] = useState(false);
+  const canSelect = canWrite && onSelect !== undefined && selected !== undefined;
 
   const categories = useMemo(() => categoryCounts(memories), [memories]);
   const visible = useMemo(
@@ -50,8 +58,22 @@ export function MemoryList({
       <h2 id={`${searchId}-heading`} className="sr-only">
         Memories
       </h2>
-      {canWrite && onAdd !== undefined && (
-        <div className="mb-4 flex justify-end">
+      {canWrite && (onAdd !== undefined || canSelect) && (
+        <div className="mb-4 flex justify-end gap-2">
+          {canSelect && (
+            <button
+              type="button"
+              aria-pressed={selecting}
+              onClick={() => {
+                if (selecting) onSelect(memories.map((m) => m.id), false);
+                setSelecting(!selecting);
+              }}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+            >
+              {selecting ? "Done selecting" : "Select"}
+            </button>
+          )}
+          {onAdd !== undefined && (
           <button
             type="button"
             onClick={onAdd}
@@ -59,6 +81,7 @@ export function MemoryList({
           >
             + Add memory
           </button>
+          )}
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-[1fr_14rem_10rem]">
@@ -105,6 +128,18 @@ export function MemoryList({
         </div>
       </div>
 
+      {selecting && canSelect && visible.length > 0 && (
+        <label className="mt-4 flex items-center gap-2 text-sm text-slate-800 dark:text-slate-200">
+          <input
+            type="checkbox"
+            checked={visible.every((m) => selected.has(m.id))}
+            onChange={(event) => onSelect(visible.map((m) => m.id), event.target.checked)}
+            className="h-4 w-4 accent-indigo-600"
+          />
+          Select all {visible.length} shown
+        </label>
+      )}
+
       <p role="status" className="mt-4 text-sm text-slate-600 dark:text-slate-400">
         {visible.length === memories.length
           ? `${memories.length} ${memories.length === 1 ? "memory" : "memories"}`
@@ -126,6 +161,24 @@ export function MemoryList({
                   : "border-l-4 border-transparent"
               }
             >
+              {selecting && canSelect ? (
+                <label className="flex cursor-pointer gap-3 px-4 py-3 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(memory.id)}
+                    onChange={(event) => onSelect([memory.id], event.target.checked)}
+                    className="mt-0.5 h-4 w-4 shrink-0 accent-indigo-600"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm text-slate-900 dark:text-slate-100">{memory.content}</span>
+                    <span className="mt-1 block text-xs text-slate-600 dark:text-slate-400">
+                      {labelOf(memory.category)}
+                      {memory.subcategory !== null && ` · ${memory.subcategory}`}
+                      {memory.tags.length > 0 && ` · ${memory.tags.map((tag) => `#${tag}`).join(" ")}`}
+                    </span>
+                  </span>
+                </label>
+              ) : (
               <button
                 type="button"
                 onClick={() => onOpen?.(memory)}
@@ -152,6 +205,7 @@ export function MemoryList({
                 </span>
               </p>
               </button>
+              )}
             </li>
           ))}
         </ul>

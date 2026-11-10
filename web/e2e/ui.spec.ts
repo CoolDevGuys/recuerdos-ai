@@ -100,3 +100,43 @@ test("previews recall on the map and opens a result", async ({ page }) => {
   await first.getByRole("button").click();
   await expect(page.getByRole("dialog", { name: "Edit memory" })).toBeVisible();
 });
+
+test("creates a category, bulk-moves memories into it, renames it and merges it away", async ({ page, request }) => {
+  const id = `e2e.${RUN}`;
+  await signIn(page, "/ui/categories");
+  await page.getByLabel("Id").fill(id);
+  await page.getByRole("button", { name: "Create" }).click();
+  await expect(page.getByRole("row", { name: new RegExp(id.replace(".", "\\.")) })).toBeVisible();
+
+  // Select the two testing memories in the list and re-file them in one request.
+  await page.getByRole("link", { name: "List" }).click();
+  await page.getByLabel("Filter").fill(`(${RUN})`);
+  await page.getByRole("button", { name: "Select" }).click();
+  await page.getByRole("checkbox", { name: /written with Vitest/ }).check();
+  await page.getByRole("checkbox", { name: /test-driven development/ }).check();
+  const editor = page.getByRole("region", { name: "2 memories selected" });
+  await editor.getByLabel("Move to category").selectOption(id);
+  await editor.getByRole("button", { name: "Apply to 2 memories" }).click();
+  await expect(page.getByText("Updated 2 memories.")).toBeVisible();
+
+  // Rename: the members move with it and recall, filtered to the new id, still finds them.
+  const renamed = `${id}.renamed`;
+  await page.getByRole("link", { name: "Categories" }).click();
+  await page.getByRole("button", { name: `Edit ${id.replace(/[._-]/g, " ").replace(/^./, (c) => c.toUpperCase())}` }).click();
+  const panel = page.getByRole("dialog", { name: "Edit category" });
+  await panel.getByLabel("Id").fill(renamed);
+  await panel.getByRole("button", { name: "Save" }).click();
+  await expect(page.getByText(`Renamed to ${renamed}; 2 memories moved.`)).toBeVisible();
+  const recalled = await request.post("/v1/memories/search", {
+    headers: { Authorization: `Bearer ${KEY}` },
+    data: { query: "how are tests written", categories: [renamed] },
+  });
+  expect((await recalled.json()).results).toHaveLength(2);
+
+  // Merge it back, leaving the store as the other tests expect.
+  const merged = await request.post(`/v1/categories/${renamed}/merge`, {
+    headers: { Authorization: `Bearer ${KEY}` },
+    data: { into: "preference.coding" },
+  });
+  expect((await merged.json()).moved).toBe(2);
+});

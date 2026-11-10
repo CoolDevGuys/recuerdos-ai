@@ -305,9 +305,77 @@ pub struct AuditResponse {
 #[derive(Debug, Serialize)]
 pub struct CategoryResponse {
     pub id: String,
+    /// What to show: the user's label, else the default wording.
     pub label: String,
+    /// The default wording, so a UI can offer "reset to default".
+    pub default_label: String,
     pub built_in: bool,
+    /// False for a category still on a stored memory but not in the
+    /// user's catalog: shown so its memories can be moved.
+    pub known: bool,
     pub count: usize,
+}
+
+/// `POST /v1/categories`.
+#[derive(Debug, Deserialize)]
+pub struct CreateCategoryRequest {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// `PATCH /v1/categories/{id}`: `label` (any category; `null` resets it)
+/// and/or `id` (custom only: a rename that re-files the members).
+#[derive(Debug, Deserialize)]
+pub struct UpdateCategoryRequest {
+    #[serde(default, with = "serde_with_double_option")]
+    pub label: Option<Option<String>>,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// `POST /v1/categories/{id}/merge`.
+#[derive(Debug, Deserialize)]
+pub struct MergeCategoryRequest {
+    pub into: String,
+}
+
+/// The answer to a change that moved memories between categories.
+#[derive(Debug, Serialize)]
+pub struct CategoryChangeResponse {
+    pub category: Option<CategoryResponse>,
+    /// Memories re-filed.
+    pub moved: usize,
+    /// Of those, re-embedded because their embedded text changed.
+    pub reembedded: usize,
+}
+
+/// `POST /v1/memories:bulk`.
+#[derive(Debug, Deserialize)]
+pub struct BulkRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub set: BulkSet,
+    #[serde(default)]
+    pub add_tags: Vec<String>,
+    #[serde(default)]
+    pub remove_tags: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BulkSet {
+    #[serde(default)]
+    pub category: Option<String>,
+    /// `null` clears the sub-label; omitting it leaves it alone.
+    #[serde(default, with = "serde_with_double_option")]
+    pub subcategory: Option<Option<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkResponse {
+    pub memories: Vec<MemoryResponse>,
+    pub changed: usize,
+    pub reembedded: usize,
 }
 
 #[derive(Debug, Serialize)]

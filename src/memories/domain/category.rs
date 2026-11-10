@@ -36,6 +36,12 @@ pub enum Category {
     Custom(String),
 }
 
+/// The longest custom category id.
+pub const MAX_CATEGORY_ID_LEN: usize = 64;
+
+/// The longest display label a user may give a category.
+pub const MAX_CATEGORY_LABEL_LEN: usize = 64;
+
 /// Every built-in category, in taxonomy order.
 pub const DEFAULT_CATEGORIES: &[Category] = &[
     Category::PreferenceCoding,
@@ -104,6 +110,44 @@ impl Category {
                 format!(", or a configured extra: {}", extras.join(", "))
             }
         )))
+    }
+
+    /// A new custom category id, as a user creates or renames one.
+    ///
+    /// Stricter than what [`from_stored`](Self::from_stored) accepts, since
+    /// this is the moment a name enters the taxonomy: lowercase letters,
+    /// digits and `.`, `_`, `-`, starting with a letter, at most
+    /// [`MAX_CATEGORY_ID_LEN`] characters, and not a built-in's id (a
+    /// built-in is relabelled, never shadowed).
+    pub fn custom(raw: &str) -> Result<Self> {
+        let id = raw.trim().to_ascii_lowercase();
+        if id.is_empty() {
+            return Err(RaError::Validation("category id is empty".to_string()));
+        }
+        if id.chars().count() > MAX_CATEGORY_ID_LEN {
+            return Err(RaError::Validation(format!(
+                "category id is longer than {MAX_CATEGORY_ID_LEN} characters"
+            )));
+        }
+        let well_formed = id.starts_with(|c: char| c.is_ascii_lowercase())
+            && id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c));
+        if !well_formed {
+            return Err(RaError::Validation(format!(
+                "category id {id:?} must start with a letter and use only a-z, 0-9, '.', '_' and '-'"
+            )));
+        }
+        if DEFAULT_CATEGORIES.iter().any(|c| c.as_str() == id) {
+            return Err(RaError::Conflict(format!(
+                "{id:?} is a built-in category; relabel it instead"
+            )));
+        }
+        Ok(Category::Custom(id))
+    }
+
+    pub fn is_built_in(&self) -> bool {
+        !matches!(self, Category::Custom(_))
     }
 
     /// The category as words: "Coding preference", "Health sleep log". The
@@ -217,6 +261,35 @@ mod tests {
         // the user's, and must still be readable.
         let category = Category::from_stored("fact.homelab");
         assert_eq!(category.as_str(), "fact.homelab");
+    }
+
+    #[test]
+    fn a_custom_id_is_normalised_and_validated() {
+        assert_eq!(
+            Category::custom("  Health.Sleep ").unwrap(),
+            Category::Custom("health.sleep".to_string())
+        );
+        for bad in [
+            "",
+            "9lives",
+            "has space",
+            "emoji🙂",
+            ".dot",
+            &"x".repeat(65),
+        ] {
+            assert!(
+                matches!(Category::custom(bad), Err(RaError::Validation(_))),
+                "{bad:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_id_cannot_shadow_a_built_in() {
+        assert!(matches!(
+            Category::custom("Decision"),
+            Err(RaError::Conflict(_))
+        ));
     }
 
     #[test]

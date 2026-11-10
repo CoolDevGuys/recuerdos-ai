@@ -28,19 +28,17 @@ use crate::understanding::application::memory_ingestor::DEFAULT_ACTOR;
 use crate::understanding::domain::ingest_job::IngestPayload;
 use crate::understanding::domain::ingest_pipeline::IngestOutcome;
 use crate::understanding::domain::ingest_pipeline::IngestPipeline;
+use crate::understanding::domain::taxonomy::TaxonomySource;
 use std::sync::Arc;
 
 pub struct VerbatimIngestor {
     saver: Arc<DirectMemorySaver>,
-    extra_categories: Vec<String>,
+    taxonomy: Arc<dyn TaxonomySource>,
 }
 
 impl VerbatimIngestor {
-    pub fn new(saver: Arc<DirectMemorySaver>, extra_categories: Vec<String>) -> Self {
-        Self {
-            saver,
-            extra_categories,
-        }
+    pub fn new(saver: Arc<DirectMemorySaver>, taxonomy: Arc<dyn TaxonomySource>) -> Self {
+        Self { saver, taxonomy }
     }
 }
 
@@ -56,7 +54,7 @@ impl IngestPipeline for VerbatimIngestor {
         // is an error, not something to quietly ignore: a client sending
         // `preference.codeing` should hear about it.
         let category = match payload.category.as_deref() {
-            Some(raw) => Category::parse_with_extras(raw, &self.extra_categories)?,
+            Some(raw) => self.taxonomy.for_user(context)?.parse(raw)?,
             None => infer_category(&payload.content),
         };
 
@@ -135,9 +133,13 @@ mod tests {
     use crate::memories::domain::memory_repository::MemoryRepository;
     use crate::memories::domain::recall_query::RecallQuery;
     use crate::shared::error::RaError;
+    use crate::understanding::domain::taxonomy::Taxonomy;
 
     fn ingestor(fixture: &Fixture) -> VerbatimIngestor {
-        VerbatimIngestor::new(Arc::new(fixture.saver()), vec!["fact.homelab".to_string()])
+        VerbatimIngestor::new(
+            Arc::new(fixture.saver()),
+            Arc::new(Taxonomy::new(vec!["fact.homelab".to_string()])),
+        )
     }
 
     fn payload(content: &str) -> IngestPayload {

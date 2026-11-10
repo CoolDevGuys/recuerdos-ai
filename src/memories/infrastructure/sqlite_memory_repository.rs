@@ -138,6 +138,43 @@ impl SqliteMemoryRepository {
         })
     }
 
+    fn write_update(
+        connection: &Connection,
+        context: &UserContext,
+        memory: &Memory,
+        operation: AuditOperation,
+        actor: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let affected = connection
+            .execute(
+                "UPDATE memories SET
+                    content = ?3, category = ?4, subcategory = ?5, tags = ?6, entities = ?7,
+                    confidence = ?8, updated_at = ?9, expires_at = ?10, superseded_by = ?11
+                  WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
+                rusqlite::params![
+                    memory.id().to_string(),
+                    context.user_id().to_string(),
+                    memory.content(),
+                    memory.category().as_str(),
+                    memory.subcategory(),
+                    encode_tags(memory.tags()),
+                    encode_entities(memory.entities()),
+                    memory.confidence(),
+                    memory.updated_at().to_rfc3339(),
+                    memory.expires_at().map(|at| at.to_rfc3339()),
+                    memory.superseded_by().map(|id| id.to_string()),
+                ],
+            )
+            .map_err(|e| map_sqlite_error(e, "memory update conflict"))?;
+
+        if affected == 0 {
+            return Err(not_found(memory.id()));
+        }
+
+        Self::write_audit(connection, context, memory.id(), operation, actor, detail)
+    }
+
     fn write_audit(
         connection: &Connection,
         context: &UserContext,
@@ -211,38 +248,44 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     fn update(&self, context: &UserContext, memory: &Memory, actor: &str) -> Result<()> {
         self.database.with_connection(|connection| {
-            let affected = connection
-                .execute(
-                    "UPDATE memories SET
-                        content = ?3, category = ?4, subcategory = ?5, tags = ?6, entities = ?7,
-                        confidence = ?8, updated_at = ?9, expires_at = ?10, superseded_by = ?11
-                      WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
-                    rusqlite::params![
-                        memory.id().to_string(),
-                        context.user_id().to_string(),
-                        memory.content(),
-                        memory.category().as_str(),
-                        memory.subcategory(),
-                        encode_tags(memory.tags()),
-                        encode_entities(memory.entities()),
-                        memory.confidence(),
-                        memory.updated_at().to_rfc3339(),
-                        memory.expires_at().map(|at| at.to_rfc3339()),
-                        memory.superseded_by().map(|id| id.to_string()),
-                    ],
-                )
-                .map_err(|e| map_sqlite_error(e, "memory update conflict"))?;
-
-            if affected == 0 {
-                return Err(not_found(memory.id()));
-            }
-
             let operation = if memory.is_superseded() {
                 AuditOperation::Supersede
             } else {
                 AuditOperation::Update
             };
-            Self::write_audit(connection, context, memory.id(), operation, actor, "")
+            Self::write_update(connection, context, memory, operation, actor, "")
+        })
+    }
+
+    fn update_many(
+        &self,
+        context: &UserContext,
+        memories: &[Memory],
+        actor: &str,
+        detail: &str,
+    ) -> Result<()> {
+        self.database.with_connection(|connection| {
+            // All or nothing: a bulk move that stopped halfway would leave a
+            // category half-merged, which is neither what was asked nor what
+            // was there.
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|e| map_sqlite_error(e, "could not begin a bulk update"))?;
+            for memory in memories {
+                // Always `Update`: a bulk edit re-files a memory, superseded or
+                // not, and says so in `detail`; it never supersedes one.
+                Self::write_update(
+                    &transaction,
+                    context,
+                    memory,
+                    AuditOperation::Update,
+                    actor,
+                    detail,
+                )?;
+            }
+            transaction
+                .commit()
+                .map_err(|e| map_sqlite_error(e, "could not commit a bulk update"))
         })
     }
 

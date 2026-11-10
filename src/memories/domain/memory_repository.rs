@@ -60,6 +60,17 @@ pub trait MemoryRepository: Send + Sync {
 
     fn update(&self, context: &UserContext, memory: &Memory, actor: &str) -> Result<()>;
 
+    /// Writes many edited memories in one transaction, one audit entry each
+    /// carrying `detail`. All or nothing: if any of them is not this user's
+    /// active memory, nothing is written and the answer is `NotFound`.
+    fn update_many(
+        &self,
+        context: &UserContext,
+        memories: &[Memory],
+        actor: &str,
+        detail: &str,
+    ) -> Result<()>;
+
     /// Soft delete: the row is retained and the audit entry written, but
     /// the memory stops appearing in recall. Hard deletion belongs to the
     /// governance path (project-plan.md §15), not to ordinary use.

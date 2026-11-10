@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ApiClient } from "../../api/client";
-import type { Memory, RecallHit } from "../../api/types";
+import type { Category, Memory, RecallHit } from "../../api/types";
+import { memoriesCount } from "../../domain/categories";
 import type { ViewState } from "../../domain/map/appearance";
 import { layoutMap } from "../../domain/map/layout";
 import { categoryStyle, glyphImage } from "../../domain/map/palette";
@@ -8,6 +9,7 @@ import { LEVELS, type Level } from "../../domain/map/zoom";
 import { useRendererLoader } from "../../map/rendererContext";
 import type { MapRenderer } from "../../map/renderer";
 import { useMap, type MemoryActions } from "../../state/memories";
+import { BulkEditor } from "../BulkEditor";
 import { RecallPanel } from "./RecallPanel";
 
 const LEVEL_NAMES: Record<Level, string> = { categories: "Categories", clusters: "Clusters", memories: "Memories" };
@@ -24,12 +26,17 @@ export default function MapView({
   actions,
   labelOf,
   onOpenMemory,
+  categories = [],
+  canWrite = false,
 }: {
   client: ApiClient;
   user: string;
   actions: MemoryActions;
   labelOf: (id: string) => string;
   onOpenMemory: (memory: Memory) => void;
+  /** For the bulk editor a lasso opens. */
+  categories?: readonly Category[];
+  canWrite?: boolean;
 }) {
   const sliderId = useId();
   const map = useMap(client, user);
@@ -38,6 +45,10 @@ export default function MapView({
   const renderer = useRef<MapRenderer | null>(null);
   const [rendererFailed, setRendererFailed] = useState(false);
   const [level, setLevel] = useState<Level>("categories");
+  const [lassoMode, setLassoMode] = useState(false);
+  const [selected, setSelected] = useState<readonly string[]>([]);
+  const [lassoNote, setLassoNote] = useState<string | null>(null);
+  const [recallHits, setRecallHits] = useState<ReadonlySet<string> | null>(null);
   const [view, setView] = useState<ViewState>({
     hiddenCategories: new Set(),
     showSimilar: true,
@@ -69,6 +80,10 @@ export default function MapView({
             if (node !== undefined) latest.current.onOpenMemory(node.memory);
           },
           onLevelChange: setLevel,
+          onLasso: (ids) => {
+            setSelected(ids);
+            setLassoNote(ids.length === 0 ? "The lasso caught no memories. Draw around the dots or discs you want." : null);
+          },
         });
         renderer.current = created;
         setRendererFailed(false);
@@ -81,9 +96,26 @@ export default function MapView({
     };
   }, [model, loadRenderer]);
 
+  // A search's answers take precedence; otherwise the lassoed selection is what stands out.
+  const highlighted = recallHits ?? (selected.length > 0 ? new Set(selected) : null);
+  const shown: ViewState = useMemo(
+    () => ({ ...view, highlighted, labelHighlighted: recallHits !== null, minWeight: floor }),
+    [view, highlighted, recallHits, floor],
+  );
+  latest.current.view = shown;
+
   useEffect(() => {
-    renderer.current?.update({ ...view, minWeight: floor });
-  }, [view, floor]);
+    renderer.current?.update(shown);
+  }, [shown]);
+
+  useEffect(() => {
+    renderer.current?.setLassoMode(lassoMode);
+  }, [lassoMode, model]);
+
+  const clearSelection = () => {
+    setSelected([]);
+    setLassoNote(null);
+  };
 
   const toggleCategory = (id: string) =>
     setView((current) => {
@@ -94,7 +126,7 @@ export default function MapView({
     });
 
   const showRecall = (hits: RecallHit[] | null) => {
-    setView((current) => ({ ...current, highlighted: hits === null ? null : new Set(hits.map((h) => h.memory.id)) }));
+    setRecallHits(hits === null ? null : new Set(hits.map((h) => h.memory.id)));
     if (hits !== null && hits.length > 0) renderer.current?.focus(hits.map((h) => h.memory.id));
     if (hits === null) renderer.current?.reset();
   };
@@ -153,6 +185,16 @@ export default function MapView({
             <button type="button" onClick={() => renderer.current?.reset()} className={control}>
               Fit
             </button>
+            {canWrite && (
+              <button
+                type="button"
+                aria-pressed={lassoMode}
+                onClick={() => setLassoMode((on) => !on)}
+                className={control + (lassoMode ? " !border-indigo-600 !bg-indigo-600 !text-white" : "")}
+              >
+                Lasso select
+              </button>
+            )}
           </div>
         </div>
 
@@ -172,10 +214,30 @@ export default function MapView({
           {relationCount > 0 && ` · ${relationCount} stated relations`}
           {map.data.edgesOmitted && " · too many memories to compare, links omitted"}. Scroll or pinch to zoom; click a
           category to open it, a memory to edit it.
+          {canWrite && " To select memories for a bulk edit, turn on Lasso select (or hold Shift) and draw around them."}
         </p>
+        {lassoNote !== null && (
+          <p role="status" className="mt-1 text-sm text-amber-800 dark:text-amber-300">
+            {lassoNote}
+          </p>
+        )}
       </section>
 
       <aside className="space-y-6">
+        {canWrite && selected.length > 0 && (
+          <div>
+            <p className="sr-only" role="status">
+              {memoriesCount(selected.length)} selected on the map.
+            </p>
+            <BulkEditor
+              selected={selected}
+              categories={categories}
+              actions={actions}
+              onDone={clearSelection}
+              onClear={clearSelection}
+            />
+          </div>
+        )}
         <RecallPanel
           recall={(query) => actions.recall(query)}
           labelOf={labelOf}

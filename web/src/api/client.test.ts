@@ -162,6 +162,40 @@ describe("HttpApiClient", () => {
       respond(200, { categories: [{ id: "decision", label: "Decision", built_in: true, count: 2 }] }),
     );
 
-    expect(await client.listCategories()).toEqual([{ id: "decision", label: "Decision", built_in: true, count: 2 }]);
+    expect(await client.listCategories()).toEqual([
+      { id: "decision", label: "Decision", default_label: "Decision", built_in: true, known: true, count: 2 },
+    ]);
+  });
+
+  it("sends a bulk edit in the daemon's shape", async () => {
+    const { calls, fetcher } = recording(200, { memories: [], changed: 0, reembedded: 0 });
+
+    await new HttpApiClient("k", fetcher).bulkEdit(["a", "b"], { category: "skill", subcategory: null, addTags: ["rust"] });
+
+    expect(calls[0]?.url).toBe("/v1/memories:bulk");
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      ids: ["a", "b"],
+      set: { category: "skill", subcategory: null },
+      add_tags: ["rust"],
+      remove_tags: [],
+    });
+  });
+
+  it("addresses category changes by id, with the destination of a delete in the query", async () => {
+    const change = { category: null, moved: 3, reembedded: 3 };
+    const { calls, fetcher } = recording(200, change);
+    const client = new HttpApiClient("k", fetcher);
+
+    expect(await client.deleteCategory("home lab", "fact.project")).toEqual(change);
+    await client.updateCategory("homelab", { label: null, id: "home" });
+    await client.mergeCategory("homelab", "skill");
+
+    expect(calls.map((c) => [c.init?.method, c.url])).toEqual([
+      ["DELETE", "/v1/categories/home%20lab?move_to=fact.project"],
+      ["PATCH", "/v1/categories/homelab"],
+      ["POST", "/v1/categories/homelab/merge"],
+    ]);
+    expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({ label: null, id: "home" });
   });
 });

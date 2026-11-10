@@ -227,6 +227,44 @@ impl Fixture {
         )
     }
 
+    pub fn bulk_editor(
+        &self,
+    ) -> crate::memories::application::memory_bulk_editor::MemoryBulkEditor {
+        crate::memories::application::memory_bulk_editor::MemoryBulkEditor::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&self.text) as Arc<dyn TextIndex>,
+            Arc::clone(&self.embedder) as Arc<dyn Embedder>,
+            fixed_clock(),
+        )
+    }
+
+    /// The real SQLite catalog over the fixture's database, seeded with
+    /// `extras` the way `[understanding.taxonomy]` seeds a new user.
+    pub fn catalog(
+        &self,
+        extras: &[&str],
+    ) -> Arc<crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog> {
+        let extras: Vec<String> = extras.iter().map(ToString::to_string).collect();
+        Arc::new(
+            crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog::new(
+                Arc::clone(&self.database),
+                &extras,
+            ),
+        )
+    }
+
+    pub fn category_curator(
+        &self,
+        extras: &[&str],
+    ) -> crate::memories::application::category_curator::CategoryCurator {
+        crate::memories::application::category_curator::CategoryCurator::new(
+            self.catalog(extras),
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::new(self.bulk_editor()),
+        )
+    }
+
     pub fn exporter(&self) -> MemoryExporter {
         MemoryExporter::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
     }
@@ -325,6 +363,30 @@ impl MemoryRepository for InMemoryMemoryRepository {
             AuditOperation::Update
         };
         self.record(context, memory.id(), operation, actor, "");
+        Ok(())
+    }
+
+    fn update_many(
+        &self,
+        context: &UserContext,
+        memories: &[Memory],
+        actor: &str,
+        detail: &str,
+    ) -> Result<()> {
+        if let Some(missing) = memories.iter().find(|m| !self.visible(context, m.id())) {
+            return Err(RaError::NotFound(format!(
+                "memory {} not found",
+                missing.id()
+            )));
+        }
+        for memory in memories {
+            let mut stored = self.memories.lock().unwrap();
+            if let Some(slot) = stored.iter_mut().find(|m| m.id() == memory.id()) {
+                *slot = memory.clone();
+            }
+            drop(stored);
+            self.record(context, memory.id(), AuditOperation::Update, actor, detail);
+        }
         Ok(())
     }
 

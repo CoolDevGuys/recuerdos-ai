@@ -16,12 +16,22 @@ export interface MapRenderer {
   zoomIn(): void;
   zoomOut(): void;
   reset(): void;
+  /**
+   * In lasso mode a drag draws a selection outline instead of panning. Shift
+   * plus drag lassos in either mode.
+   */
+  setLassoMode(on: boolean): void;
   destroy(): void;
 }
 
 export interface RendererCallbacks {
   onOpenMemory(id: string): void;
   onLevelChange(level: Level): void;
+  /**
+   * The memories a lasso enclosed: those drawn inside it, plus every member
+   * of a category or cluster disc drawn inside it.
+   */
+  onLasso(ids: string[]): void;
 }
 
 export type RendererFactory = (

@@ -6,7 +6,7 @@ them by category, and use zoom as the grouping mechanism: zoomed out, the catego
 in, the categories 'dissolve' into the individual memories — a representation of the mental map. For
 management, the user can edit or correct any memory or category, and add or delete memories."*
 
-Status: **P0–P2 implemented** (2026-11-10, branch `feat/web-ui`); P3–P4 planned. Phases are ordered so
+Status: **P0–P3 implemented** (2026-11-10, branch `feat/web-ui`); P4 planned. Phases are ordered so
 each one ships something usable (§9). §9.1 records how P0 differed from this plan.
 
 ---
@@ -513,6 +513,60 @@ re-embedded as `enriched`):
 - **Highlighted memories show at every zoom level**, in their true place. Without
   that, a recall whose answers span categories either zooms too close to see
   them, or leaves them hidden inside category discs.
+
+### 9.4 What P3 shipped, and where it differs from the plan above
+
+**Shipped:**
+- Migration V10, the `CategoryCatalog` port and its SQLite adapter, a
+  `CategoryCurator` use case (list / create / relabel / rename / merge /
+  delete) and the five category endpoints (§4.2).
+- `POST /v1/memories:bulk` (§4.3) on a `MemoryBulkEditor`. The curator's member
+  moves reuse it.
+- Every category check reads the caller's catalog: HTTP, MCP (through HTTP),
+  the verbatim ingestor, the extraction prompt and schema, and the merge
+  prompt.
+- The UI's Categories tab, list Select mode, the map lasso, and one shared bulk
+  editor.
+
+**Acceptance, on a copy of the frozen field store:**
+- **The seed is correct:** 179 active memories, all in their categories; a
+  configured extra appeared with 0 memories; one `category_seeds` row.
+- **The eval baseline is unchanged:** recall@5 83.3 %, P@1 73.1 %, MRR 77.7 %,
+  complete@5 80.8 %, identical to the P2 tree run the same way. One earlier run
+  showed −0.6 on one case, while another container was reindexing and building
+  next to it. Two quiet reruns of each tree matched the baseline exactly.
+- **A rename re-embeds, and recall still finds the members:** 5 memories
+  re-filed and re-embedded in 68 ms (debug build). Recall filtered to the new
+  id found them, the top one at 0.81.
+
+**Differences, each deliberate:**
+- **Seeding is lazy, not done in the migration.** The config extras are not in
+  the database for SQL to read. So the first read of a user's catalog seeds it,
+  once, recorded in `category_seeds`. Without that marker, a deleted seeded
+  category would come back on the next read.
+- **Re-embedding always runs in the request**, with no `/v1/jobs` fallback for
+  large categories. Writes are capped at 500 ids per bulk edit, and a rename
+  of a category that size is seconds even on a CPU embedder. The category and
+  bulk routes share the ingest timeout rather than the 30 s cap. A job is still
+  the way to go if a remote embedder makes this slow.
+- **Bulk edits embed before they write.** The plan only said "re-embeds only
+  what changed". Doing it first makes a failing embedder a no-op rather than
+  rows whose vectors describe their old labels.
+- **No `If-Match` on category endpoints** (§4.5 suggested it). A category has
+  no version a client holds for long, and every member move goes through the
+  all-or-nothing editor anyway.
+- **Members include superseded memories**, so `include_superseded` reads never
+  show a category that no longer exists. Forgotten ones keep their old
+  category; if one is restored later, it appears as "not in your categories"
+  and can be added back in one click.
+- **Built-in labels stay out of the classifier prompt.** The model files by the
+  descriptions, which are the meaning; a user's custom labels are offered beside
+  their ids.
+- **The audit actor follow-up from P1 is done:** a well-formed
+  `X-Recuerdos-Client` names the actor (`web-ui`), otherwise `rest`.
+- **Lasso selections are not labelled.** Highlighted memories still show at
+  every zoom, but forcing a label on each of 25 lassoed memories buried the
+  map, so they show as dots, labelled under the pointer.
 
 ## 10. Risks and open points
 

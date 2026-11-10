@@ -26,9 +26,45 @@ export interface Memory {
 /** `GET /v1/categories`: one category a memory can be filed under. */
 export interface Category {
   id: string;
+  /** What to show: the user's own label, else the default wording. */
   label: string;
+  /** The default wording, for "reset to default". */
+  default_label: string;
   built_in: boolean;
+  /**
+   * False for a category still on a stored memory but missing from the
+   * user's catalog: listed so its memories can be moved, not offered for new ones.
+   */
+  known: boolean;
   count: number;
+}
+
+/** `PATCH /v1/categories/{id}`: a new label (`null` resets it) and/or, for a custom category, a new id. */
+export interface CategoryUpdate {
+  label?: string | null;
+  id?: string;
+}
+
+/** What a category change did: the category as it now is, and how many memories moved. */
+export interface CategoryChange {
+  category: Category | null;
+  moved: number;
+  reembedded: number;
+}
+
+/** `POST /v1/memories:bulk`: what to change on every selected memory. */
+export interface BulkEdit {
+  category?: string;
+  /** `null` clears the sub-label. */
+  subcategory?: string | null;
+  addTags?: string[];
+  removeTags?: string[];
+}
+
+export interface BulkResult {
+  memories: Memory[];
+  changed: number;
+  reembedded: number;
 }
 
 /** What a memory is made of, for a save or an edit. */

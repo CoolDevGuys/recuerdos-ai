@@ -16,8 +16,14 @@ export interface ViewState {
   showRelations: boolean;
   /** Similarity edges below this weight are hidden. */
   minWeight: number;
-  /** Memories to emphasise (search hits, a hovered neighbourhood); `null` = none. */
+  /** Memories to emphasise (search hits, a lasso selection, a hovered neighbourhood); `null` = none. */
   highlighted: ReadonlySet<string> | null;
+  /**
+   * Whether highlighted memories carry their labels at any zoom. True for a
+   * handful of recall answers; false for a lasso selection, where dozens of
+   * forced labels would pile on top of each other. Default true.
+   */
+  labelHighlighted?: boolean;
   /** A memory under the pointer. */
   hovered: string | null;
 }
@@ -96,13 +102,14 @@ export function memoryLook(node: MemoryNode, model: MapModel, mix: ZoomMix, view
   // A highlighted memory shows at any zoom, in its true place, so a search
   // over the whole map shows where its answers sit among the categories.
   if (view.highlighted?.has(node.id) === true && !view.hiddenCategories.has(node.category)) {
+    const labelled = view.labelHighlighted !== false || view.hovered === node.id;
     return {
       ...node.position,
       size: 5 + 3 * node.memory.confidence,
       color: withAlpha(color, 1),
-      label: truncate(node.memory.content, LABEL_LENGTH),
+      label: labelled ? truncate(node.memory.content, LABEL_LENGTH) : null,
       hidden: false,
-      forceLabel: true,
+      forceLabel: labelled,
       zIndex: 4,
     };
   }

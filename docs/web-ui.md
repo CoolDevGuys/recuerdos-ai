@@ -5,10 +5,10 @@ The daemon serves a browser UI at **`/ui`** on its API port, at
 compiled into the binary. It reads and writes memories through the same `/v1` API
 as every other client, under the same API-key scopes.
 
-> **Status:** phases P0–P2 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
-> You can sign in, browse, filter, correct, add and forget memories, and
-> explore them as a zoomable mental map with a recall preview. Category
-> management (create, rename, merge) comes next.
+> **Status:** phases P0–P3 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+> You can sign in, browse, filter, correct, add and forget memories, explore
+> them as a zoomable mental map with a recall preview, manage your categories,
+> and edit many memories at once from the list or with a lasso on the map.
 
 ## The mental map
 
@@ -64,6 +64,41 @@ shows the same memories as text.
   copy.
 - **A `read`-only key** opens memories for viewing, with no edit controls.
 
+## Editing many at once
+
+- **From the list:** **Select** turns each row into a checkbox, with **Select
+  all shown** for whatever the filter left.
+- **On the map:** **Lasso select**, or hold Shift, then draw around memories.
+  Drawing around a category or cluster disc takes all its memories. The
+  selection lights up where it sits on the map.
+
+The selection opens one editor. Move everything to a category, set or clear
+the sub-label, add tags, remove tags, then **Apply**. It is all or nothing: if
+one memory changed underneath you (forgotten by an agent, say), nothing is
+changed and the message says which.
+
+## Categories
+
+**Categories** (`/ui/categories`) lists every category with how many memories
+it holds.
+
+- **New category:** an id like `health.sleep` and an optional label. It can
+  be used at once, by you in the editor and by your agents in `memory_save`.
+  The AI classifier is offered it too.
+- **Relabel** any category, built-ins included. A label only changes what you
+  see; agents keep the id, and nothing is re-embedded. Leave it blank to go
+  back to the default wording.
+- **Edit** a custom category's id to rename it. Its memories move with it,
+  and their search index is refreshed to match. Agents that filter by the old
+  id need the new one.
+- **Merge…** moves every memory into another category and deletes this one.
+- **Delete…** an empty custom category, or say where its memories go first.
+- A category marked **not in your categories** is still on some memory but
+  not in your list. **Add to my categories** brings it back.
+
+Built-in categories can be relabelled, but not renamed, merged or deleted.
+Categories are per user: yours are not visible to anyone else on the daemon.
+
 ## Signing in
 
 Paste an API key, issued with:
@@ -75,7 +110,7 @@ recuerdos-ai key issue --user <you> --scopes read,write
 | Scope | What the UI offers |
 |---|---|
 | `read` | Browse memories |
-| `write` (with `read`) | Browse and edit, once the editing phase lands |
+| `write` (with `read`) | Browse, edit, bulk-edit and manage categories |
 | `write` only | Nothing to show: the UI says the key cannot read memories |
 | `admin` | Everything |
 

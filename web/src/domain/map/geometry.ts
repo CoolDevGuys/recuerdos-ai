@@ -61,3 +61,21 @@ export function hashUnit(text: string): number {
   }
   return (hash >>> 0) / 0x100000000;
 }
+
+/** Whether `point` lies inside `polygon` (even-odd rule; the polygon closes itself). */
+export function pointInPolygon(point: Point, polygon: readonly Point[]): boolean {
+  if (polygon.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i]!;
+    const b = polygon[j]!;
+    const crosses = a.y > point.y !== b.y > point.y && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x;
+    if (crosses) inside = !inside;
+  }
+  return inside;
+}
+
+/** The ids of the points a lasso drawn as `polygon` encloses. */
+export function lassoed(points: readonly { id: string; point: Point }[], polygon: readonly Point[]): string[] {
+  return points.filter(({ point }) => pointInPolygon(point, polygon)).map(({ id }) => id);
+}

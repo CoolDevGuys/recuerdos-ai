@@ -128,4 +128,16 @@ describe("a highlighted memory", () => {
     expect(memoryLook(model.byId.get("a")!, model, OUT, focused).hidden).toBe(true);
     expect(categoryLook(model.categories[0]!, OUT, focused).color).toMatch(/,0\.35\)$/);
   });
+
+  it("in a lasso selection shows as a dot, labelled only under the pointer", () => {
+    const selected = { ...view, highlighted: new Set(["d"]), labelHighlighted: false };
+    const d = model.byId.get("d")!;
+
+    const look = memoryLook(d, model, OUT, selected);
+    const hovered = memoryLook(d, model, OUT, { ...selected, hovered: "d" });
+
+    expect(look.hidden).toBe(false);
+    expect([look.label, look.forceLabel]).toEqual([null, false]);
+    expect(hovered.forceLabel).toBe(true);
+  });
 });

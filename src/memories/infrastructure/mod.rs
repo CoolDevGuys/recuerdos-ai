@@ -3,6 +3,7 @@
 
 pub mod http;
 pub mod mcp;
+pub mod sqlite_category_catalog;
 pub mod sqlite_entity_graph;
 pub mod sqlite_graph_backfill_state;
 pub mod sqlite_memory_repository;
