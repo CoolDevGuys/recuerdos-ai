@@ -34,6 +34,7 @@ LangChain ──SDK───▶ │               │  nightly: merge, decay, ex
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
 - 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. Opt-in (`[graph].enabled`) since v0.5.0-rc4: it wins multi-hop questions about people, teams and ownership, and on a store of ordinary preferences it measured as displacing better matches.
 - 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model — and 0 of 13 queries changed their top result on the first real store it was audited against, so it is off by default and the honest advice is to leave it off until your own audit says otherwise. `rerank audit` judges it on your store before you turn it on.
+- 🗺️ **See and curate it** — a browser UI at `/ui`, built into the daemon: a map of your memories that zooms from categories to single memories, plus editing, bulk edits and your own categories. [docs/web-ui.md](docs/web-ui.md)
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
 ---
@@ -287,6 +288,11 @@ every query and their rankings are fused.
 **Nothing left the machine.** 🔒 Embeddings are computed in-process by an
 ONNX model baked into the image.
 
+To see what's stored, open **<http://localhost:7070/ui>** in a browser:
+browse and search, correct or forget a memory, and look at the whole store
+as a map. Sign in with an API key, or go straight in when auth is off.
+See [docs/web-ui.md](docs/web-ui.md).
+
 ---
 
 ## 🔌 Connect your tools
@@ -477,9 +483,10 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ## 🗺️ Status
 
-`v0.1.0` — a release candidate. Used daily by its author since Phase 3;
-the API is stable enough to build on, and the storage format has migrated
-cleanly across every phase.
+**`v0.5.0-rc5`** — a release candidate for `v0.5.0`. The latest final release
+is `v0.4.3`. Used daily by its author since Phase 3: the API is stable enough
+to build on, and the storage format has migrated itself forward cleanly across
+every release.
 
 | Phase | Scope | |
 |---|---|:---:|
@@ -490,6 +497,8 @@ cleanly across every phase.
 | 4 — Understanding | Extraction, labeling, reconciliation | ✅ |
 | 5 — Consolidation | Dedup/merge, decay, profile digest | ✅ |
 | 6 — Release | SDK, docs, packaging | ✅ |
+| 7 — Capability upgrades | Budgeted consolidation, sub-labels, entity graph, recall quality, reranking | ✅ |
+| Web UI | Browse, curate and map memories at `/ui` | ✅ |
 
 **Shipped in `v0.2.0`:** a relational recall layer — a bi-temporal
 entity/relation graph that recall hops over as a third leg (on by default
@@ -504,7 +513,19 @@ a local cross-encoder that reads query and memory together, opt-in because
 it costs 1.1 GB and ~70 ms for the +5.8 precision@1 it earned. See the
 [CHANGELOG](docs/CHANGELOG.md#v040--recall-quality-and-an-optional-cross-encoder-reranker).
 
-**On the roadmap:** a web dashboard, Postgres/Qdrant storage backends, and
+**Coming in `v0.5.0`** (release candidates out now):
+
+- **Recall measured on a real store, and tuned to it** (rc1–rc4). Memories
+  are embedded together with their labels (`document_text = "enriched"`), the
+  graph leg and the confidence × importance multiplier are off by default, and
+  unused knobs are gone. On a frozen copy of a real 222-memory store, the rc4
+  defaults lift precision@1 from 66.7 to 83.3. *Upgrading from v0.4:* a store built before rc4 needs one
+  `recuerdos-ai reindex`; see [configuration.md](docs/configuration.md).
+- **A web UI at `/ui`** (rc5): a mental map of your memories that zooms from
+  categories to clusters to single memories, plus editing, bulk edits and
+  your own categories. See [docs/web-ui.md](docs/web-ui.md).
+
+**On the roadmap:** Postgres/Qdrant storage backends, and
 user-visible collections/workspaces. See
 [project-plan.md](ai-specs/project-plan.md) for where it's headed.
 

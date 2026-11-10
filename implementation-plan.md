@@ -6,14 +6,16 @@ Actionable, phased breakdown of the build. Every phase lives on its own git bran
 ends in a **shippable, usable** state, and every task has a goal, step-by-step
 procedure, examples where they apply, and a Definition of Done (DoD).
 
-> **Status (2026-08-04): Phases 0–6 are ✅ SHIPPED.** The build described below is
-> complete and released as `v0.1.0` (release candidate) and `v0.1.1`. Those phase
-> sections are kept as the **build record** — a faithful account of what was
-> designed and delivered, not a to-do list. Forward work lives in
-> [Phase 7 — Memory-science performance & capability upgrades](#phase-7); its
-> **Tasks 7.1 and 7.2 are now ✅ shipped**, and Task 7.3 (the graph layer) is
-> **planned and broken down** — its deferral condition is met, and Task 7.3.0 is the
-> eval that decides whether the rest of it gets built.
+> **Status (2026-11-10): Phases 0–7 are ✅ SHIPPED; `v0.5.0-rc5` is the current
+> release candidate.** Phases 0–6 were released as `v0.1.0` and `v0.1.1`; Phase 7
+> (budgeted consolidation, sub-labels, the graph layer, recall quality and the optional
+> reranker) across `v0.2.0`–`v0.4.0`. Those phase sections are kept as the **build
+> record** — a faithful account of what was designed and delivered, not a to-do list.
+> Work since has run under its own plans rather than new phases here:
+> [recall-quality-plan.md](ai-specs/recall-quality-plan.md) and
+> [concept-recall-plan.md](ai-specs/concept-recall-plan.md) (`v0.5.0-rc1`–`rc4`: recall
+> measured on a real store, enriched vectors by default and the graph made opt-in), and
+> [web-ui-plan.md](ai-specs/web-ui-plan.md) (`v0.5.0-rc5`: the browser UI at `/ui`).
 >
 > **Why this file and [project-plan.md](ai-specs/project-plan.md) both exist.** They are not
 > merged on purpose: `ai-specs/project-plan.md` is the *product & architecture reference*
