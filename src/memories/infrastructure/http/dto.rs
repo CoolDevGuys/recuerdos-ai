@@ -300,6 +300,21 @@ pub struct AuditResponse {
     pub entries: Vec<AuditEntryResponse>,
 }
 
+/// One category a memory can be filed under, with how many of the caller's
+/// active memories are.
+#[derive(Debug, Serialize)]
+pub struct CategoryResponse {
+    pub id: String,
+    pub label: String,
+    pub built_in: bool,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CategoriesResponse {
+    pub categories: Vec<CategoryResponse>,
+}
+
 /// serde has no built-in way to distinguish "absent" from "explicit
 /// null", which is exactly the distinction a PATCH needs.
 mod serde_with_double_option {

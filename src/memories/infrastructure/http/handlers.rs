@@ -9,13 +9,15 @@
 //! its call on `spawn_blocking` rather than stalling a runtime worker.
 
 use super::dto::{
-    AuditEntryResponse, AuditResponse, MemoryResponse, RerankResponse, SaveMemoryRequest,
-    SearchHit, SearchRequest, SearchResponse, UpdateMemoryRequest,
+    AuditEntryResponse, AuditResponse, CategoriesResponse, CategoryResponse, MemoryResponse,
+    RerankResponse, SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse,
+    UpdateMemoryRequest,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
 use crate::memories::application::memory_exporter::ExportFormat;
-use crate::memories::domain::category::Category;
+use crate::memories::domain::category::{Category, DEFAULT_CATEGORIES};
+use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory::MemoryEdit;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::blocking::blocking;
@@ -23,9 +25,11 @@ use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Instant;
 
@@ -109,22 +113,24 @@ pub async fn get_memory(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
     Path(id): Path<String>,
-) -> Result<Json<MemoryResponse>> {
+) -> Result<impl IntoResponse> {
     let id = parse_id(&id)?;
     let memories = state.memories.clone();
 
     let memory = blocking(move || memories.finder.execute(&context, id)).await?;
 
-    Ok(Json(MemoryResponse::from(&memory)))
+    Ok(with_etag(&memory))
 }
 
 pub async fn update_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<UpdateMemoryRequest>,
-) -> Result<Json<MemoryResponse>> {
+) -> Result<impl IntoResponse> {
     let id = parse_id(&id)?;
+    let expected_updated_at = if_match(&headers)?;
     let memories = state.memories.clone();
 
     let category = request
@@ -139,11 +145,120 @@ pub async fn update_memory(
         subcategory: request.subcategory,
         tags: request.tags,
         expires_at: request.expires_at,
+        expected_updated_at,
     };
 
     let memory = blocking(move || memories.updater.execute(&context, id, edit, ACTOR)).await?;
 
-    Ok(Json(MemoryResponse::from(&memory)))
+    Ok(with_etag(&memory))
+}
+
+/// Brings back a memory forgotten with `DELETE` — the web UI's undo.
+pub async fn restore_memory(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse> {
+    let id = parse_id(&id)?;
+    let memories = state.memories.clone();
+
+    let memory = blocking(move || memories.restorer.execute(&context, id, ACTOR)).await?;
+
+    Ok(with_etag(&memory))
+}
+
+/// The categories a memory can be filed under, with counts.
+///
+/// Built-ins first in taxonomy order (even when empty: they are always
+/// valid), then the configured extras, then any category still on a stored
+/// memory but no longer configured — a row written when the taxonomy was
+/// wider is still the user's, and they need to see it to move it.
+pub async fn list_categories(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+) -> Result<Json<CategoriesResponse>> {
+    let memories = state.memories.clone();
+    let extras = memories.extra_categories.clone();
+    let active = blocking(move || memories.repository.list(&context, false)).await?;
+
+    Ok(Json(CategoriesResponse {
+        categories: categories_with_counts(&active, &extras),
+    }))
+}
+
+fn categories_with_counts(memories: &[Memory], extras: &[String]) -> Vec<CategoryResponse> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for memory in memories {
+        *counts
+            .entry(memory.category().as_str().to_string())
+            .or_default() += 1;
+    }
+
+    let mut categories: Vec<CategoryResponse> = DEFAULT_CATEGORIES
+        .iter()
+        .map(|category| CategoryResponse {
+            id: category.as_str().to_string(),
+            label: category.label(),
+            built_in: true,
+            count: counts.remove(category.as_str()).unwrap_or(0),
+        })
+        .collect();
+
+    let mut custom: BTreeMap<String, usize> = extras
+        .iter()
+        .map(|extra| (extra.trim().to_ascii_lowercase(), 0))
+        .collect();
+    for (id, count) in counts {
+        *custom.entry(id).or_default() += count;
+    }
+    categories.extend(custom.into_iter().map(|(id, count)| CategoryResponse {
+        label: Category::Custom(id.clone()).label(),
+        id,
+        built_in: false,
+        count,
+    }));
+
+    categories
+}
+
+/// The memory, with its version as an `ETag` for a later `If-Match`.
+fn with_etag(memory: &Memory) -> impl IntoResponse + use<> {
+    let tag = format!("\"{}\"", version_of(memory.updated_at()));
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&tag) {
+        headers.insert(header::ETAG, value);
+    }
+    (headers, Json(MemoryResponse::from(memory)))
+}
+
+/// A version is the memory's `updated_at`, spelled the way the JSON body
+/// spells it, so a client may send either back.
+fn version_of(updated_at: DateTime<Utc>) -> String {
+    updated_at.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+/// The `updated_at` an `If-Match` header names, if any. `*` (any version)
+/// and an absent header mean no precondition; a weak tag is accepted, since
+/// the version is a timestamp either way.
+fn if_match(headers: &HeaderMap) -> Result<Option<DateTime<Utc>>> {
+    let Some(raw) = headers.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .to_str()
+        .map_err(|_| RaError::Validation("If-Match is not valid text".to_string()))?
+        .trim();
+    if raw == "*" {
+        return Ok(None);
+    }
+    let tag = raw.strip_prefix("W/").unwrap_or(raw).trim_matches('"');
+    DateTime::parse_from_rfc3339(tag)
+        .map(|at| Some(at.with_timezone(&Utc)))
+        .map_err(|_| {
+            RaError::Validation(format!(
+                "If-Match must be a memory's ETag (its updated_at), got {raw:?}"
+            ))
+        })
 }
 
 pub async fn forget_memory(
@@ -236,4 +351,82 @@ fn parse_id(raw: &str) -> Result<MemoryId> {
     // A malformed id is the caller's mistake, not a missing resource.
     MemoryId::from_str(raw)
         .map_err(|_| RaError::Validation(format!("{raw:?} is not a valid memory id")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memories::application::test_doubles::Fixture;
+    use crate::memories::domain::memory_repository::MemoryRepository;
+
+    fn headers_with_if_match(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_MATCH, HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn no_if_match_is_no_precondition() {
+        assert_eq!(if_match(&HeaderMap::new()).unwrap(), None);
+        assert_eq!(if_match(&headers_with_if_match("*")).unwrap(), None);
+    }
+
+    #[test]
+    fn an_etag_round_trips_into_the_version_it_names() {
+        let at = DateTime::parse_from_rfc3339("2026-11-10T02:56:07.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let etag = format!("\"{}\"", version_of(at));
+
+        assert_eq!(if_match(&headers_with_if_match(&etag)).unwrap(), Some(at));
+        assert_eq!(
+            if_match(&headers_with_if_match(&format!("W/{etag}"))).unwrap(),
+            Some(at)
+        );
+    }
+
+    #[test]
+    fn an_if_match_that_is_not_a_version_is_a_validation_error() {
+        let err = if_match(&headers_with_if_match("\"abc\"")).unwrap_err();
+        assert!(matches!(err, RaError::Validation(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn categories_list_built_ins_extras_and_stored_leftovers() {
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "prefers pnpm");
+        fixture.save(&fixture.alex, "prefers vitest");
+        let mut leftover = crate::memories::application::test_doubles::new_memory("slept 7h");
+        leftover.category = Category::Custom("health.sleep".to_string());
+        fixture
+            .saver()
+            .execute(&fixture.alex, leftover, "test")
+            .unwrap();
+        let active = fixture.memories.list(&fixture.alex, false).unwrap();
+
+        let categories = categories_with_counts(&active, &["Work.Meetings".to_string()]);
+
+        let ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            &ids[..8],
+            DEFAULT_CATEGORIES
+                .iter()
+                .map(Category::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(&ids[8..], ["health.sleep", "work.meetings"]);
+
+        let coding = &categories[0];
+        assert_eq!(
+            (coding.label.as_str(), coding.count, coding.built_in),
+            ("Coding preference", 2, true)
+        );
+        let sleep = &categories[8];
+        assert_eq!(
+            (sleep.label.as_str(), sleep.count, sleep.built_in),
+            ("Health sleep", 1, false)
+        );
+        assert_eq!(categories[9].count, 0);
+        assert!(categories[1..8].iter().all(|c| c.count == 0));
+    }
 }

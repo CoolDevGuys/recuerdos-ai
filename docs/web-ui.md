@@ -5,9 +5,30 @@ The daemon serves a browser UI at **`/ui`** on its API port, at
 compiled into the binary. It reads and writes memories through the same `/v1` API
 as every other client, under the same API-key scopes.
 
-> **Status:** phase P0 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
-> You can sign in and browse a filterable list of your memories. Editing,
-> the mental map and category management come in the later phases.
+> **Status:** phases P0–P1 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+> You can sign in, browse and filter your memories, and correct, add and
+> forget them. The mental map and category management come in later phases.
+
+## Managing memories
+
+- **Open a memory** from the list to see it in full. With a `write` key you can
+  correct its text, category, sub-label and tags. Only the fields you
+  changed are sent.
+- **Edits never overwrite silently.** If an agent, consolidation or another tab
+  changed the memory after you opened it, saving is refused (`412`) and your text
+  is kept. You then choose:
+  - **Load the latest**: discards your edit and shows the current version.
+  - **Save mine anyway**: overwrites the current version with yours.
+- **Add memory** saves exactly what you write, instantly. Tick **Let the AI
+  classify it** to send it through the understanding pipeline instead:
+  - The pipeline may split the text into several memories, or save nothing if
+    you already have it. The UI tells you which happened.
+  - On a daemon without a model, the text is stored as written, and the UI says
+    so.
+- **Forget** asks for confirmation, then offers **Undo** for 8 seconds. Undo
+  restores the same memory, with the same id and history, rather than saving a
+  copy.
+- **A `read`-only key** opens memories for viewing, with no edit controls.
 
 ## Signing in
 

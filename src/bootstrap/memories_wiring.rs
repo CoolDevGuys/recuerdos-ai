@@ -7,6 +7,7 @@ use crate::memories::application::memory_exporter::MemoryExporter;
 use crate::memories::application::memory_finder::MemoryFinder;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
 use crate::memories::application::memory_recaller::MemoryRecaller;
+use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::domain::embedder::Embedder;
@@ -45,6 +46,7 @@ pub struct Memories {
     pub finder: Arc<MemoryFinder>,
     pub updater: Arc<MemoryUpdater>,
     pub forgetter: Arc<MemoryForgetter>,
+    pub restorer: Arc<MemoryRestorer>,
     pub exporter: Arc<MemoryExporter>,
     pub profile_assembler: Arc<ProfileAssembler>,
     /// Exposed for the audit endpoint, which reads the trail directly
@@ -237,6 +239,15 @@ impl Memories {
                 Arc::clone(&vectors),
                 Arc::clone(&text),
             )),
+            restorer: Arc::new(
+                MemoryRestorer::new(
+                    Arc::clone(&repository),
+                    Arc::clone(&vectors),
+                    Arc::clone(&text),
+                    Arc::clone(&embedder),
+                )
+                .with_document_text(config.document_text()),
+            ),
             exporter: Arc::new(MemoryExporter::new(Arc::clone(&repository))),
             profile_assembler: Arc::new(ProfileAssembler::new(
                 Arc::clone(&repository),

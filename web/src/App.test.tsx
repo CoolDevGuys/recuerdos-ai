@@ -1,52 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import { App } from "./App";
-import { InMemoryApiClient, memory } from "./api/fake";
-import type { Identity, Memory } from "./api/types";
-import { memoryKeyStore, type KeyStore } from "./state/keyStore";
-import { SessionProvider, type ClientFactory } from "./state/session";
-
-const ALEX_KEY = "ra_live_1f4c8a209d4e5f6a7b8c9d0e1f2a3b4c5d6e7f80";
-const READER_KEY = "ra_live_0000000000000000000000000000000000000001";
-const UNKNOWN_KEY = "ra_live_ffffffffffffffffffffffffffffffffffffffff";
-
-const ALEX_MEMORIES: Memory[] = [
-  memory({ id: "a", content: "The user prefers pnpm", tags: ["package-management"] }),
-  memory({ id: "b", content: "Testing follows TDD", subcategory: "testing" }),
-  memory({ id: "c", content: "Frontend uses Next.js", category: "fact.project" }),
-];
-
-type Accounts = Map<string | null, { identity: Identity; memories: Memory[] }>;
-
-function accounts(extra: [string | null, { identity: Identity; memories: Memory[] }][] = []): Accounts {
-  return new Map([
-    [ALEX_KEY, { identity: { user: "alex", scopes: ["read", "write"] }, memories: ALEX_MEMORIES }],
-    [READER_KEY, { identity: { user: "reader", scopes: ["read"] }, memories: [] }],
-    ...extra,
-  ]);
-}
-
-function renderApp({ users = accounts(), keyStore = memoryKeyStore() }: { users?: Accounts; keyStore?: KeyStore } = {}) {
-  const createClient: ClientFactory = (key) => new InMemoryApiClient(users, key);
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <SessionProvider createClient={createClient} keyStore={keyStore}>
-        <App />
-      </SessionProvider>
-    </QueryClientProvider>,
-  );
-  return { keyStore };
-}
-
-async function signIn(key: string) {
-  const user = userEvent.setup();
-  await user.type(await screen.findByLabelText("API key"), key);
-  await user.click(screen.getByRole("button", { name: "Sign in" }));
-  return user;
-}
+import { FakeServer } from "./api/fake";
+import { memoryKeyStore } from "./state/keyStore";
+import { ALEX_KEY, ALEX_MEMORIES, UNKNOWN_KEY, READER_KEY, renderApp, signIn, standardServer } from "./test/renderApp";
 
 describe("signing in", () => {
   it("shows the user's memories after a valid key", async () => {
@@ -96,9 +53,7 @@ describe("signing in", () => {
   });
 
   it("skips sign-in on a server that needs no key, and says so", async () => {
-    renderApp({
-      users: accounts([[null, { identity: { user: "default", scopes: ["admin"] }, memories: ALEX_MEMORIES }]]),
-    });
+    renderApp({ server: standardServer().addAccount(null, { user: "default", scopes: ["admin"] }, ALEX_MEMORIES) });
 
     expect(await screen.findByText("The user prefers pnpm")).toBeInTheDocument();
     expect(screen.getByText(/runs without authentication/)).toBeInTheDocument();
@@ -124,12 +79,13 @@ describe("scopes", () => {
     await signIn(READER_KEY);
 
     expect(await screen.findByText(/Read-only key/)).toBeInTheDocument();
-    expect(await screen.findByText("No memories stored yet.")).toBeInTheDocument();
+    expect(await screen.findByText("The user prefers pnpm")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "+ Add memory" })).not.toBeInTheDocument();
   });
 
   it("explains that a write-only key cannot show memories", async () => {
     const writer = "ra_live_0000000000000000000000000000000000000002";
-    renderApp({ users: accounts([[writer, { identity: { user: "agent", scopes: ["write"] }, memories: [] }]]) });
+    renderApp({ server: new FakeServer().addAccount(writer, { user: "agent", scopes: ["write"] }) });
 
     await signIn(writer);
 
@@ -176,5 +132,13 @@ describe("the memory list", () => {
     await user.type(screen.getByLabelText("Filter"), "kubernetes");
 
     expect(screen.getByText("No memory matches this filter.")).toBeInTheDocument();
+  });
+
+  it("says when there are no memories at all", async () => {
+    renderApp({ server: new FakeServer().addAccount(ALEX_KEY, { user: "alex", scopes: ["read"] }) });
+
+    await signIn(ALEX_KEY);
+
+    expect(await screen.findByText("No memories stored yet.")).toBeInTheDocument();
   });
 });

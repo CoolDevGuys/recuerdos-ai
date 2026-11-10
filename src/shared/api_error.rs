@@ -37,6 +37,11 @@ impl IntoResponse for RaError {
             RaError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             RaError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             RaError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            RaError::PreconditionFailed(message) => (
+                StatusCode::PRECONDITION_FAILED,
+                "precondition_failed",
+                message,
+            ),
             RaError::RerankBusy(waited) => {
                 // Unreachable on the running daemon by construction: the
                 // recaller catches a busy stage and serves the pre-rerank

@@ -357,16 +357,50 @@ therefore return fewer than `limit` results even when more exist.
 Requires `read`. `404` both when the memory doesn't exist and when it
 belongs to another user — the two are deliberately indistinguishable.
 
+The response carries an `ETag`: the memory's `updated_at`, quoted. Send it
+back as `If-Match` on a `PATCH` to make the edit conditional.
+
 ### `PATCH /v1/memories/{id}`
 
-Requires `write`. Any of `content`, `category`, `tags`, `expires_at`.
-Omitting a field leaves it alone; sending `"expires_at": null` clears it.
-Editing content re-embeds and re-indexes.
+Requires `write`. Any of `content`, `category`, `subcategory`, `tags`,
+`expires_at`. Omitting a field leaves it alone; sending `null` for
+`subcategory` or `expires_at` clears it. Editing content re-embeds and
+re-indexes; so does editing the labels under `document_text = "enriched"`.
+
+**Conditional edits.** With `If-Match: "<updated_at>"` (the `ETag` of a
+`GET`, `PATCH` or restore, or the `updated_at` of any listing), the edit
+applies only if the memory has not changed since. If it has, the answer is
+`412 {"error": {"code": "precondition_failed", …}}` and nothing changes:
+re-read it and decide. `If-Match: *` or no header edits unconditionally,
+as before. The response carries the new `ETag`.
 
 ### `DELETE /v1/memories/{id}`
 
 Requires `write`. Responds `204`. A soft delete: the memory stops being
 recalled, and the audit trail keeps what happened to it.
+
+### `POST /v1/memories/{id}/restore`
+
+Requires `write`. Undoes a `DELETE`: the memory comes back with its id,
+`created_at` and history, is re-embedded and re-indexed, and is recalled
+again. Answers the memory (with an `ETag`). `404` when it is not yours or
+was never forgotten. Audited as `restore`.
+
+### `GET /v1/categories`
+
+Requires `read`. Every category a memory can be filed under, with how many
+of your active memories are:
+
+```json
+{"categories": [
+  {"id": "preference.coding", "label": "Coding preference", "built_in": true, "count": 12},
+  {"id": "health.sleep", "label": "Health sleep", "built_in": false, "count": 3}
+]}
+```
+
+Built-ins come first, in taxonomy order, even when empty. Then come the
+configured `extra_categories`, then any category still on one of your
+memories but no longer configured, so it can be found and moved.
 
 ### `GET /v1/memories/export`
 

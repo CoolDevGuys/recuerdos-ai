@@ -118,27 +118,11 @@ impl DocumentText {
     }
 }
 
-/// The category as words a sentence-embedding model reads naturally. The
-/// dotted ids (`preference.coding`) are a filter key, not language.
+/// The category as words a sentence-embedding model reads naturally — the
+/// same wording the web UI shows, so both live on [`Category::label`]. A
+/// change there changes embedded text and needs a new pin suffix.
 fn describe(category: &Category) -> String {
-    match category {
-        Category::PreferenceCoding => "Coding preference".to_string(),
-        Category::PreferencePersonal => "Personal preference".to_string(),
-        Category::Decision => "Decision".to_string(),
-        Category::FactProject => "Project fact".to_string(),
-        Category::FactPerson => "Fact about a person".to_string(),
-        Category::Experience => "Experience".to_string(),
-        Category::Skill => "Skill".to_string(),
-        Category::Reference => "Reference".to_string(),
-        Category::Custom(name) => {
-            let words = name.replace(['.', '_', '-'], " ");
-            let mut chars = words.trim().chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect(),
-                None => "Memory".to_string(),
-            }
-        }
-    }
+    category.label()
 }
 
 #[cfg(test)]

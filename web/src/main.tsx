@@ -5,6 +5,7 @@ import { App } from "./App";
 import { HttpApiClient } from "./api/client";
 import { sessionKeyStore } from "./state/keyStore";
 import { SessionProvider, type ClientFactory } from "./state/session";
+import { ToastProvider } from "./state/toasts";
 import "./index.css";
 
 const createClient: ClientFactory = (key) => new HttpApiClient(key);
@@ -19,7 +20,9 @@ createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <SessionProvider createClient={createClient} keyStore={sessionKeyStore}>
-        <App />
+        <ToastProvider>
+          <App />
+        </ToastProvider>
       </SessionProvider>
     </QueryClientProvider>
   </StrictMode>,

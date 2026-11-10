@@ -106,6 +106,33 @@ impl Category {
         )))
     }
 
+    /// The category as words: "Coding preference", "Health sleep log". The
+    /// dotted ids (`preference.coding`) are a filter key, not language.
+    ///
+    /// Also the header of an enriched vector's text
+    /// (`document_text.rs`): changing a label changes what is embedded, so
+    /// it needs a new `+enriched-vN` pin, not just an edit here.
+    pub fn label(&self) -> String {
+        match self {
+            Category::PreferenceCoding => "Coding preference".to_string(),
+            Category::PreferencePersonal => "Personal preference".to_string(),
+            Category::Decision => "Decision".to_string(),
+            Category::FactProject => "Project fact".to_string(),
+            Category::FactPerson => "Fact about a person".to_string(),
+            Category::Experience => "Experience".to_string(),
+            Category::Skill => "Skill".to_string(),
+            Category::Reference => "Reference".to_string(),
+            Category::Custom(name) => {
+                let words = name.replace(['.', '_', '-'], " ");
+                let mut chars = words.trim().chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => "Memory".to_string(),
+                }
+            }
+        }
+    }
+
     /// Rebuilds a category read from storage.
     ///
     /// Never fails: a row written when the taxonomy was wider is

@@ -5,6 +5,36 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P1: correct, add and forget memories
+
+- **Editor panel.** Open a memory to correct its text, category, sub-label and
+  tags. Only the changed fields are sent.
+  - Fields are validated on blur and on submit, against the daemon's own limits.
+  - Typed text is never cleared on failure.
+- **Conditional edits, end to end.**
+  - `GET`, `PATCH` and restore answer an `ETag` (the memory's `updated_at`).
+  - `PATCH` honours `If-Match` and answers **`412 precondition_failed`** when the
+    memory changed since.
+  - The editor then offers "Load the latest" or "Save mine anyway".
+  - Without the header, `PATCH` behaves exactly as before.
+- **`POST /v1/memories/{id}/restore`** undoes a forget. It keeps the id,
+  `created_at` and history, and re-embeds and re-indexes the memory.
+  - If re-embedding fails, the memory is forgotten again rather than left
+    half-restored.
+  - Audited as the new `restore` operation.
+  - The UI's forget shows an 8-second **Undo** that calls it.
+- **`GET /v1/categories`** lists the built-ins, the configured extras, and any
+  stored category no longer configured, each with its label and the caller's
+  count. Category wording now lives on `Category::label`, which the enriched
+  vector header also uses; the embedded text is unchanged.
+- **Add memory**, two ways:
+  - saved exactly as written (`/v1/memories:direct`);
+  - or through the AI pipeline (`POST /v1/memories`, `wait: true`), whose outcome
+    is reported in words: saved N, already known, nothing lasting, or changed
+    existing memories.
+- A `read`-only key opens memories without edit controls.
+- MCP: a `412` from the daemon maps to an invalid-request error, like `409`.
+
 ### Web UI, phase P0: sign in and browse at `/ui`
 
 The first slice of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).

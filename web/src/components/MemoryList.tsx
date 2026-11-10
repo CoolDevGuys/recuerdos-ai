@@ -12,8 +12,23 @@ import {
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 
-/** A read-only, filterable table of memories (plan §5.4, "List view"). */
-export function MemoryList({ memories }: { memories: readonly Memory[] }) {
+/** A filterable list of memories (plan §5.4, "List view"); a row opens it. */
+export function MemoryList({
+  memories,
+  labelOf = categoryLabel,
+  highlighted = null,
+  canWrite = false,
+  onOpen,
+  onAdd,
+}: {
+  memories: readonly Memory[];
+  labelOf?: (id: string) => string;
+  /** A memory just saved or restored, marked so the eye finds it. */
+  highlighted?: string | null;
+  canWrite?: boolean;
+  onOpen?: (memory: Memory) => void;
+  onAdd?: () => void;
+}) {
   const searchId = useId();
   const categoryId = useId();
   const sortId = useId();
@@ -35,6 +50,17 @@ export function MemoryList({ memories }: { memories: readonly Memory[] }) {
       <h2 id={`${searchId}-heading`} className="sr-only">
         Memories
       </h2>
+      {canWrite && onAdd !== undefined && (
+        <div className="mb-4 flex justify-end">
+          <button
+            type="button"
+            onClick={onAdd}
+            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+          >
+            + Add memory
+          </button>
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-[1fr_14rem_10rem]">
         <div>
           <label htmlFor={searchId} className={labelClass}>
@@ -62,7 +88,7 @@ export function MemoryList({ memories }: { memories: readonly Memory[] }) {
             <option value="">All categories ({memories.length})</option>
             {categories.map((category) => (
               <option key={category.id} value={category.id}>
-                {categoryLabel(category.id)} ({category.count})
+                {labelOf(category.id)} ({category.count})
               </option>
             ))}
           </select>
@@ -92,11 +118,27 @@ export function MemoryList({ memories }: { memories: readonly Memory[] }) {
       ) : (
         <ul className="mt-2 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
           {visible.map((memory) => (
-            <li key={memory.id} className="px-4 py-3">
-              <p className="text-sm text-slate-900 dark:text-slate-100">{memory.content}</p>
+            <li
+              key={memory.id}
+              className={
+                memory.id === highlighted
+                  ? "border-l-4 border-indigo-500 bg-indigo-50/60 dark:bg-indigo-950/40"
+                  : "border-l-4 border-transparent"
+              }
+            >
+              <button
+                type="button"
+                onClick={() => onOpen?.(memory)}
+                disabled={onOpen === undefined}
+                className="block w-full px-4 py-3 text-left hover:bg-slate-50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-default disabled:hover:bg-transparent dark:hover:bg-slate-800/60"
+              >
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {memory.id === highlighted && <span className="sr-only">Just changed: </span>}
+                {memory.content}
+              </p>
               <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
                 <span className="font-medium text-slate-700 dark:text-slate-300">
-                  {categoryLabel(memory.category)}
+                  {labelOf(memory.category)}
                   {memory.subcategory !== null && ` · ${memory.subcategory}`}
                 </span>
                 {memory.tags.length > 0 && (
@@ -109,6 +151,7 @@ export function MemoryList({ memories }: { memories: readonly Memory[] }) {
                   Updated <time dateTime={memory.updated_at}>{dateFormat.format(new Date(memory.updated_at))}</time>
                 </span>
               </p>
+              </button>
             </li>
           ))}
         </ul>

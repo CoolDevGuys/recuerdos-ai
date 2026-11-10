@@ -27,6 +27,8 @@ pub enum AuditOperation {
     /// and the store tidied itself. "Why did five of my memories become
     /// one overnight?" is only answerable if those two look different.
     Merge,
+    /// A forgotten memory brought back (the web UI's undo).
+    Restore,
 }
 
 impl AuditOperation {
@@ -37,6 +39,7 @@ impl AuditOperation {
             AuditOperation::Delete => "delete",
             AuditOperation::Supersede => "supersede",
             AuditOperation::Merge => "merge",
+            AuditOperation::Restore => "restore",
         }
     }
 }
@@ -65,6 +68,12 @@ pub trait MemoryRepository: Send + Sync {
     /// is the question the trail exists to answer, and it can only do so
     /// if whoever removed the memory said why.
     fn delete(&self, context: &UserContext, id: MemoryId, actor: &str, reason: &str) -> Result<()>;
+
+    /// Undoes [`delete`](Self::delete): clears the soft-delete marker and
+    /// returns the memory as it was, id and timestamps intact. `NotFound`
+    /// when the memory is not this user's or is not forgotten — the same
+    /// answer either way, like every other lookup here.
+    fn restore(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<Memory>;
 
     /// Marks `superseded` as replaced by `replacement`.
     ///

@@ -117,6 +117,14 @@ fn api_router(state: AppState) -> Router {
             "/v1/profile",
             get(consolidation_http::handlers::read_profile),
         )
+        .route(
+            "/v1/memories/{id}/restore",
+            post(memories_http::handlers::restore_memory),
+        )
+        .route(
+            "/v1/categories",
+            get(memories_http::handlers::list_categories),
+        )
         .route("/v1/audit", get(memories_http::handlers::read_audit))
         // The 30s cap covers only the routes added above it. The write
         // routes are merged in afterwards so they keep their own longer

@@ -277,6 +277,35 @@ impl MemoryRepository for SqliteMemoryRepository {
         })
     }
 
+    fn restore(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<Memory> {
+        self.database.with_connection(|connection| {
+            let affected = connection
+                .execute(
+                    "UPDATE memories SET deleted_at = NULL
+                     WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NOT NULL",
+                    rusqlite::params![id.to_string(), context.user_id().to_string()],
+                )
+                .map_err(|e| map_sqlite_error(e, "memory restore conflict"))?;
+
+            if affected == 0 {
+                return Err(not_found(id));
+            }
+
+            Self::write_audit(connection, context, id, AuditOperation::Restore, actor, "")?;
+
+            connection
+                .query_row(
+                    &format!(
+                        "SELECT {COLUMNS} FROM memories
+                         WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL"
+                    ),
+                    rusqlite::params![id.to_string(), context.user_id().to_string()],
+                    row_to_memory,
+                )
+                .map_err(|e| map_sqlite_error(e, "memory restore conflict"))?
+        })
+    }
+
     fn supersede(
         &self,
         context: &UserContext,
@@ -686,6 +715,7 @@ fn build_audit_entry(
             "delete" => AuditOperation::Delete,
             "supersede" => AuditOperation::Supersede,
             "merge" => AuditOperation::Merge,
+            "restore" => AuditOperation::Restore,
             other => {
                 return Err(RaError::Internal(format!(
                     "stored audit operation {other:?} is unknown"

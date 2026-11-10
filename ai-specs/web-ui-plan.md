@@ -6,7 +6,7 @@ them by category, and use zoom as the grouping mechanism: zoomed out, the catego
 in, the categories 'dissolve' into the individual memories — a representation of the mental map. For
 management, the user can edit or correct any memory or category, and add or delete memories."*
 
-Status: **P0 implemented** (2026-11-10, branch `feat/web-ui`); P1–P4 planned. Phases are ordered so
+Status: **P0 and P1 implemented** (2026-11-10, branch `feat/web-ui`); P2–P4 planned. Phases are ordered so
 each one ships something usable (§9). §9.1 records how P0 differed from this plan.
 
 ---
@@ -432,6 +432,49 @@ taxonomy refactor) out of the way of the visible work. Until P3, the UI's catego
   `exactOptionalPropertyTypes`) and Vitest gate CI for now. ESLint joins in P4.
 - **Playwright e2e is deferred to P1**, where there are flows worth driving. P0 was checked by hand
   against a live daemon: sign-in, list, deep-link reload, phone width, no CSP violations.
+
+### 9.2 What P1 shipped, and where it differs from the plan above
+
+**Shipped:**
+- **Backend:**
+  - `ETag` / `If-Match` / `412` on the single-memory routes (§4.5), implemented as
+    `MemoryEdit::expected_updated_at`, checked by `MemoryUpdater`, and
+    `RaError::PreconditionFailed`;
+  - `MemoryRestorer` and `POST /v1/memories/{id}/restore` (§4.4);
+  - `GET /v1/categories` (the read half of §4.2, ahead of P3).
+- **Web:**
+  - the editor panel, the add form (direct + AI), forget with confirm, and an
+    8-second undo;
+  - conflict resolution;
+  - read-only viewing.
+- **Tests:**
+  - Rust: 6 restorer tests, 2 updater precondition tests, 4 handler tests, and 8
+    integration tests (`tests/memory_editing.rs`);
+  - Web: 79 Vitest tests against a `FakeServer` that enforces scopes, isolation,
+    versions and restore rules.
+- **Checked by hand against a live daemon:** edit, a real 412 provoked by a
+  concurrent `PATCH`, load latest, forget → undo (recalled again at relevance
+  0.66), and AI add on a daemon without a model.
+
+**Differences, each deliberate:**
+- **`/restore` is a sub-path, not `:restore`.** axum's router does not match a
+  parameter with a suffix inside one segment, and `/v1/memories/{id}/restore`
+  reads as plainly.
+- **The AI add uses `POST /v1/memories` with `wait: true`, not job polling.** The
+  synchronous answer carries the `outcome` (stored / already known / nothing
+  durable / changed), which the job record does not. The 180 s ingest timeout
+  bounds the wait, and the button says "Asking the AI…" throughout.
+- **`GET /v1/categories` ships in P1, not P3.** The editor needs labels and valid
+  ids now. It is backed by built-ins + config extras + stored leftovers until the
+  taxonomy table lands.
+- **The audit actor for UI edits is still `rest`.** The UI sends
+  `X-Recuerdos-Client: web-ui`, and direct saves record `web-ui` as their
+  source client, but the REST handlers do not yet read the header for the actor.
+  This is a small follow-up, not needed for any P1 behaviour.
+- **Playwright e2e is still deferred, now to P2.** The component tests drive the
+  real `App` through every flow against an enforcing fake, and the live check
+  above covered the wire. The map is where a real browser earns its keep, since
+  WebGL cannot run in jsdom.
 
 ## 10. Risks and open points
 

@@ -344,6 +344,12 @@ pub struct MemoryEdit {
     pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    /// The `updated_at` the editor last saw (`If-Match`). `Some` makes the
+    /// edit conditional: it is refused with `PreconditionFailed` when the
+    /// memory has changed since, so a long-lived editor (the web UI) cannot
+    /// silently overwrite what an agent or consolidation wrote meanwhile.
+    /// Checked by the updater, not by [`Memory::edit`].
+    pub expected_updated_at: Option<DateTime<Utc>>,
 }
 
 fn clamp_confidence(confidence: f32) -> f32 {

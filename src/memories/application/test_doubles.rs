@@ -206,6 +206,15 @@ impl Fixture {
         )
     }
 
+    pub fn restorer(&self) -> crate::memories::application::memory_restorer::MemoryRestorer {
+        crate::memories::application::memory_restorer::MemoryRestorer::new(
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::clone(&self.vectors) as Arc<dyn VectorIndex>,
+            Arc::clone(&self.text) as Arc<dyn TextIndex>,
+            Arc::clone(&self.embedder) as Arc<dyn Embedder>,
+        )
+    }
+
     pub fn exporter(&self) -> MemoryExporter {
         MemoryExporter::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
     }
@@ -314,6 +323,24 @@ impl MemoryRepository for InMemoryMemoryRepository {
         self.deleted.lock().unwrap().push(id);
         self.record(context, id, AuditOperation::Delete, actor, reason);
         Ok(())
+    }
+
+    fn restore(&self, context: &UserContext, id: MemoryId, actor: &str) -> Result<Memory> {
+        let owned = self
+            .memories
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|m| m.id() == id && m.user_id() == context.user_id())
+            .cloned();
+        let mut deleted = self.deleted.lock().unwrap();
+        let Some(memory) = owned.filter(|_| deleted.contains(&id)) else {
+            return Err(RaError::NotFound(format!("memory {id} not found")));
+        };
+        deleted.retain(|d| *d != id);
+        drop(deleted);
+        self.record(context, id, AuditOperation::Restore, actor, "");
+        Ok(memory)
     }
 
     fn supersede(

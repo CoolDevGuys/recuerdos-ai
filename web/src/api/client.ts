@@ -1,4 +1,15 @@
-import type { ApiErrorBody, Identity, Memory, Scope } from "./types";
+import type {
+  ApiErrorBody,
+  Category,
+  Identity,
+  IngestOutcome,
+  IngestRequest,
+  IngestResult,
+  Memory,
+  MemoryFields,
+  MemoryPatch,
+  Scope,
+} from "./types";
 
 /**
  * Everything the UI asks of the daemon. Components never call `fetch`:
@@ -8,6 +19,20 @@ import type { ApiErrorBody, Identity, Memory, Scope } from "./types";
 export interface ApiClient {
   ping(): Promise<Identity>;
   listMemories(): Promise<Memory[]>;
+  getMemory(id: string): Promise<Memory>;
+  listCategories(): Promise<Category[]>;
+  /** Saves exactly these fields, no pipeline. */
+  createMemory(fields: MemoryFields): Promise<Memory>;
+  /** Runs the text through the understanding pipeline and waits for it. */
+  ingest(request: IngestRequest): Promise<IngestResult>;
+  /**
+   * Applies `patch`. With `version` (the `updated_at` the editor started
+   * from) the edit is refused with a 412 `ApiError` if the memory changed
+   * since; `null` overwrites unconditionally.
+   */
+  updateMemory(id: string, patch: MemoryPatch, version: string | null): Promise<Memory>;
+  forgetMemory(id: string): Promise<void>;
+  restoreMemory(id: string): Promise<Memory>;
 }
 
 /** A failed request, carrying the daemon's own error code and message. */
@@ -23,7 +48,7 @@ export class ApiError extends Error {
   }
 }
 
-/** The daemon could not be reached at all (down, network, CORS). */
+/** The daemon could not be reached at all (down, network). */
 export class NetworkError extends Error {
   constructor(cause: unknown) {
     super("The memory server could not be reached.", { cause });
@@ -32,6 +57,15 @@ export class NetworkError extends Error {
 }
 
 const SCOPES: readonly Scope[] = ["read", "write", "admin"];
+const OUTCOMES: readonly IngestOutcome[] = ["stored", "nothing_durable", "already_known", "changed_without_storing"];
+/** Recorded as the source of memories this UI writes. */
+const CLIENT_NAME = "web-ui";
+
+interface RequestOptions {
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: unknown;
+  headers?: Record<string, string>;
+}
 
 /**
  * The real client: same-origin requests to `/v1`, with the key as a bearer
@@ -48,29 +82,82 @@ export class HttpApiClient implements ApiClient {
   }
 
   async ping(): Promise<Identity> {
-    const body = await this.request("/v1/ping");
-    return parseIdentity(body);
+    return parseIdentity(await this.request("/v1/ping"));
   }
 
   async listMemories(): Promise<Memory[]> {
-    const body = await this.request("/v1/memories/export?format=json");
-    return parseMemories(body);
+    return parseMemories(await this.request("/v1/memories/export?format=json"));
   }
 
-  private async request(path: string): Promise<unknown> {
+  async getMemory(id: string): Promise<Memory> {
+    return parseMemory(await this.request(`/v1/memories/${encodeURIComponent(id)}`));
+  }
+
+  async listCategories(): Promise<Category[]> {
+    return parseCategories(await this.request("/v1/categories"));
+  }
+
+  async createMemory(fields: MemoryFields): Promise<Memory> {
+    const body = await this.request("/v1/memories:direct", {
+      method: "POST",
+      body: { ...fields, client: CLIENT_NAME },
+    });
+    return parseMemory(body);
+  }
+
+  async ingest(request: IngestRequest): Promise<IngestResult> {
+    const body = await this.request("/v1/memories", {
+      method: "POST",
+      body: {
+        content: request.content,
+        ...(request.category !== null && { category: request.category }),
+        tags: request.tags,
+        client: CLIENT_NAME,
+        wait: true,
+      },
+    });
+    return parseIngestResult(body);
+  }
+
+  async updateMemory(id: string, patch: MemoryPatch, version: string | null): Promise<Memory> {
+    const body = await this.request(`/v1/memories/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: patch,
+      ...(version !== null && { headers: { "If-Match": `"${version}"` } }),
+    });
+    return parseMemory(body);
+  }
+
+  async forgetMemory(id: string): Promise<void> {
+    await this.request(`/v1/memories/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  async restoreMemory(id: string): Promise<Memory> {
+    return parseMemory(await this.request(`/v1/memories/${encodeURIComponent(id)}/restore`, { method: "POST" }));
+  }
+
+  private async request(path: string, options: RequestOptions = {}): Promise<unknown> {
     const headers: Record<string, string> = {
       Accept: "application/json",
-      "X-Recuerdos-Client": "web-ui",
+      "X-Recuerdos-Client": CLIENT_NAME,
+      ...options.headers,
     };
     if (this.key !== null) headers.Authorization = `Bearer ${this.key}`;
+    if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
     let response: Response;
     try {
-      response = await this.fetcher(path, { headers, credentials: "omit" });
+      response = await this.fetcher(path, {
+        method: options.method ?? "GET",
+        headers,
+        credentials: "omit",
+        ...(options.body !== undefined && { body: JSON.stringify(options.body) }),
+      });
     } catch (cause) {
       throw new NetworkError(cause);
     }
 
+    if (response.status === 204) return null;
     const body: unknown = await response.json().catch(() => null);
     if (!response.ok) throw toApiError(response.status, body);
     return body;
@@ -83,61 +170,83 @@ function toApiError(status: number, body: unknown): ApiError {
 }
 
 function isErrorBody(body: unknown): body is ApiErrorBody {
-  if (typeof body !== "object" || body === null || !("error" in body)) return false;
-  const error = (body as { error: unknown }).error;
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    typeof (error as { code?: unknown }).code === "string" &&
-    typeof (error as { message?: unknown }).message === "string"
-  );
+  if (!isObject(body) || !("error" in body)) return false;
+  const error = body.error;
+  return isObject(error) && typeof error.code === "string" && typeof error.message === "string";
 }
 
 // Parsed at the boundary: past this file, every value has the shape its
 // type claims.
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 function malformed(what: string): ApiError {
   return new ApiError(0, "malformed_response", `The server sent an unexpected ${what}.`);
 }
 
 export function parseIdentity(body: unknown): Identity {
-  if (typeof body !== "object" || body === null) throw malformed("identity");
-  const { user, scopes } = body as { user?: unknown; scopes?: unknown };
-  if (typeof user !== "string" || !Array.isArray(scopes)) throw malformed("identity");
+  if (!isObject(body) || typeof body.user !== "string" || !Array.isArray(body.scopes)) {
+    throw malformed("identity");
+  }
   return {
-    user,
-    scopes: scopes.filter((s): s is Scope => SCOPES.includes(s as Scope)),
+    user: body.user,
+    scopes: body.scopes.filter((s): s is Scope => SCOPES.includes(s as Scope)),
   };
 }
 
 export function parseMemories(body: unknown): Memory[] {
-  if (typeof body !== "object" || body === null) throw malformed("memory list");
-  const items = (body as { memories?: unknown }).memories;
-  if (!Array.isArray(items)) throw malformed("memory list");
-  return items.map(parseMemory);
+  if (!isObject(body) || !Array.isArray(body.memories)) throw malformed("memory list");
+  return body.memories.map(parseMemory);
 }
 
-function parseMemory(item: unknown): Memory {
-  if (typeof item !== "object" || item === null) throw malformed("memory");
-  const m = item as Record<string, unknown>;
+export function parseMemory(item: unknown): Memory {
   if (
-    typeof m.id !== "string" ||
-    typeof m.content !== "string" ||
-    typeof m.category !== "string" ||
-    typeof m.created_at !== "string" ||
-    typeof m.updated_at !== "string"
+    !isObject(item) ||
+    typeof item.id !== "string" ||
+    typeof item.content !== "string" ||
+    typeof item.category !== "string" ||
+    typeof item.created_at !== "string" ||
+    typeof item.updated_at !== "string"
   ) {
     throw malformed("memory");
   }
   return {
-    id: m.id,
-    content: m.content,
-    category: m.category,
-    subcategory: typeof m.subcategory === "string" ? m.subcategory : null,
-    tags: Array.isArray(m.tags) ? m.tags.filter((t): t is string => typeof t === "string") : [],
-    confidence: typeof m.confidence === "number" ? m.confidence : 1,
-    created_at: m.created_at,
-    updated_at: m.updated_at,
-    superseded_by: typeof m.superseded_by === "string" ? m.superseded_by : null,
+    id: item.id,
+    content: item.content,
+    category: item.category,
+    subcategory: typeof item.subcategory === "string" ? item.subcategory : null,
+    tags: Array.isArray(item.tags) ? item.tags.filter((t): t is string => typeof t === "string") : [],
+    confidence: typeof item.confidence === "number" ? item.confidence : 1,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+    superseded_by: typeof item.superseded_by === "string" ? item.superseded_by : null,
+  };
+}
+
+export function parseCategories(body: unknown): Category[] {
+  if (!isObject(body) || !Array.isArray(body.categories)) throw malformed("category list");
+  return body.categories.map((item) => {
+    if (!isObject(item) || typeof item.id !== "string" || typeof item.label !== "string") {
+      throw malformed("category");
+    }
+    return {
+      id: item.id,
+      label: item.label,
+      built_in: item.built_in === true,
+      count: typeof item.count === "number" ? item.count : 0,
+    };
+  });
+}
+
+export function parseIngestResult(body: unknown): IngestResult {
+  if (!isObject(body) || !OUTCOMES.includes(body.outcome as IngestOutcome) || !Array.isArray(body.memory_ids)) {
+    throw malformed("ingest result");
+  }
+  return {
+    outcome: body.outcome as IngestOutcome,
+    memoryIds: body.memory_ids.filter((id): id is string => typeof id === "string"),
+    understanding: body.understanding !== false,
   };
 }
