@@ -30,6 +30,22 @@ pub struct AppConfig {
     pub rerank: RerankConfig,
     pub auth: AuthConfig,
     pub rate_limit: RateLimitConfig,
+    pub ui: UiConfig,
+}
+
+/// `[ui]`: the web UI served at `/ui` (ai-specs/web-ui-plan.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Whether `/ui` is mounted. Off, the routes do not exist (404) — the
+    /// API is unaffected either way, and the UI holds no data of its own.
+    pub enabled: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

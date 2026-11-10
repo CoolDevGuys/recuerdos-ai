@@ -49,6 +49,20 @@ pub fn init_tracing() {
 }
 
 pub fn router(state: AppState) -> Router {
+    let ui = state.ui;
+    let api = api_router(state);
+    if ui {
+        // Static files only, no state and no auth (web_ui.rs explains why).
+        // Outside the request-timeout layer, which has nothing to cut short.
+        api.merge(crate::bootstrap::web_ui::routes(
+            crate::bootstrap::web_ui::built_in(),
+        ))
+    } else {
+        api
+    }
+}
+
+fn api_router(state: AppState) -> Router {
     // The write routes run the LLM ingest pipeline — extraction plus a
     // reconciliation call per candidate — and a `wait: true` request runs
     // it inline; a batch runs it once per item. That is seconds to minutes
@@ -257,7 +271,11 @@ impl Gate {
 /// unhealthy service, and a healthy daemon gets restarted — the limiter would
 /// have caused the outage it was preventing.
 async fn rate_limit(State(gate): State<Gate>, request: Request, next: Next) -> Response {
-    if request.uri().path() == "/healthz" {
+    // The UI's static files are exempt too: loading the page fetches several
+    // of them at once, each a map lookup with no data behind it, and charging
+    // them would spend a browser's budget before its first API call.
+    let path = request.uri().path();
+    if path == "/healthz" || crate::bootstrap::web_ui::is_ui_path(path) {
         return next.run(request).await;
     }
 

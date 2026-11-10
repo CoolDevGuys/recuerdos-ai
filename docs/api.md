@@ -376,6 +376,9 @@ Requires `read`. `?format=markdown` (default) or `?format=json`, plus
 Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
 
+JSON items carry `id`, `content`, `category`, `subcategory` (or `null`),
+`tags`, `confidence`, `created_at`, `updated_at` and `superseded_by`.
+
 ### `POST /v1/sessions/distill`
 
 Requires `write`. Reduces a finished session to the few things that

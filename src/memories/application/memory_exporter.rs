@@ -83,6 +83,7 @@ fn render_json(memories: &[Memory]) -> String {
                 "id": memory.id().to_string(),
                 "content": memory.content(),
                 "category": memory.category().as_str(),
+                "subcategory": memory.subcategory(),
                 "tags": memory.tags(),
                 "confidence": memory.confidence(),
                 "created_at": memory.created_at().to_rfc3339(),
@@ -156,6 +157,36 @@ mod tests {
         assert_eq!(items[0]["id"], memory.id().to_string());
         assert_eq!(items[0]["content"], "User prefers pnpm");
         assert_eq!(items[0]["category"], "preference.coding");
+    }
+
+    #[test]
+    fn json_export_carries_the_sub_label() {
+        let fixture = Fixture::new();
+        let mut memory = new_memory("Tests use Vitest");
+        memory.subcategory = Some("testing".to_string());
+        fixture
+            .saver()
+            .execute(&fixture.alex, memory, "test")
+            .unwrap();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+
+        let json = fixture
+            .exporter()
+            .execute(&fixture.alex, ExportFormat::Json, false)
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let by_content = |content: &str| {
+            parsed["memories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["content"] == content)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(by_content("Tests use Vitest")["subcategory"], "testing");
+        assert!(by_content("User prefers pnpm")["subcategory"].is_null());
     }
 
     #[test]

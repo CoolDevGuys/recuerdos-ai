@@ -131,6 +131,17 @@ API keys are never read from config files, only from the environment
 variable `[understanding].api_key_env` names. A key pasted into
 `recuerdos-ai.toml` gets committed eventually.
 
+## The web UI
+
+`/ui` serves static files compiled into the binary, with no credential and
+outside the rate limiter. They carry no data. The page then calls `/v1` with
+an API key the user pastes, held in the tab's `sessionStorage` only: never in
+`localStorage`, a cookie or a URL. A strict Content-Security-Policy
+(`script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`) means
+no inline or third-party script runs, and the page can talk to no other host.
+Memory content is rendered as text, never as markup. See
+[web-ui.md](web-ui.md).
+
 ## Threat model
 
 **In scope.** A caller with network access but no valid key; a caller with

@@ -53,6 +53,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Used by the `eval` subcommand, which builds a throwaway instance so that
 # scoring retrieval can never touch a real store.
 tempfile = "3"
+# The web UI (`web/`, built to `web/dist`) compiled into the binary and served
+# at `/ui`. Behind the `ui` feature so a backend-only build needs no Node
+# toolchain; with the feature on but `web/dist` missing, the build still
+# succeeds and `/ui` answers 503 with how to build it (`allow_missing`).
+rust-embed = { version = "8", optional = true, features = ["mime-guess"] }
+
+[features]
+default = ["ui"]
+ui = ["dep:rust-embed"]
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["test"] }

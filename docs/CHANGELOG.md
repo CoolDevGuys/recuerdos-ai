@@ -5,6 +5,38 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI, phase P0: sign in and browse at `/ui`
+
+The first slice of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
+
+- **The daemon serves a browser UI at `/ui`.** It is a React + TypeScript app
+  (`web/`), built with Vite and compiled into the binary via `rust-embed`
+  behind a default `ui` cargo feature.
+  - Sign in with an API key. The UI checks the key's shape on blur and verifies
+    it with `GET /v1/ping`.
+  - The header shows a badge with what the key may do (read-only, read & write,
+    admin).
+  - Memories appear as a list you can filter by text and by category and sort
+    three ways.
+  - On a daemon with `[auth].mode = "none"`, sign-in is skipped and a banner
+    warns that anyone who can reach the port is the `default` user.
+- **`[ui].enabled`** (default `true`). Off, `/ui` is not mounted.
+- **Without the bundle, the daemon still builds.** If `web/dist` was never built,
+  `/ui` answers `503` with the command that builds it (`just web-build`), so
+  tests, the eval and the dev container need no Node.
+  - Release binaries and the Docker image build the bundle first. The release
+    workflow fails if it is missing.
+  - CI's Docker smoke test checks that `/ui/` is the app.
+- **Security.**
+  - Strict CSP: `script-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`.
+  - `nosniff` and `no-referrer`.
+  - The key is held in `sessionStorage` only.
+  - Asset requests are not charged to the rate limiter.
+- `GET /v1/memories/export?format=json` now includes each memory's `subcategory`.
+- New `just web-build`, `just web-test` and `just web-dev` recipes.
+- CI runs a `web` job: type-check, Vitest, build, and a 400 KB gzip bundle budget.
+  The initial bundle is about 84 KB.
+
 ### Enriched vectors by default, and the rerank `replace` strategy removed
 
 A second audit on the pipeline above (concept-recall-plan.md §11) found no unused settings left and two

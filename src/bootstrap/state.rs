@@ -54,6 +54,8 @@ pub struct AppState {
     /// because a `wait: true` ingest runs the LLM pipeline inline
     /// (`[server].ingest_timeout_secs`).
     pub ingest_timeout: std::time::Duration,
+    /// Whether to serve the web UI at `/ui` (`[ui].enabled`).
+    pub ui: bool,
 }
 
 #[cfg(test)]

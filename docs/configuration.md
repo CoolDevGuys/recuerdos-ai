@@ -113,6 +113,10 @@ with its default and an explanatory comment. Highlights:
   pipeline where only the indexes place a result. Nothing happens at all when a query
   names no entity the store knows — which, because seeds are exact, is most queries.
 - `[storage].path` supports a leading `~` for `$HOME` expansion.
+- `[ui].enabled` defaults to `true`: the web UI is served at `/ui` on the API
+  port. It is static files only and signs in with an API key; turning it off
+  unmounts the route and changes nothing about the API. See
+  [web-ui.md](web-ui.md).
 
 ## Validation
 

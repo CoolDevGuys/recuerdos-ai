@@ -632,6 +632,7 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         mcp_http: config.server.mcp.http,
         mcp_allowed_hosts: config.server.mcp.allowed_hosts.clone(),
         ingest_timeout: std::time::Duration::from_secs(config.server.ingest_timeout_secs),
+        ui: config.ui.enabled,
     };
 
     let outcome = bootstrap::server::serve(&config.server.host, config.server.port, state).await;
@@ -1133,6 +1134,11 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
         } else {
             transports.join(", ")
         }
+    );
+
+    println!(
+        "  ui         {}",
+        if config.ui.enabled { "/ui" } else { "off" }
     );
 
     println!("\nstorage");

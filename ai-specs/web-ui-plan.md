@@ -6,8 +6,8 @@ them by category, and use zoom as the grouping mechanism: zoomed out, the catego
 in, the categories 'dissolve' into the individual memories — a representation of the mental map. For
 management, the user can edit or correct any memory or category, and add or delete memories."*
 
-Status: **planned, nothing implemented.** Phases are ordered so each one ships something usable
-(§9).
+Status: **P0 implemented** (2026-11-10, branch `feat/web-ui`); P1–P4 planned. Phases are ordered so
+each one ships something usable (§9). §9.1 records how P0 differed from this plan.
 
 ---
 
@@ -62,15 +62,16 @@ browser ──/ui/*──────────────▶ daemon: static 
 - **Embedding:** `rust-embed` (or `include_dir`) under a cargo feature `ui`, on by default.
   - A `--no-default-features` build skips the asset step, so backend-only contributors and the
     eval/bench paths do not need Node.
-  - If `web/dist` is missing while `ui` is on, `build.rs` fails with a message naming
-    `just web-build`.
+  - If `web/dist` is missing while `ui` is on, the build still succeeds (`allow_missing`), and `/ui`
+    answers `503` naming `just web-build`. Release builds check that the bundle is present (§9.1).
 - **Routing:**
   - `GET /ui` and `GET /ui/*` serve the asset. An unknown path under `/ui/` serves `index.html`, so
     client-side routes work on reload.
   - Hashed assets get `Cache-Control: immutable`; `index.html` gets `no-cache`.
   - Static routes carry no auth. They contain no data.
-- **Config:** `[ui] enabled = true` (default) and `[ui] path = "/ui"`. Disabled, the routes are not
-  mounted and the response is 404, not 401.
+- **Config:** `[ui] enabled = true` (default). The mount is fixed at `/ui`, because the bundle's
+  asset URLs are built against it. Disabled, the routes are not mounted, and `/ui` answers like any
+  unknown path (the API asks for a credential before routing, so that is a 401).
 - **Security headers on `/ui`:**
   - Strict CSP: `default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'
     'unsafe-inline'` (Tailwind) and `frame-ancestors 'none'`.
@@ -393,6 +394,44 @@ P1 comes before P2 on purpose: management delivers value on its own, and it exer
 API-client layers that the map then reuses. Doing P3 last keeps the riskiest backend change (the
 taxonomy refactor) out of the way of the visible work. Until P3, the UI's category choices come from
 `GET /v1/categories`, backed temporarily by the built-ins plus config extras.
+
+### 9.1 What P0 shipped, and where it differs from the plan above
+
+**Shipped:**
+- `src/bootstrap/web_ui.rs`:
+  - routes `/ui`, `/ui/` and `/ui/{*path}`;
+  - SPA fallback for extension-less paths, 404 for missing files;
+  - path-traversal refusal;
+  - `immutable` caching for `assets/` and `no-cache` otherwise;
+  - CSP, `nosniff`, `DENY` and `no-referrer` on every response.
+- An `AssetSource` port, so tests serve an in-memory bundle.
+- `[ui].enabled`.
+- The rate-limit exemption for UI paths.
+- `web/`:
+  - an API client (the only module that calls `fetch`), with an in-memory fake;
+  - pure domain modules (access, key shape, filter, sort, labels);
+  - the session provider;
+  - the sign-in screen, the header with the scope badge, and the list view.
+- Tests:
+  - 10 Rust unit tests;
+  - 5 integration tests (`tests/web_ui.rs`);
+  - 42 Vitest tests.
+- CI `web` job, release and Docker builds of the bundle, docs (`docs/web-ui.md`).
+
+**Differences, each deliberate:**
+- **A missing bundle is a 503, not a build failure.** Failing the build would make Node a
+  requirement for the test suite, the eval and the dev container, none of which open the UI. The
+  release workflow and the Dockerfile build the bundle first; the release fails if it is missing.
+- **No `[ui] path`.** The mount is fixed at `/ui` (see §3).
+- **The list view reads `GET /v1/memories/export?format=json`**, which gained `subcategory`. A
+  paginated list endpoint is not needed at personal scale; `GET /v1/map` (P2) supersedes it for the
+  map.
+- **UI asset requests are exempt from the rate limiter**, like `/healthz`. Loading the page fetches
+  several files at once, and charging them would spend a browser's budget before its first API call.
+- **ESLint is not set up yet.** `tsc --strict` (with `noUncheckedIndexedAccess` and
+  `exactOptionalPropertyTypes`) and Vitest gate CI for now. ESLint joins in P4.
+- **Playwright e2e is deferred to P1**, where there are flows worth driving. P0 was checked by hand
+  against a live daemon: sign-in, list, deep-link reload, phone width, no CSP violations.
 
 ## 10. Risks and open points
 

@@ -8,6 +8,18 @@
 # bookworm-slim does not have. The runtime image then failed to start
 # with a linker error, which is a miserable thing to debug from a
 # "connection refused" in CI. Bumping one of these means bumping both.
+# The web UI bundle, embedded into the binary by the builder below. Built in
+# its own stage so the Rust image needs no Node, and so the builder only
+# ever sees the finished web/dist.
+FROM node:22-slim AS web
+
+WORKDIR /web
+RUN corepack enable
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm build
+
 FROM rust:1-slim-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY . .
+COPY --from=web /web/dist ./web/dist
 RUN cargo build --release
 
 # Bake the embedding model into the image. Without this the first

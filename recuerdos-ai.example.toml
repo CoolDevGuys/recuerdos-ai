@@ -414,6 +414,13 @@ max_memories = 5000
 # is treated as the built-in `default` user. Logged loudly at startup.
 mode = "api-key"
 
+[ui]
+# The web UI at /ui: browse (and, as later phases land, edit and map) your
+# memories in a browser, signed in with an API key. Static files only — the
+# page talks to /v1 like any client, under the key's scopes. Off, /ui is not
+# mounted. See docs/web-ui.md.
+enabled = true
+
 [rate_limit]
 # Per-caller request budget, enforced before routing, tracing, or an API-key
 # verification. A caller that runs out gets 429 with a Retry-After; other

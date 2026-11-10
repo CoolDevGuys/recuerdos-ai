@@ -265,6 +265,40 @@ jobs:
         if: failure()
         run: docker compose --profile sdk logs sdk-daemon 2>&1 | tail -50 || true
 
+  # The web UI (web/): type-check, unit tests, production build and the
+  # bundle-size budget (ai-specs/web-ui-plan.md §8). The Rust jobs do not
+  # need the bundle — the daemon builds without it — so this runs beside
+  # them rather than in front of them.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm --dir web typecheck
+
+      - name: Test
+        run: pnpm --dir web test
+
+      - name: Build
+        run: pnpm --dir web build
+
+      - name: Bundle-size budget
+        run: pnpm --dir web size
+
   # Build the release image and smoke-test it — proves docker/Dockerfile
   # actually produces a working, non-root, healthchecked daemon, not just
   # that it compiles.
@@ -303,6 +337,11 @@ jobs:
           echo "--- /version ---"
           curl -fsS http://127.0.0.1:7070/version
           echo
+
+          # The image builds the web UI into the binary: /ui/ must be the
+          # app, not the "not built" 503.
+          echo "--- /ui/ ---"
+          curl -fsS http://127.0.0.1:7070/ui/ | grep -q '<div id="root">'
 
           # The endpoint responding doesn't mean Docker's own HEALTHCHECK
           # has run yet — it only probes after --start-period elapses.

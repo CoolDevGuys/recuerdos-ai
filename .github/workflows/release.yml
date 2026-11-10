@@ -82,6 +82,26 @@ jobs:
             exit 1
           fi
 
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # The daemon builds without the bundle (/ui then answers 503), so a
+      # release must build it first and prove it is there: a binary without
+      # its UI would otherwise ship silently.
+      - name: Build the web UI
+        shell: bash
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web build
+          test -f web/dist/index.html || { echo "::error::web/dist/index.html missing"; exit 1; }
+
       - name: Build
         run: cargo build --release --locked --bin recuerdos-ai
 
