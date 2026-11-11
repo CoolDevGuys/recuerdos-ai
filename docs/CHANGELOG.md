@@ -5,6 +5,14 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Web UI: the memory list is paged
+
+- The List tab renders 50 memories a page instead of every row at once, which
+  made a store of thousands slow to open and to filter. Filter, category and
+  sort still cover the whole store and return to page 1; a memory just saved or
+  restored opens on its page. **Select all** now selects every memory the filter
+  keeps, on every page, and says so ("Select all 60 matching").
+
 ## v0.5.0-rc5 — a web UI: a mental map of your memories, and the tools to curate them
 
 Recall is unchanged from rc4. This release adds a browser UI at `/ui`, served by the daemon itself:

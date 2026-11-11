@@ -158,7 +158,7 @@ describe("bulk edits from the list", () => {
     const { server, user } = await signedInAsAlex();
 
     await user.click(screen.getByRole("button", { name: "Select" }));
-    await user.click(screen.getByRole("checkbox", { name: "Select all 3 shown" }));
+    await user.click(screen.getByRole("checkbox", { name: "Select all 3" }));
     const editor = screen.getByRole("region", { name: "3 memories selected" });
     await user.click(within(editor).getByRole("button", { name: "Apply to 3 memories" }));
 

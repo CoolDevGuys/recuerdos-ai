@@ -110,6 +110,10 @@ easier view on a small screen.
 
 ## Managing memories
 
+- **The list shows 50 memories a page**, with **Previous** and **Next** below
+  it. The filter, category and sort apply to every memory, not just the page,
+  and changing one goes back to page 1. A memory you just saved or restored
+  opens on its own page.
 - **Open a memory** from the list to see it in full. With a `write` key you can
   correct its text, category, sub-label and tags. Only the fields you
   changed are sent.
@@ -132,7 +136,7 @@ easier view on a small screen.
 ## Editing many at once
 
 - **From the list:** **Select** turns each row into a checkbox, with **Select
-  all shown** for whatever the filter left.
+  all** for every memory the filter left, on every page, not only the one in view.
 - **On the map:** **Lasso select**, or hold Shift, then draw around memories.
   Drawing around a category or cluster disc takes all its memories. The
   selection lights up where it sits on the map.
