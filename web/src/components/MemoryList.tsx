@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import type { Memory } from "../api/types";
 import {
   NO_FILTER,
@@ -9,8 +9,16 @@ import {
   type MemoryFilter,
   type SortKey,
 } from "../domain/memories";
+import { secondaryButton } from "./styles";
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+
+/**
+ * Rows rendered at once. Filtering, sorting and "select all" still work on
+ * every memory; only the rows in the page are put in the DOM, which is what
+ * made a store of thousands slow to open and to type a filter into.
+ */
+export const PAGE_SIZE = 50;
 
 /** A filterable list of memories (plan §5.4, "List view"); a row opens it. */
 export function MemoryList({
@@ -22,6 +30,7 @@ export function MemoryList({
   onAdd,
   selected,
   onSelect,
+  pageSize = PAGE_SIZE,
 }: {
   memories: readonly Memory[];
   labelOf?: (id: string) => string;
@@ -34,6 +43,7 @@ export function MemoryList({
   selected?: ReadonlySet<string>;
   /** Adds (`on`) or removes these ids from the selection. */
   onSelect?: (ids: readonly string[], on: boolean) => void;
+  pageSize?: number;
 }) {
   const searchId = useId();
   const categoryId = useId();
@@ -41,6 +51,8 @@ export function MemoryList({
   const [filter, setFilter] = useState<MemoryFilter>(NO_FILTER);
   const [sort, setSort] = useState<SortKey>("updated");
   const [selecting, setSelecting] = useState(false);
+  const [page, setPage] = useState(0);
+  const listTop = useRef<HTMLParagraphElement>(null);
   const canSelect = canWrite && onSelect !== undefined && selected !== undefined;
 
   const categories = useMemo(() => categoryCounts(memories), [memories]);
@@ -48,6 +60,32 @@ export function MemoryList({
     () => sortMemories(filterMemories(memories, filter), sort),
     [memories, filter, sort],
   );
+
+  const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
+  // Clamped rather than reset, so forgetting the last memory on the last
+  // page lands on the page before it instead of an empty one.
+  const current = Math.min(page, pageCount - 1);
+  const first = current * pageSize;
+  const rows = visible.slice(first, first + pageSize);
+  const filtered = visible.length !== memories.length;
+
+  // A memory just saved or restored is shown where it now sorts: jump to its
+  // page, once per highlight (adjusting state during render, not in an effect).
+  const [seenHighlight, setSeenHighlight] = useState(highlighted);
+  if (highlighted !== seenHighlight) {
+    setSeenHighlight(highlighted);
+    const index = highlighted === null ? -1 : visible.findIndex((m) => m.id === highlighted);
+    if (index >= 0) setPage(Math.floor(index / pageSize));
+  }
+
+  const goTo = (next: number) => {
+    setPage(next);
+    listTop.current?.scrollIntoView?.({ block: "nearest" });
+  };
+  const changeFilter = (next: MemoryFilter) => {
+    setFilter(next);
+    setPage(0);
+  };
 
   const fieldClass =
     "mt-1 block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100";
@@ -94,7 +132,7 @@ export function MemoryList({
             type="search"
             placeholder="Words in the memory, its sub-label or tags"
             value={filter.text}
-            onChange={(event) => setFilter({ ...filter, text: event.target.value })}
+            onChange={(event) => changeFilter({ ...filter, text: event.target.value })}
             className={fieldClass}
           />
         </div>
@@ -105,7 +143,7 @@ export function MemoryList({
           <select
             id={categoryId}
             value={filter.category ?? ""}
-            onChange={(event) => setFilter({ ...filter, category: event.target.value === "" ? null : event.target.value })}
+            onChange={(event) => changeFilter({ ...filter, category: event.target.value === "" ? null : event.target.value })}
             className={fieldClass}
           >
             <option value="">All categories ({memories.length})</option>
@@ -120,7 +158,10 @@ export function MemoryList({
           <label htmlFor={sortId} className={labelClass}>
             Sort by
           </label>
-          <select id={sortId} value={sort} onChange={(event) => setSort(event.target.value as SortKey)} className={fieldClass}>
+          <select id={sortId} value={sort} onChange={(event) => {
+              setSort(event.target.value as SortKey);
+              setPage(0);
+            }} className={fieldClass}>
             <option value="updated">Recently updated</option>
             <option value="created">Recently created</option>
             <option value="category">Category</option>
@@ -136,14 +177,17 @@ export function MemoryList({
             onChange={(event) => onSelect(visible.map((m) => m.id), event.target.checked)}
             className="h-4 w-4 accent-indigo-600"
           />
-          Select all {visible.length} shown
+          {/* Every memory the filter keeps, on every page: bulk edits are for many. */}
+          Select all {visible.length}
+          {filtered ? " matching" : ""}
         </label>
       )}
 
-      <p role="status" className="mt-4 text-sm text-slate-600 dark:text-slate-400">
-        {visible.length === memories.length
-          ? `${memories.length} ${memories.length === 1 ? "memory" : "memories"}`
-          : `${visible.length} of ${memories.length} memories`}
+      <p ref={listTop} role="status" className="mt-4 scroll-mt-4 text-sm text-slate-600 dark:text-slate-400">
+        {filtered
+          ? `${visible.length} of ${memories.length} memories`
+          : `${memories.length} ${memories.length === 1 ? "memory" : "memories"}`}
+        {pageCount > 1 && ` · showing ${first + 1}–${first + rows.length}`}
       </p>
 
       {visible.length === 0 ? (
@@ -152,7 +196,7 @@ export function MemoryList({
         </p>
       ) : (
         <ul className="mt-2 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-800 dark:bg-slate-900">
-          {visible.map((memory) => (
+          {rows.map((memory) => (
             <li
               key={memory.id}
               className={
@@ -211,6 +255,25 @@ export function MemoryList({
             </li>
           ))}
         </ul>
+      )}
+
+      {pageCount > 1 && (
+        <nav aria-label="Pages" className="mt-3 flex items-center justify-between gap-3">
+          <button type="button" onClick={() => goTo(current - 1)} disabled={current === 0} className={secondaryButton}>
+            ← Previous
+          </button>
+          <span className="text-sm text-slate-600 dark:text-slate-400">
+            Page {current + 1} of {pageCount}
+          </span>
+          <button
+            type="button"
+            onClick={() => goTo(current + 1)}
+            disabled={current === pageCount - 1}
+            className={secondaryButton}
+          >
+            Next →
+          </button>
+        </nav>
       )}
     </section>
   );
