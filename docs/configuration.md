@@ -118,7 +118,7 @@ with its default and an explanatory comment. Highlights:
   unmounts the route and changes nothing about the API. See
   [web-ui.md](web-ui.md).
 - `[ui].map_detail_limit` (default `5000`): above this many memories, the map
-  opens on your categories only and loads one category's memories at a time.
+  opens on your topics only and loads one topic's memories at a time.
   Laying out and drawing every memory of a very large store at once would stall
   the browser. Must be at least 1.
 

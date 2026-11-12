@@ -49,6 +49,8 @@ curl -sS -X POST "$RA/v1/memories/search" \
 {"results":[{"id":"019f8007-437b-7420-ab01-8cbfedbcb49b",
   "content":"User deploys with Terraform, never by hand",
   "category":"preference.coding","tags":["infrastructure"],"confidence":1.0,
+  "kind":"preference","topic":"coding","applies_to":{"target":"me"},
+  "origin":"user_said","needs_review":false,"relevance":0.71,
   "created_at":"2026-07-20T14:56:27.515400587Z",
   "updated_at":"2026-07-20T14:56:27.515400587Z",
   "score":0.031544957,"matched":{"vector_rank":1,"bm25_rank":6}}],

@@ -36,9 +36,11 @@ the words carry the meaning too.
   - solid lines join memories with similar meaning, thicker when more similar;
   - arrows show relations the entity graph recorded, when `[graph]` is on.
 
-![The map zoomed out: one disc per category](images/web-ui-map-categories.png)
+![The map zoomed out: one disc per topic, with the kinds key beside it](images/web-ui-map-topics.png)
 
-![Zooming in: categories split into named clusters](images/web-ui-map-clusters.png)
+![Zooming in: topics split into named clusters](images/web-ui-map-clusters.png)
+
+![Zoomed in: each memory coloured by its kind](images/web-ui-map-memories.png)
 
 Use the scroll wheel or a pinch to zoom, or **Topics / Clusters / Memories** to
 jump to a level. Clicking a topic or cluster opens it.
@@ -50,28 +52,28 @@ Clicking a memory opens it in the editor.
 |---|---|
 | `+` / `-` | zoom in / out |
 | `0` | fit the whole map |
-| `1` `2` `3` | jump to Categories / Clusters / Memories |
+| `1` `2` `3` | jump to Topics / Clusters / Memories |
 | arrow keys | pan |
 | Escape | clear a lasso selection and leave lasso mode |
 
-Jumping to a closer level closes in on the category or cluster nearest the
+Jumping to a closer level closes in on the topic or cluster nearest the
 middle of the view. Everything else on the page is a regular button, link or
 field, in reading order. The list view is the text equivalent of the map.
 
 **The map remembers its layout.** The browser keeps the last layout of each
-map in `localStorage`: memory ids, category ids and coordinates, never memory
+map in `localStorage`: memory ids, topic ids and coordinates, never memory
 text. It is cleared on sign-out. Reopening the map, or reloading the page,
 puts everything back where it was. After an edit, only the new or re-filed
 memories are placed, next to the memories they link to, and the rest stay
 put. The layout is computed in a background worker, so a large store never
 freezes the page.
 
-Every category has a colour, a glyph and its name, so colour is never the
-only cue. The colours keep 3:1 contrast on both the light and the dark
-background. The built-ins' colours were chosen to stay distinguishable with
-protanopia, deuteranopia and tritanopia, and a test checks that (see
-`web/src/domain/map/palette.test.ts`). With some colour-vision deficiencies,
-a few colours still look alike, which is why each category also carries its glyph and label. The legend's buttons hide and show categories. **Links** turns the
+Every kind has a colour, a glyph and its name, so colour is never the only cue.
+The colours keep 3:1 contrast on both the light and the dark background, and the
+eleven were chosen to stay distinguishable with protanopia, deuteranopia and
+tritanopia; a test checks that (see `web/src/domain/map/palette.test.ts`). Topic
+groups are grey with their initial. The **Topics** list's buttons hide and show
+topics. **Links** turns the
 two kinds of line on and off, and raises the minimum similarity shown.
 
 **Recall preview.** Type a question the way an agent would ("how does the user
@@ -89,15 +91,15 @@ shows the same memories as text.
 ### Large stores
 
 Above 5 000 memories (`[ui].map_detail_limit`, see
-[configuration](configuration.md)), the map opens on your categories only:
-one disc each, placed so that related categories sit together. Click a
-category, or pick it from the list beside the map, to open that category's
+[configuration](configuration.md)), the map opens on your topics only:
+one disc each, placed so that related topics sit together. Click a
+topic, or pick it from the list beside the map, to open that topic's
 own map. It opens split into its clusters, and zooms down to its memories.
-**All categories** goes back.
+**All topics** goes back.
 
-![A large store opens on its categories](images/web-ui-map-aggregate.png)
+![A large store opens on its topics](images/web-ui-map-aggregate.png)
 
-![One category's own map](images/web-ui-map-drill-in.png)
+![One topic's own map](images/web-ui-map-drill-in.png)
 
 ### Dark mode and small screens
 
@@ -166,7 +168,7 @@ easier view on a small screen.
 - **From the list:** **Select** turns each row into a checkbox, with **Select
   all** for every memory the filter left, on every page, not only the one in view.
 - **On the map:** **Lasso select**, or hold Shift, then draw around memories.
-  Drawing around a category or cluster disc takes all its memories. The
+  Drawing around a topic or cluster disc takes all its memories. The
   selection lights up where it sits on the map.
 
 The selection opens one editor. Say what they all are, what they are about and who
@@ -182,6 +184,8 @@ the message says which.
 structure, whose kind, topic and scope were guessed from their old category. The
 tab shows how many are left.
 
+![The review queue: memories filed by a guess](images/web-ui-review.png)
+
 - **Select** some and file them with the same editor as the list, or open one to
   edit it.
 - **Suggest** (with a language model configured) asks the model what the first 25
@@ -194,6 +198,8 @@ tab shows how many are left.
 **Projects** (`/ui/projects`) lists your projects with how many memories each holds
 and what else finds it (git remotes, folder names, former names).
 
+![The projects, with what finds each one](images/web-ui-projects.png)
+
 - **Rename…**: its memories follow, and the old name keeps finding it.
 - **Merge into…**: every memory moves to the other project, and this one's name and
   remotes find that project from then on.
@@ -203,6 +209,8 @@ and what else finds it (git remotes, folder names, former names).
 
 **Topics** (`/ui/topics`) lists the built-in topics and your own, with how many
 memories each holds.
+
+![The topics, with counts](images/web-ui-topics.png)
 
 - **Add** a topic of your own, like `homelab`: it can be used at once, by you and by
   your agents.
@@ -260,7 +268,7 @@ reminder that anyone who can reach the port acts as the `default` user.
 ```toml
 [ui]
 enabled = false
-# Above this many memories the map opens on categories only (default 5000).
+# Above this many memories the map opens on topics only (default 5000).
 map_detail_limit = 5000
 ```
 

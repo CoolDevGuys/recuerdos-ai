@@ -3,7 +3,43 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-## Unreleased
+## v0.6.0 — Structured memories: every memory says what it is, what it is about, and who it is true for
+
+The first final release since `v0.4.3`, so it also carries everything the `v0.5.0`
+release candidates brought (the recall measured on a real store in rc1–rc4, the web UI in
+rc5, and the paged list below): `v0.5.0` itself never had a final release.
+
+Until now a memory carried one category, which could not tell a project's rule from the
+user's own preference: a recall asking how the user likes things done got one project's
+conventions back. In `v0.6.0` every memory states its **kind** (preference, rule,
+convention, decision, fact…), its **topic**, **who it applies to** (the user everywhere,
+one project, or their general world) and **where it came from**. Saves are checked
+against rules that keep a project's conventions out of the user's preferences,
+contradictions are caught when they are saved, projects are first-class, and recall and
+the profile rank by the project the caller is in. The plan is
+[memory-structure-plan.md](../ai-specs/memory-structure-plan.md); the user's guide is
+[memory-model.md](memory-model.md).
+
+**Upgrading** (see [deployment.md](deployment.md#what-v060-does-on-its-first-start)):
+
+- *Breaking:* `POST /v1/memories:direct`, `memory_save` and `memory_save_batch` need the
+  structured shape (`kind`, `topic`, `applies_to`, `origin`); a category-only save is
+  refused with a message naming the new fields. `POST /v1/memories` (the pipeline) is
+  unchanged for callers.
+- *Breaking:* `GET /v1/map` groups by topic: `topics`, `topic_edges`, `topic` and
+  `?topic=` replace the category fields.
+- *Breaking:* the Python SDK needs `0.5.0`, and `0.5.0` needs this daemon.
+- *Behaviour change:* a save that contradicts or repeats a stored memory is refused as
+  `conflict` (or answered `already_known`); the agent asks the user, then replaces,
+  amends or keeps both. Recall demotes other projects' memories (`scope: "all"` turns it
+  off), and the profile is per project.
+- *On upgrade:* migrations V11 and V12 run, forward-only like every migration: back up
+  the store first if you might roll back. The first start then derives a structure for
+  every existing memory from its category, in one transaction; what it could not place
+  is marked `needs_review`, and the web UI's **Needs review** tab lists it. Nothing is
+  rewritten without the user's click, and no re-embedding is needed.
+- *On upgrade:* the stdio shim (`recuerdos-ai mcp`) detects the project from the folder
+  the harness starts it in; run the same version as the daemon.
 
 ### Python SDK 0.5.0
 
