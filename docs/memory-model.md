@@ -153,6 +153,19 @@ A memory that applies to a project stores the project's id, not its name.
   `X-Recuerdos-Project-Remote`).
 - **The first save** to a project the daemon does not know is refused until you
   confirm it is new; then the project is created and its remote remembered.
+- **Two repositories with the same name** (`acme/quill` and your fork `me/quill`) are
+  two projects. The second is offered as `me-quill`, and the reply says the name was
+  taken. If they are really one project, merge them.
+- **A repository renamed on its host** has a new remote no project knows. The refusal
+  asks whether it is a rename of the project with the old remote: *"Is it a rename of
+  quill (github.com/acme/quill)?"*. Say yes, and the agent renames `quill` from inside
+  the folder: the memories follow, the new remote is learned, and the old name and
+  remote keep working for checkouts that were never updated.
+- **Renaming** a project is one change: memories store its id, so all of them follow,
+  and the old name stays as an alias. **Merging** two moves every memory of one into
+  the other (audited per memory); the one that goes leaves its name and remotes
+  behind as aliases of the one that stays. Both are `project_rename` and
+  `project_merge` over MCP, and `/v1/projects` over REST; ask the user first.
 
 ## Contradictions: amend, replace, or keep both
 

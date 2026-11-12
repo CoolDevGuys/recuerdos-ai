@@ -5,6 +5,7 @@
 //! memories into an agent's context window, so a memory that bundles five
 //! unrelated facts wastes four of them on every recall.
 
+use super::applies_to::ProjectRef;
 use super::category::Category;
 use super::legacy_structure::legacy_structure;
 use super::memory_structure::MemoryStructure;
@@ -289,6 +290,14 @@ impl Memory {
         self.structure
             .goal_status()
             .is_some_and(|status| status.is_closed())
+    }
+
+    /// The same memory, filed under another project (a merge of two
+    /// projects). Only the project changes; review state is kept.
+    pub fn moved_to_project(mut self, project: &ProjectRef, now: DateTime<Utc>) -> Self {
+        self.structure = self.structure.moved_to(project);
+        self.updated_at = now;
+        self
     }
 
     /// Applies an edit, returning the updated memory.

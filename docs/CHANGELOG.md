@@ -5,6 +5,31 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S3: projects can be listed, renamed and merged
+
+Phase S3 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in [memory-model.md](memory-model.md#projects).
+
+- **REST**: `GET /v1/projects`, `GET /v1/projects/{project}`, `PATCH
+  /v1/projects/{project}` (rename) and `POST /v1/projects/{project}/merge`. A project
+  is named by id, name or alias.
+- **MCP**: `project_list`, `project_rename` and `project_merge`.
+- **Python SDK**: `projects()`, `project()`, `rename_project()`, `merge_project()`,
+  and the `Project` and `ProjectChange` models.
+- **A rename is one row**: memories store the project's id and follow; the old name
+  stays as an alias. Asked from inside a folder whose project is the new name, the
+  folder's remote is learned too.
+- **A repository renamed on its host** is no longer just "unknown project": the
+  refusal asks whether it is a rename of the project with the same owner's remote,
+  and `details.rename_of` names it (E15).
+- **Collisions**: a second repository with the same name (`me/quill` next to
+  `acme/quill`) is offered as its own project, `me-quill`, instead of being filed
+  under the first. Before, its remote was silently added to `quill`.
+- **Merging** moves every memory of one project into another, audited per memory;
+  the merged project's name and remotes find the one that stays.
+- `SaveNote::ProjectCreated` gained the name it would have had; the REST note is
+  still `project_created`.
+
 ### Structured memories, phase S2: contradictions are caught at the door, and fixed or replaced on purpose
 
 Phase S2 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of

@@ -11,9 +11,11 @@
 use super::dto::{
     AuditEntryResponse, AuditResponse, BulkRequest, BulkResponse, CategoriesResponse,
     CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, MapCategory, MapCategoryEdge,
-    MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest, RerankResponse,
-    SaveMemoryRequest, SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse,
-    UpdateCategoryRequest, UpdateMemoryRequest, UpdatedMemoryResponse,
+    MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest,
+    MergeProjectRequest, ProjectChangeResponse, ProjectResponse, ProjectsResponse,
+    RenameProjectRequest, RerankResponse, SaveMemoryRequest, SavedMemoryResponse, SearchHit,
+    SearchRequest, SearchResponse, UpdateCategoryRequest, UpdateMemoryRequest,
+    UpdatedMemoryResponse,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -647,6 +649,75 @@ fn parse_id(raw: &str) -> Result<MemoryId> {
     // A malformed id is the caller's mistake, not a missing resource.
     MemoryId::from_str(raw)
         .map_err(|_| RaError::Validation(format!("{raw:?} is not a valid memory id")))
+}
+
+/// `GET /v1/projects`: the user's projects, with what finds each one and
+/// how many memories it holds.
+pub async fn list_projects(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+) -> Result<Json<ProjectsResponse>> {
+    let memories = state.memories.clone();
+    let views = blocking(move || memories.project_curator.list(&context)).await?;
+    Ok(Json(ProjectsResponse {
+        projects: views.iter().map(ProjectResponse::from).collect(),
+    }))
+}
+
+/// `GET /v1/projects/{project}`, by id, name or alias.
+pub async fn get_project(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+    Path(project): Path<String>,
+) -> Result<Json<ProjectResponse>> {
+    let memories = state.memories.clone();
+    let view = blocking(move || {
+        let curator = &memories.project_curator;
+        let found = curator.find(&context, &project)?;
+        curator.view(&context, &found)
+    })
+    .await?;
+    Ok(Json(ProjectResponse::from(&view)))
+}
+
+/// `PATCH /v1/projects/{project}`: renames it. Sent from inside a project
+/// folder (the local MCP server's headers) whose project is the new name,
+/// the folder's remote is learned too — the fix for a repository renamed on
+/// its host (plan E15).
+pub async fn rename_project(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+    Json(request): Json<RenameProjectRequest>,
+) -> Result<Json<ProjectChangeResponse>> {
+    let detected = detected_project(&headers);
+    let memories = state.memories.clone();
+    let renamed = blocking(move || {
+        memories
+            .project_curator
+            .rename(&context, &project, &request.name, detected.as_ref())
+    })
+    .await?;
+    Ok(Json(ProjectChangeResponse::from(&renamed)))
+}
+
+/// `POST /v1/projects/{project}/merge`: folds it into `into`.
+pub async fn merge_project(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Path(project): Path<String>,
+    Json(request): Json<MergeProjectRequest>,
+) -> Result<Json<ProjectChangeResponse>> {
+    let memories = state.memories.clone();
+    let merged = blocking(move || {
+        memories
+            .project_curator
+            .merge(&context, &project, &request.into, &actor)
+    })
+    .await?;
+    Ok(Json(ProjectChangeResponse::from(&merged)))
 }
 
 #[cfg(test)]

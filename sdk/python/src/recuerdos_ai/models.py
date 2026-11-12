@@ -252,3 +252,32 @@ class Distillation(_Model):
     #: How many memories survived the session. Zero is the ordinary
     #: outcome and is a success, not a failure.
     distilled: int = 0
+
+
+class Project(_Model):
+    """One of the user's projects: what project memories are filed under."""
+
+    id: str
+    #: What it is shown and typed as: ``quill``.
+    name: str
+    #: What else finds it: git remotes (``github.com/acme/quill``), folder
+    #: names, and the names it had before a rename.
+    aliases: list[str] = Field(default_factory=list)
+    #: Active memories filed under it.
+    memories: int = 0
+    created_at: datetime | None = None
+
+
+class ProjectChange(_Model):
+    """What renaming or merging a project did."""
+
+    #: The project as it is now: renamed, or the one merged into.
+    project: Project
+    #: "Renamed quill to quill-app: its 3 memories moved with it, …"
+    message: str = ""
+    #: The name before a rename, or the project that was merged away.
+    previous: str = ""
+    #: Memories that changed project (a merge; a rename moves none).
+    moved: int = 0
+    #: Identifiers a rename learned: the remote of the folder it came from.
+    learned: list[str] = Field(default_factory=list)

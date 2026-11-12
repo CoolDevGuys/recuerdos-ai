@@ -13,6 +13,7 @@ use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
+use crate::memories::application::project_curator::ProjectCurator;
 use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
 use crate::memories::application::structured_memory_updater::StructuredMemoryUpdater;
 use crate::memories::domain::category_catalog::CategoryCatalog;
@@ -62,6 +63,9 @@ pub struct Memories {
     /// Each user's projects: the pipeline files a job's memories under the
     /// one its client works in.
     pub projects: Arc<dyn ProjectRegistry>,
+    /// Listing, renaming and merging projects (plan §6): `/v1/projects`
+    /// and the MCP project tools.
+    pub project_curator: Arc<ProjectCurator>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
     pub forgetter: Arc<MemoryForgetter>,
@@ -299,6 +303,12 @@ impl Memories {
             Arc::clone(&clock),
         ));
 
+        let project_curator = Arc::new(ProjectCurator::new(
+            Arc::clone(&projects),
+            Arc::clone(&repository),
+            Arc::clone(&clock),
+        ));
+
         let structured_updater = Arc::new(StructuredMemoryUpdater::new(
             Arc::clone(&updater),
             Arc::clone(&repository),
@@ -316,6 +326,7 @@ impl Memories {
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
             structured_updater,
             projects,
+            project_curator,
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),

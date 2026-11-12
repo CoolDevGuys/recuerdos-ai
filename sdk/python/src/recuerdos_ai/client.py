@@ -21,6 +21,7 @@ import time
 from datetime import datetime
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -30,6 +31,8 @@ from .models import (
     Distillation,
     Job,
     Memory,
+    Project,
+    ProjectChange,
     SavedMemory,
     SearchHit,
     SearchReport,
@@ -37,6 +40,13 @@ from .models import (
 )
 
 __all__ = ["Client"]
+
+
+def _segment(value: str) -> str:
+    """A project name or alias as one path segment: an alias is a git
+    remote and holds ``/``."""
+    return quote(value.strip(), safe="")
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 
@@ -532,6 +542,49 @@ class Client:
         supersede it.
         """
         self._request("DELETE", f"/v1/memories/{memory_id}")
+
+    # --- projects ----------------------------------------------------
+
+    def projects(self) -> list[Project]:
+        """The user's projects, by name, with their aliases and how many
+        memories each holds."""
+        payload = self._request("GET", "/v1/projects")
+        return [Project.model_validate(item) for item in payload.get("projects", [])]
+
+    def project(self, project: str) -> Project:
+        """One project, by id, name or alias (a former name, a remote).
+
+        Raises:
+            RejectedError: ``unknown_project``, listing the known names.
+        """
+        return Project.model_validate(
+            self._request("GET", f"/v1/projects/{_segment(project)}")
+        )
+
+    def rename_project(self, project: str, new_name: str) -> ProjectChange:
+        """Renames a project. Its memories follow, and the old name keeps
+        finding it.
+
+        Raises:
+            ConflictError: Another project already has ``new_name``; merge
+                them instead.
+            RejectedError: ``invalid_value`` for a name that is not
+                lowercase ``a-z 0-9 . _ -``.
+        """
+        return ProjectChange.model_validate(
+            self._request(
+                "PATCH", f"/v1/projects/{_segment(project)}", json={"name": new_name}
+            )
+        )
+
+    def merge_project(self, project: str, into: str) -> ProjectChange:
+        """Folds ``project`` into ``into``: its memories move, and its name
+        and aliases find ``into`` from then on."""
+        return ProjectChange.model_validate(
+            self._request(
+                "POST", f"/v1/projects/{_segment(project)}/merge", json={"into": into}
+            )
+        )
 
     # --- jobs --------------------------------------------------------
 

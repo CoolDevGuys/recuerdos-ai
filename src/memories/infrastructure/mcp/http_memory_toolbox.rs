@@ -10,8 +10,9 @@
 //! and the same per-user scoping.
 
 use super::memory_toolbox::{
-    BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome,
-    SaveRequest, SaveStatus, ToolMemory, UpdateOutcome, UpdateRequest,
+    BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, ProjectChange,
+    RecallRequest, SaveOutcome, SaveRequest, SaveStatus, ToolMemory, ToolProject, UpdateOutcome,
+    UpdateRequest,
 };
 use crate::memories::application::structured_memory_saver::DetectedProject;
 use crate::memories::infrastructure::http::handlers::{PROJECT_HEADER, PROJECT_REMOTE_HEADER};
@@ -106,6 +107,51 @@ impl HttpMemoryToolbox {
             _ => RaError::Internal(format!("daemon returned {status}: {message}")),
         })
     }
+}
+
+/// A project name or alias as one path segment. Names are `a-z 0-9 . _ -`,
+/// but an alias is a remote and holds `/`.
+fn segment(raw: &str) -> String {
+    raw.trim()
+        .bytes()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+fn parse_project(value: &Value) -> Result<ToolProject> {
+    let text = |field: &str| {
+        value[field].as_str().map(str::to_string).ok_or_else(|| {
+            RaError::Internal(format!(
+                "the daemon sent a project without {field}: {value}"
+            ))
+        })
+    };
+    Ok(ToolProject {
+        id: text("id")?,
+        name: text("name")?,
+        aliases: value["aliases"]
+            .as_array()
+            .map(|aliases| {
+                aliases
+                    .iter()
+                    .filter_map(|alias| alias.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        memories: value["memories"].as_u64().unwrap_or(0) as usize,
+    })
+}
+
+fn parse_change(value: &Value) -> Result<ProjectChange> {
+    Ok(ProjectChange {
+        project: parse_project(&value["project"])?,
+        message: value["message"].as_str().unwrap_or_default().to_string(),
+    })
 }
 
 #[async_trait::async_trait]
@@ -344,6 +390,38 @@ impl MemoryToolbox for HttpMemoryToolbox {
             .text()
             .await
             .map_err(|e| RaError::Internal(format!("failed to read the profile: {e}")))
+    }
+
+    async fn list_projects(&self) -> Result<Vec<ToolProject>> {
+        let listed = self
+            .request(reqwest::Method::GET, "/v1/projects", None)
+            .await?;
+        listed["projects"]
+            .as_array()
+            .map(|projects| projects.iter().map(parse_project).collect())
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn rename_project(&self, name: &str, new_name: &str) -> Result<ProjectChange> {
+        let renamed = self
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/v1/projects/{}", segment(name)),
+                Some(json!({"name": new_name})),
+            )
+            .await?;
+        parse_change(&renamed)
+    }
+
+    async fn merge_project(&self, name: &str, into: &str) -> Result<ProjectChange> {
+        let merged = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/projects/{}/merge", segment(name)),
+                Some(json!({"into": into})),
+            )
+            .await?;
+        parse_change(&merged)
     }
 }
 

@@ -6,7 +6,7 @@
 //! store an impossible combination: a kind only applies to the targets it
 //! allows (§3.2), and only a goal has a goal status (§3.8).
 
-use super::applies_to::AppliesTo;
+use super::applies_to::{AppliesTo, ProjectRef};
 use super::kind::Kind;
 use super::topic::Topic;
 use crate::shared::error::{RaError, Result};
@@ -177,6 +177,17 @@ impl MemoryStructure {
 
     pub fn flagged_for_review(mut self, needs_review: bool) -> Self {
         self.needs_review = needs_review;
+        self
+    }
+
+    /// The same structure, filed under another project: what merging two
+    /// projects does to each memory of the one that goes. A structure that
+    /// is not a project's is returned unchanged. Review state is kept — a
+    /// merge says nothing about whether the rest of it is right.
+    pub fn moved_to(mut self, project: &ProjectRef) -> Self {
+        if let AppliesTo::Project(current) = &mut self.applies_to {
+            *current = project.clone();
+        }
         self
     }
 

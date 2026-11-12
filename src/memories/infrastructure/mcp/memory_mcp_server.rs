@@ -120,6 +120,23 @@ pub struct UpdateParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ProjectRenameParams {
+    /// The project's current name (or a former name, or its git remote).
+    pub name: String,
+    /// The new name: lowercase letters, digits, '.', '_' or '-', like "quill-app".
+    pub new_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ProjectMergeParams {
+    /// The project that goes: its memories move, and its name and remotes find the
+    /// other one from then on.
+    pub name: String,
+    /// The project that stays.
+    pub into: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AppliesToParams {
     /// me — who the user is and how they like things, everywhere ("my", "I
     /// always", "personally", "in every project").
@@ -353,6 +370,76 @@ impl MemoryMcpServer {
                 tool_text::render_updated(&outcome),
             )])),
             Err(error) => rejected_result(error, "Not updated"),
+        }
+    }
+
+    /// List the user's projects: each one's name, what else finds it (git remotes,
+    /// folder names, former names) and how many memories it holds.
+    ///
+    /// Call this when a save is refused with "unknown_project" and you need the known
+    /// names, or when the user asks about their projects.
+    #[tool(name = "project_list")]
+    async fn project_list(
+        &self,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let projects = self
+            .toolbox(&context)
+            .list_projects()
+            .await
+            .map_err(to_mcp_error)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            tool_text::render_projects(&projects),
+        )]))
+    }
+
+    /// Rename a project. Its memories follow (they store the project, not its name),
+    /// and the old name keeps finding it, so older checkouts still resolve.
+    ///
+    /// Use it when the user renames a project, or when a save is refused because this
+    /// repository is unknown and the reply asks whether it is a rename of a known
+    /// project (its remote changed): ask the user, then rename the old project to this
+    /// folder's name. Called from inside the folder, its new remote is learned too.
+    /// Only rename when the user agrees.
+    #[tool(name = "project_rename")]
+    async fn project_rename(
+        &self,
+        Parameters(params): Parameters<ProjectRenameParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self
+            .toolbox(&context)
+            .rename_project(&params.name, &params.new_name)
+            .await
+        {
+            Ok(change) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                tool_text::render_project_change(&change),
+            )])),
+            Err(error) => refused_result(error, "Not renamed"),
+        }
+    }
+
+    /// Merge two projects that are one: every memory of `name` moves to `into`, and
+    /// `name`, its remotes and folder names find `into` from then on.
+    ///
+    /// Use it when the user says two projects are the same (a fork created as its own
+    /// project, a project saved under two names). It cannot be undone by another call,
+    /// so only merge when the user asked for it.
+    #[tool(name = "project_merge")]
+    async fn project_merge(
+        &self,
+        Parameters(params): Parameters<ProjectMergeParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self
+            .toolbox(&context)
+            .merge_project(&params.name, &params.into)
+            .await
+        {
+            Ok(change) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                tool_text::render_project_change(&change),
+            )])),
+            Err(error) => refused_result(error, "Not merged"),
         }
     }
 
@@ -724,6 +811,16 @@ fn rejected_result(error: RaError, verdict: &str) -> Result<CallToolResult, Erro
             Ok(result)
         }
         other => Err(to_mcp_error(other)),
+    }
+}
+
+/// A refused project change: a rejection, or a name another project has.
+fn refused_result(error: RaError, verdict: &str) -> Result<CallToolResult, ErrorData> {
+    match error {
+        RaError::Conflict(message) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+            "{verdict}: {message}"
+        ))])),
+        other => rejected_result(other, verdict),
     }
 }
 

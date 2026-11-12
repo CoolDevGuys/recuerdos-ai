@@ -123,6 +123,18 @@ fn api_router(state: AppState) -> Router {
             "/v1/memories/export",
             get(memories_http::handlers::export_memories),
         )
+        // Projects (memory-structure-plan.md §6). A rename is one row and a
+        // merge re-files without re-embedding, so the short timeout holds.
+        .route("/v1/projects", get(memories_http::handlers::list_projects))
+        .route(
+            "/v1/projects/{project}",
+            get(memories_http::handlers::get_project)
+                .patch(memories_http::handlers::rename_project),
+        )
+        .route(
+            "/v1/projects/{project}/merge",
+            post(memories_http::handlers::merge_project),
+        )
         .route(
             "/v1/memories/{id}",
             get(memories_http::handlers::get_memory)

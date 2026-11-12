@@ -8,6 +8,8 @@
 use super::applies_to::ProjectRef;
 use crate::identity::domain::user_context::UserContext;
 use crate::shared::error::{RaError, Result};
+use crate::shared::ids::ProjectId;
+use chrono::{DateTime, Utc};
 
 pub const MAX_PROJECT_NAME_LEN: usize = 64;
 
@@ -35,6 +37,30 @@ pub fn normalize_project_name(raw: &str) -> Result<String> {
     }
 }
 
+/// A project as the registry holds it: what `project_list` and
+/// `GET /v1/projects` show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRecord {
+    pub project: ProjectRef,
+    /// Sorted: remotes, folder names and former names.
+    pub aliases: Vec<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Whether an alias is a normalised git remote (`github.com/acme/quill`)
+/// rather than a folder or former name. A name cannot hold a `/`.
+pub fn is_remote(alias: &str) -> bool {
+    alias.contains('/')
+}
+
+/// The owner and repository of a remote alias: `github.com/acme/quill` →
+/// (`github.com/acme`, `quill`). `None` for anything else.
+pub fn remote_parts(alias: &str) -> Option<(&str, &str)> {
+    alias
+        .rsplit_once('/')
+        .filter(|(owner, repo)| is_remote(alias) && !owner.is_empty() && !repo.is_empty())
+}
+
 pub trait ProjectRegistry: Send + Sync {
     /// The project with this name or alias, if the user has one.
     fn resolve(&self, context: &UserContext, identifier: &str) -> Result<Option<ProjectRef>>;
@@ -49,11 +75,47 @@ pub trait ProjectRegistry: Send + Sync {
     /// Records another identifier for a project. Idempotent; an alias that
     /// already points at a different project is left alone.
     fn add_alias(&self, context: &UserContext, project: &ProjectRef, alias: &str) -> Result<()>;
+
+    /// Every project this user has, by name.
+    fn list(&self, context: &UserContext) -> Result<Vec<ProjectRecord>>;
+
+    /// The project with this id, if it is the user's.
+    fn find(&self, context: &UserContext, id: ProjectId) -> Result<Option<ProjectRef>>;
+
+    /// Gives a project a new (already normalised) name. The old name becomes
+    /// an alias, so older checkouts and configs keep resolving, and
+    /// `aliases` are recorded too. `Conflict` when another project has the
+    /// name. Memories store the id, so none of them is touched.
+    fn rename(
+        &self,
+        context: &UserContext,
+        project: &ProjectRef,
+        new_name: &str,
+        aliases: &[String],
+    ) -> Result<ProjectRef>;
+
+    /// Folds `from` into `into`, in one transaction: any memory still filed
+    /// under `from` moves, its aliases and its name become `into`'s, and
+    /// `from` is deleted. The caller moves the memories it can audit first;
+    /// this catches the rest (forgotten ones), which would otherwise hold
+    /// the row in place.
+    fn absorb(&self, context: &UserContext, from: &ProjectRef, into: &ProjectRef) -> Result<()>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remote_alias_splits_into_owner_and_repository() {
+        assert_eq!(
+            remote_parts("github.com/acme/quill"),
+            Some(("github.com/acme", "quill"))
+        );
+        assert_eq!(remote_parts("quill"), None);
+        assert!(is_remote("gitlab.com/group/sub/quill"));
+        assert!(!is_remote("quill-app"));
+    }
 
     #[test]
     fn names_are_lowercase_slugs() {
@@ -62,7 +124,14 @@ mod tests {
             normalize_project_name("me-quill.v2").unwrap(),
             "me-quill.v2"
         );
-        for bad in ["", "quill app", "-quill", "café", &"q".repeat(65)] {
+        for bad in [
+            "",
+            "quill app",
+            "-quill",
+            "café",
+            "acme/quill",
+            &"q".repeat(65),
+        ] {
             let error = normalize_project_name(bad).unwrap_err();
             assert!(
                 matches!(&error, RaError::Rejected { code, .. } if code == "invalid_value"),

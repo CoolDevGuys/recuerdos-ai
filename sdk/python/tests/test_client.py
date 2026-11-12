@@ -655,3 +655,72 @@ def test_the_version_a_caller_can_read_is_the_version_installed() -> None:
     # installed distribution instead of to a second copy of the truth that
     # nobody updates.
     assert recuerdos_ai.__version__ == importlib.metadata.version("recuerdos-ai")
+
+
+# --- projects --------------------------------------------------------
+
+PROJECT = {
+    "id": "019f7c5a-0000-7000-8000-0000000000aa",
+    "name": "quill",
+    "aliases": ["github.com/acme/quill"],
+    "memories": 3,
+    "created_at": "2026-11-12T08:00:00Z",
+}
+
+
+def test_projects_are_listed() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"projects": [PROJECT]})
+
+    projects = client_for(handler).projects()
+
+    assert seen[0].method == "GET" and seen[0].url.path == "/v1/projects"
+    assert projects[0].name == "quill"
+    assert projects[0].aliases == ["github.com/acme/quill"]
+    assert projects[0].memories == 3
+
+
+def test_a_remote_is_one_path_segment() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=PROJECT)
+
+    client_for(handler).project("github.com/acme/quill")
+
+    assert seen[0].url.raw_path == b"/v1/projects/github.com%2Facme%2Fquill"
+
+
+def test_rename_and_merge_send_what_the_api_takes() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "project": {**PROJECT, "name": "quill-app"},
+                "message": "Renamed quill to quill-app",
+                "previous": "quill",
+                "moved": 0,
+            },
+        )
+
+    client = client_for(handler)
+    renamed = client.rename_project("quill", "quill-app")
+    client.merge_project("me-quill", "quill")
+
+    assert (seen[0].method, seen[0].url.path) == ("PATCH", "/v1/projects/quill")
+    assert json.loads(seen[0].content) == {"name": "quill-app"}
+    assert renamed.project.name == "quill-app"
+    assert renamed.previous == "quill"
+    assert renamed.learned == []
+    assert (seen[1].method, seen[1].url.path) == (
+        "POST",
+        "/v1/projects/me-quill/merge",
+    )
+    assert json.loads(seen[1].content) == {"into": "quill"}

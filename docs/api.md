@@ -653,6 +653,54 @@ All category writes and bulk edits are audited per memory moved. The audit
 sends one (the web UI sends `web-ui`), else `rest`. It is informational: any
 client can send any name.
 
+## Projects
+
+What memories with `applies_to.target: "project"` are filed under
+([memory-model.md](memory-model.md#projects)). Wherever a path takes
+`{project}`, it may be the project's id, its name, or one of its aliases (a
+former name, a git remote with `/` encoded as `%2F`, a folder name). An unknown
+one is `422 unknown_project`, listing the known names.
+
+### `GET /v1/projects`
+
+Requires `read`. Your projects, by name:
+
+```json
+{"projects": [
+  {"id": "019f…", "name": "quill", "memories": 12, "created_at": "2026-11-12T08:00:00Z",
+   "aliases": ["github.com/acme/quill", "quill-old"]}
+]}
+```
+
+`aliases` are what else finds the project: remotes, folder names, and the names it
+had before a rename. `memories` counts its active ones. `GET /v1/projects/{project}`
+answers one.
+
+### `PATCH /v1/projects/{project}`
+
+Requires `write`. `{"name": "quill-app"}` renames it. Memories store the project's
+id, so every one follows and nothing is re-embedded; the old name becomes an alias.
+Sent with the `X-Recuerdos-Project` headers of a folder whose project is the new
+name (the local MCP server sends them), that folder's remote is learned too: the fix
+for a repository renamed on its host. `409` when another project has the name (merge
+them instead); `422 invalid_value` for a name that is not lowercase `a–z 0–9 . _ -`.
+
+```json
+{"project": {"id": "019f…", "name": "quill-app", "aliases": ["github.com/acme/quill",
+             "github.com/acme/quill-app", "quill"], "memories": 12, "created_at": "…"},
+ "message": "Renamed quill to quill-app: its 12 memories moved with it, and quill still finds it. It is now also found by github.com/acme/quill-app.",
+ "previous": "quill", "moved": 0, "learned": ["github.com/acme/quill-app"]}
+```
+
+### `POST /v1/projects/{project}/merge`
+
+Requires `write`. `{"into": "quill"}`: every memory of `{project}`, superseded ones
+included, moves to `into` (audited per memory); `{project}`'s name and aliases find
+`into` from then on, and it is deleted. Answers like `PATCH`, with `moved` and
+`previous` (the project that went). Merged memories are not checked against each
+other; consolidation merges duplicates. `422 invalid_value` for a project merged
+into itself.
+
 ### `GET /v1/memories/export`
 
 Requires `read`. `?format=markdown` (default) or `?format=json`, plus

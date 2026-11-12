@@ -337,3 +337,37 @@ def test_distillation_without_a_provider_refuses_and_says_why(ra: Client) -> Non
         ra.distill_session("a long transcript of a session that went nowhere")
 
     assert "[understanding].provider" in str(caught.value)
+
+
+def test_a_project_is_renamed_and_merged(ra: Client, tag: str) -> None:
+    def rule(content: str, project: str) -> None:
+        ra.save_direct(
+            content,
+            kind="rule",
+            topic="coding",
+            applies_to={
+                "target": "project",
+                "project_name": project,
+                "new_project": True,
+            },
+            origin="user_said",
+            tags=[tag],
+        )
+
+    rule("Migrations are forward-only", f"{tag}-quill")
+    rule("The fork releases from its own main", f"{tag}-fork")
+
+    renamed = ra.rename_project(f"{tag}-quill", f"{tag}-app")
+    assert renamed.previous == f"{tag}-quill"
+    assert renamed.project.memories == 1
+    assert ra.project(f"{tag}-quill").name == f"{tag}-app", "the old name finds it"
+
+    merged = ra.merge_project(f"{tag}-fork", f"{tag}-app")
+    assert merged.moved == 1
+    assert merged.project.memories == 2
+    names = [project.name for project in ra.projects()]
+    assert f"{tag}-app" in names and f"{tag}-fork" not in names
+
+    with pytest.raises(RejectedError) as refused:
+        ra.project(f"{tag}-nope")
+    assert refused.value.code == "unknown_project"

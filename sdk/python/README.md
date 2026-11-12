@@ -69,6 +69,10 @@ again with `replaces=` (they changed their mind) or `coexists_with=` (both hold)
 or fix the stored one with `ra.update(...)`. `ra.update` also closes a goal:
 `ra.update(goal_id, goal_status="achieved", origin="user_confirmed")`.
 
+Projects are listed with `ra.projects()`, renamed with
+`ra.rename_project("quill", "quill-app")` (memories follow, the old name still
+finds it) and merged with `ra.merge_project("me-quill", into="quill")`.
+
 ## Session distillation
 
 At the end of a working session, hand over what happened and keep only

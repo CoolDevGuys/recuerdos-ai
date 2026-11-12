@@ -47,6 +47,24 @@ pub struct ToolMemory {
     pub relevance: Option<f32>,
 }
 
+/// A project as the project tools show it (plan §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolProject {
+    pub id: String,
+    pub name: String,
+    /// Git remotes, folder names and former names that also find it.
+    pub aliases: Vec<String>,
+    /// Active memories filed under it.
+    pub memories: usize,
+}
+
+/// What renaming or merging a project did, in the daemon's words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectChange {
+    pub project: ToolProject,
+    pub message: String,
+}
+
 /// Who or what a memory is true for, as the agent stated it.
 #[derive(Debug, Clone, Default)]
 pub struct SaveAppliesTo {
@@ -268,4 +286,14 @@ pub trait MemoryToolbox: Send + Sync {
     async fn forget(&self, ids: &[String]) -> Result<usize>;
 
     async fn profile(&self) -> Result<String>;
+
+    /// The user's projects.
+    async fn list_projects(&self) -> Result<Vec<ToolProject>>;
+
+    /// Renames a project; asked from inside its folder, the folder's remote
+    /// is learned too.
+    async fn rename_project(&self, name: &str, new_name: &str) -> Result<ProjectChange>;
+
+    /// Folds project `name` into `into`.
+    async fn merge_project(&self, name: &str, into: &str) -> Result<ProjectChange>;
 }

@@ -6,7 +6,7 @@ not my standards. Is there a way to improve how memories are stored — a better
 classification — so that recall can tell them apart? I would like to define as much structure as
 possible when memories are saved, instead of relying on the harness to get it right.*
 
-Status: **S0–S2 implemented** (2026-11-12, branch `feat/memory-structure`); S3–S5 to do. The shape,
+Status: **S0–S3 implemented** (2026-11-12, branch `feat/memory-structure`); S4–S5 to do. The shape,
 the rules and the examples in §3–§7 were settled with the owner in conversation on 2026-11-11/12
 (§1). §11 records how the last open questions were resolved; none remain. §12 records how each
 phase went.
@@ -485,4 +485,35 @@ and the legend and tooltips name the kind, so colour is never the only cue.
   identical conventions (§9) is left for the review queue (S5).
 - **The extractor set** (`eval/extraction-structure.toml`, 16 cases) needs a real model and is
   an ignored test. It has not been run in this environment, which has no provider configured.
+
+### S3 (2026-11-12)
+
+- **`ProjectCurator`** lists, renames and merges; REST `/v1/projects` and the MCP
+  `project_list`, `project_rename` and `project_merge` call it. A path or tool takes
+  a project's id, name or alias, so an agent never needs the id.
+- **A rename touches only the `projects` row** and its aliases: memory rows hold the
+  id, and reads join the name in. The old name becomes an alias (pointing here even if
+  it shadowed another project's alias), and an alias spelling the new name is
+  dropped, since a name always wins over an alias. Renaming to the current name is
+  allowed and is how a moved remote is attached (*transferred* repository:
+  `project_rename quill → quill` from the new checkout).
+- **The remote is learned only when the request's folder is the renamed project**
+  (detected name = new name), so renaming from an unrelated folder cannot attach the
+  wrong remote.
+- **A merge is an edit of every member**: `update_many`, audited, superseded members
+  included and review flags kept; then `ProjectRegistry::absorb` moves whatever is
+  left (forgotten rows, which `update_many` does not take), the aliases and the old
+  name, and deletes the project in one transaction. Members are not
+  conflict-checked against each other; near-duplicates are consolidation's to merge.
+- **Collisions** are decided at detection: a name match whose project already has a
+  *different* remote is another repository, not an alias to learn. A project with no
+  remote yet (created by name, from the web UI) learns the first one it is seen with.
+  The distinct name is `owner-repo`, then a number. Any alias match counts as taken,
+  so a new project cannot silently take a renamed project's former name.
+- **The rename hint** (E15) offers projects whose remote has the same host and owner,
+  narrowed to the ones sharing the first word of the name when that leaves any. A
+  folder with no remote gets no hint. `details` carries `project`, `remote`,
+  `rename_of` (or `collides_with`) for clients.
+- **The web UI's Projects tab is S5**; the SDK got the four calls now, since every
+  REST surface has had SDK parity.
 

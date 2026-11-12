@@ -278,6 +278,27 @@ memory deleted by mistake is gone from every future session. If a memory
 is merely out of date, `save` the correction and let reconciliation
 supersede it.
 
+## Projects
+
+### `projects() -> list[Project]` · `project(project) -> Project`
+
+The user's projects, each with `id`, `name`, `aliases` (remotes, folder names,
+former names) and `memories` (its active ones). `project()` takes an id, a name or
+an alias; an unknown one raises `RejectedError` with code `unknown_project`.
+
+### `rename_project(project, new_name) -> ProjectChange` · `merge_project(project, into) -> ProjectChange`
+
+Renaming keeps every memory (they store the project's id) and leaves the old name as
+an alias; `ConflictError` when another project has the name. Merging moves every
+memory of `project` into `into`. A `ProjectChange` carries the `project` as it is
+now, the server's `message`, `previous` (the old name, or the project merged away)
+and `moved`.
+
+```python
+ra.rename_project("quill", "quill-app")
+ra.merge_project("me-quill", into="quill-app")
+```
+
 ## Jobs
 
 ### `job(job_id) -> Job` · `wait_for_job(job, *, timeout=60, raise_on_failure=True) -> Job`

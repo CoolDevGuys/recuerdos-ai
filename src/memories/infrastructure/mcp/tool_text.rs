@@ -27,7 +27,10 @@
 //! the agent's context window, and JSON spends tokens on punctuation the
 //! model does not need.
 
-use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, SaveStatus, ToolMemory, UpdateOutcome};
+use super::memory_toolbox::{
+    BatchSaveOutcome, ProjectChange, SaveOutcome, SaveStatus, ToolMemory, ToolProject,
+    UpdateOutcome,
+};
 
 pub const PROFILE_DESCRIPTION: &str = "\
 A short digest of who this user is: their standing preferences, \
@@ -273,6 +276,42 @@ pub fn render_forgotten(count: usize) -> String {
         1 => "Deleted 1 memory. It will not appear in future sessions.".to_string(),
         many => format!("Deleted {many} memories. They will not appear in future sessions."),
     }
+}
+
+/// `project_list`: one line per project.
+pub fn render_projects(projects: &[ToolProject]) -> String {
+    if projects.is_empty() {
+        return "No projects yet. One is created when the user confirms a save to a new \
+                project."
+            .to_string();
+    }
+    let mut text = format!(
+        "{} project{}:\n",
+        projects.len(),
+        if projects.len() == 1 { "" } else { "s" }
+    );
+    for project in projects {
+        text.push_str(&format!(
+            "- {} — {} {}",
+            project.name,
+            project.memories,
+            if project.memories == 1 {
+                "memory"
+            } else {
+                "memories"
+            }
+        ));
+        if !project.aliases.is_empty() {
+            text.push_str(&format!("; also found by {}", project.aliases.join(", ")));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// `project_rename` and `project_merge`: the daemon's own sentence.
+pub fn render_project_change(change: &ProjectChange) -> String {
+    change.message.clone()
 }
 
 #[cfg(test)]

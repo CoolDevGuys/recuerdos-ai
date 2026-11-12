@@ -20,7 +20,9 @@ use tokio::process::Command;
 
 /// A daemon plus an MCP client connected to its stdio shim.
 struct McpClient {
-    app: TestApp,
+    /// Shared by every session of [`McpClient::elsewhere`].
+    app: std::sync::Arc<TestApp>,
+    key: String,
     service: RunningService<RoleClient, ()>,
     // The folder the shim runs in, kept alive for the test.
     _folder: tempfile::TempDir,
@@ -35,38 +37,29 @@ impl McpClient {
     /// A shim started inside a git repository whose `origin` is `remote`, the
     /// way a harness starts it inside the project it works on.
     async fn connect_in_repository(remote: &str) -> Self {
-        let folder = tempfile::tempdir().unwrap();
-        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
-            let status = std::process::Command::new("git")
-                .args(&args)
-                .current_dir(folder.path())
-                .status()
-                .expect("git is installed");
-            assert!(status.success(), "git {args:?}");
-        }
-        Self::connect_in(folder).await
+        Self::connect_in(repository(remote)).await
     }
 
     async fn connect_in(folder: tempfile::TempDir) -> Self {
         let app = TestApp::spawn().await;
         let key = app.create_user_with_key("alex", "read,write");
-
-        let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
-        command
-            .arg("mcp")
-            .current_dir(folder.path())
-            .env("RECUERDOS_AI_API_KEY", &key)
-            .env("RECUERDOS_AI_URL", &app.base_url)
-            .env_remove("RECUERDOS_AI_PROJECT")
-            .env_remove("RECUERDOS_AI_LOG");
-
-        let service =
-            ().serve(TokioChildProcess::new(command).expect("spawn the mcp shim"))
-                .await
-                .expect("mcp handshake");
-
+        let service = shim(&app, &key, &folder).await;
         Self {
-            app,
+            app: std::sync::Arc::new(app),
+            key,
+            service,
+            _folder: folder,
+        }
+    }
+
+    /// Another session of the same user, on the same daemon, started inside
+    /// another repository.
+    async fn elsewhere(&self, remote: &str) -> McpClient {
+        let folder = repository(remote);
+        let service = shim(&self.app, &self.key, &folder).await;
+        McpClient {
+            app: std::sync::Arc::clone(&self.app),
+            key: self.key.clone(),
             service,
             _folder: folder,
         }
@@ -133,6 +126,39 @@ impl McpClient {
     }
 }
 
+/// A git repository whose `origin` is `remote`.
+fn repository(remote: &str) -> tempfile::TempDir {
+    let folder = tempfile::tempdir().unwrap();
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(folder.path())
+            .status()
+            .expect("git is installed");
+        assert!(status.success(), "git {args:?}");
+    }
+    folder
+}
+
+/// The stdio shim started in `folder`, the way a harness starts it.
+async fn shim(
+    app: &TestApp,
+    key: &str,
+    folder: &tempfile::TempDir,
+) -> RunningService<RoleClient, ()> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
+    command
+        .arg("mcp")
+        .current_dir(folder.path())
+        .env("RECUERDOS_AI_API_KEY", key)
+        .env("RECUERDOS_AI_URL", &app.base_url)
+        .env_remove("RECUERDOS_AI_PROJECT")
+        .env_remove("RECUERDOS_AI_LOG");
+    ().serve(TokioChildProcess::new(command).expect("spawn the mcp shim"))
+        .await
+        .expect("mcp handshake")
+}
+
 fn as_object(value: Value) -> Map<String, Value> {
     value
         .as_object()
@@ -164,6 +190,9 @@ async fn the_client_sees_the_three_memory_tools() {
         names.contains(&"memory_update".to_string()),
         "got {names:?}"
     );
+    for project_tool in ["project_list", "project_rename", "project_merge"] {
+        assert!(names.contains(&project_tool.to_string()), "got {names:?}");
+    }
 }
 
 #[tokio::test]
@@ -672,4 +701,112 @@ async fn a_conflict_is_explained_and_resolved_through_the_tools() {
         )
         .await;
     assert!(refused.starts_with("Not updated (secret)"), "{refused}");
+}
+
+/// E15 through the tools: the repository was renamed on its host, so a
+/// session inside it finds no project; the refusal offers the rename,
+/// `project_rename` from inside the folder fixes it, and an old checkout
+/// still resolves.
+#[tokio::test]
+async fn e15_a_renamed_repository_is_fixed_with_project_rename() {
+    let old_checkout = McpClient::connect_in_repository("git@github.com:acme/quill.git").await;
+    let rule = |content: &str, new_project: bool| {
+        json!({"content": content, "kind": "rule", "topic": "coding",
+               "applies_to": {"target": "project", "new_project": new_project},
+               "origin": "user_said"})
+    };
+    old_checkout
+        .call("memory_save", rule("Migrations are forward-only", true))
+        .await;
+
+    let renamed_repo = old_checkout
+        .elsewhere("https://github.com/acme/quill-app.git")
+        .await;
+    let refused = renamed_repo
+        .call_refused(
+            "memory_save",
+            rule("Handlers are named after their command", false),
+        )
+        .await;
+    assert!(
+        refused.starts_with("Not saved (unknown_project)"),
+        "{refused}"
+    );
+    assert!(refused.contains("Is it a rename of quill"), "{refused}");
+    assert!(refused.contains("project_rename"), "{refused}");
+
+    let renamed = renamed_repo
+        .call(
+            "project_rename",
+            json!({"name": "quill", "new_name": "quill-app"}),
+        )
+        .await;
+    assert!(
+        renamed.starts_with("Renamed quill to quill-app"),
+        "{renamed}"
+    );
+    assert!(renamed.contains("github.com/acme/quill-app"), "{renamed}");
+
+    let saved = renamed_repo
+        .call(
+            "memory_save",
+            rule("Handlers are named after their command", false),
+        )
+        .await;
+    assert!(saved.contains("of quill-app"), "{saved}");
+    let saved = old_checkout
+        .call(
+            "memory_save",
+            rule("Every endpoint has a contract test", false),
+        )
+        .await;
+    assert!(
+        saved.contains("of quill-app"),
+        "the old remote resolves: {saved}"
+    );
+
+    let listed = old_checkout.call("project_list", json!({})).await;
+    assert!(listed.starts_with("1 project:"), "{listed}");
+    assert!(listed.contains("quill-app — 3 memories"), "{listed}");
+    assert!(listed.contains("github.com/acme/quill,"), "{listed}");
+}
+
+#[tokio::test]
+async fn project_merge_folds_one_project_into_another_and_refusals_are_explained() {
+    let quill = McpClient::connect_in_repository("git@github.com:acme/quill.git").await;
+    let rule = |content: &str| {
+        json!({"content": content, "kind": "rule", "topic": "coding",
+               "applies_to": {"target": "project", "new_project": true},
+               "origin": "user_said"})
+    };
+    quill
+        .call("memory_save", rule("Migrations are forward-only"))
+        .await;
+    let fork = quill.elsewhere("git@github.com:me/quill.git").await;
+    let saved = fork
+        .call("memory_save", rule("The fork releases from its own main"))
+        .await;
+    assert!(saved.contains("Created the project me-quill"), "{saved}");
+
+    let refused = fork
+        .call_refused(
+            "project_rename",
+            json!({"name": "me-quill", "new_name": "quill"}),
+        )
+        .await;
+    assert!(refused.starts_with("Not renamed:"), "{refused}");
+    assert!(refused.contains("merge"), "{refused}");
+
+    let merged = fork
+        .call(
+            "project_merge",
+            json!({"name": "me-quill", "into": "quill"}),
+        )
+        .await;
+    assert!(
+        merged.starts_with("Merged me-quill into quill: 1 memory moved"),
+        "{merged}"
+    );
+    let listed = quill.call("project_list", json!({})).await;
+    assert!(listed.contains("quill — 2 memories"), "{listed}");
 }

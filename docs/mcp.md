@@ -214,6 +214,30 @@ profile, and stays in history.
 Amend when the stored memory is wrong; when you changed your mind, the new memory
 is saved with `replaces`, so the old one remains as what you used to think.
 
+### `project_list`, `project_rename`, `project_merge`
+
+The user's projects ([memory-model.md](memory-model.md#projects)).
+
+- **`project_list`** takes nothing and lists each project, its memory count and what
+  else finds it:
+
+  ```
+  2 projects:
+  - fern — 4 memories; also found by github.com/acme/fern
+  - quill — 12 memories; also found by github.com/acme/quill, quill-old
+  ```
+- **`project_rename`** `{"name": "quill", "new_name": "quill-app"}`: the memories
+  follow and the old name keeps finding it. Called from the stdio shim inside a
+  folder whose project is the new name, that folder's remote is learned too. This is
+  the answer when a save in a renamed repository is refused with *"Is it a rename of
+  quill (github.com/acme/quill)?"* and the user says yes.
+- **`project_merge`** `{"name": "me-quill", "into": "quill"}`: every memory of
+  `me-quill` moves to `quill`, whose aliases gain `me-quill`'s name and remotes.
+
+Each answers with one sentence (`Renamed quill to quill-app: …`, `Merged me-quill into
+quill: 1 memory moved, …`); a refusal begins `Not renamed:` or `Not merged:`. The tool
+descriptions tell the agent to rename or merge only when the user agrees.
+
 ### `memory_recall`
 
 Hybrid search — semantic, keyword, and a graph hop over the entity/relation

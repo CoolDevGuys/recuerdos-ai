@@ -5,6 +5,7 @@
 //! are where that promise is written down.
 
 use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
+use crate::memories::application::project_curator::{Merged, ProjectView, Renamed};
 use crate::memories::application::structured_memory_saver::{
     AppliesToInput, DetectedProject, SaveNote, SaveResult, StructuredSave,
 };
@@ -147,7 +148,7 @@ impl From<&SaveResult> for SavedMemoryResponse {
                     .map(|note| match note {
                         SaveNote::AppliesToDefaulted => "applies_to_defaulted",
                         SaveNote::FiledFromDocument => "filed_from_document",
-                        SaveNote::ProjectCreated(_) => "project_created",
+                        SaveNote::ProjectCreated { .. } => "project_created",
                         SaveNote::Replaced { .. } => "replaced",
                         SaveNote::Overrides { .. } => "overrides",
                     })
@@ -674,6 +675,88 @@ mod serde_with_double_option {
         T: Deserialize<'de>,
     {
         Option::<T>::deserialize(deserializer).map(Some)
+    }
+}
+
+/// One project in `GET /v1/projects` and the answers to renaming and
+/// merging one (ai-specs/memory-structure-plan.md §6).
+#[derive(Debug, Serialize)]
+pub struct ProjectResponse {
+    pub id: String,
+    pub name: String,
+    /// What else finds it: git remotes, folder names, former names.
+    pub aliases: Vec<String>,
+    /// Active memories filed under it.
+    pub memories: usize,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&ProjectView> for ProjectResponse {
+    fn from(view: &ProjectView) -> Self {
+        Self {
+            id: view.record.project.id.to_string(),
+            name: view.record.project.name.clone(),
+            aliases: view.record.aliases.clone(),
+            memories: view.memories,
+            created_at: view.record.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectsResponse {
+    pub projects: Vec<ProjectResponse>,
+}
+
+/// `PATCH /v1/projects/{project}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProjectRequest {
+    pub name: String,
+}
+
+/// `POST /v1/projects/{project}/merge`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeProjectRequest {
+    pub into: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectChangeResponse {
+    pub project: ProjectResponse,
+    pub message: String,
+    /// The name it had before a rename, or the project merged into it.
+    pub previous: String,
+    /// Memories that changed project (a merge; 0 for a rename, which moves
+    /// none: they store the project's id).
+    pub moved: usize,
+    /// Identifiers the rename taught it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub learned: Vec<String>,
+}
+
+impl From<&Renamed> for ProjectChangeResponse {
+    fn from(renamed: &Renamed) -> Self {
+        Self {
+            project: ProjectResponse::from(&renamed.project),
+            message: renamed.message(),
+            previous: renamed.previous.clone(),
+            moved: 0,
+            learned: renamed.learned.clone(),
+        }
+    }
+}
+
+impl From<&Merged> for ProjectChangeResponse {
+    fn from(merged: &Merged) -> Self {
+        Self {
+            project: ProjectResponse::from(&merged.project),
+            message: merged.message(),
+            previous: merged.from.clone(),
+            moved: merged.moved,
+            learned: vec![],
+        }
     }
 }
 

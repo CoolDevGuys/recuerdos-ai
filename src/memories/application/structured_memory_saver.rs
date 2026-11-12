@@ -30,7 +30,9 @@ use crate::memories::domain::legacy_structure::category_for;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
-use crate::memories::domain::project_registry::{ProjectRegistry, normalize_project_name};
+use crate::memories::domain::project_registry::{
+    ProjectRecord, ProjectRegistry, is_remote, normalize_project_name, remote_parts,
+};
 use crate::memories::domain::recall_query::{MAX_QUERY_LEN, RecallQuery};
 use crate::memories::domain::topic::Topic;
 use crate::memories::domain::topic_catalog::TopicCatalog;
@@ -128,8 +130,13 @@ pub enum SaveNote {
     /// A memory read from a document belongs to its project (R6), and a
     /// project's way of doing things is a convention, not a preference.
     FiledFromDocument,
-    /// The user confirmed a new project, and it was created.
-    ProjectCreated(String),
+    /// The user confirmed a new project, and it was created. `instead_of`
+    /// is the name it would have had, taken by another repository's
+    /// project (plan §6, collisions).
+    ProjectCreated {
+        name: String,
+        instead_of: Option<String>,
+    },
     /// It replaced this stored memory, which is kept in history.
     Replaced { id: MemoryId, content: String },
     /// A project memory that contradicts one of the user's own: an exception
@@ -165,7 +172,16 @@ impl SavedMemory {
                 SaveNote::FiledFromDocument => {
                     "It was read from a document, so it is filed under its project.".to_string()
                 }
-                SaveNote::ProjectCreated(name) => format!("Created the project {name}."),
+                SaveNote::ProjectCreated {
+                    name,
+                    instead_of: None,
+                } => format!("Created the project {name}."),
+                SaveNote::ProjectCreated {
+                    name,
+                    instead_of: Some(taken),
+                } => {
+                    format!("Created the project {name}: {taken} is another repository's project.")
+                }
                 SaveNote::Replaced { content, .. } => {
                     format!("It replaces \"{content}\", which is kept in history.")
                 }
@@ -231,7 +247,12 @@ pub(crate) fn rejected(code: &str, message: impl Into<String>) -> RaError {
 #[derive(Debug, Clone)]
 pub(crate) enum ProjectPlan {
     Existing(ProjectRef),
-    Create { name: String, aliases: Vec<String> },
+    Create {
+        name: String,
+        aliases: Vec<String>,
+        /// The detected name, when another project already has it.
+        instead_of: Option<String>,
+    },
 }
 
 /// A save that passed every rule that needs no judgement, with what a judge
@@ -556,9 +577,19 @@ impl StructuredMemorySaver {
             (Target::Me, _) => AppliesTo::Me,
             (Target::General, _) => AppliesTo::General,
             (Target::Project, Some(ProjectPlan::Existing(project))) => AppliesTo::Project(project),
-            (Target::Project, Some(ProjectPlan::Create { name, aliases })) => {
+            (
+                Target::Project,
+                Some(ProjectPlan::Create {
+                    name,
+                    aliases,
+                    instead_of,
+                }),
+            ) => {
                 let project = self.projects.create(context, &name, &aliases)?;
-                notes.push(SaveNote::ProjectCreated(project.name.clone()));
+                notes.push(SaveNote::ProjectCreated {
+                    name: project.name.clone(),
+                    instead_of,
+                });
                 AppliesTo::Project(project)
             }
             (Target::Project, None) => unreachable!("a project target always plans a project"),
@@ -595,7 +626,7 @@ impl StructuredMemorySaver {
     ) -> Result<(ProjectRef, bool)> {
         match plan {
             ProjectPlan::Existing(project) => Ok((project, false)),
-            ProjectPlan::Create { name, aliases } => {
+            ProjectPlan::Create { name, aliases, .. } => {
                 Ok((self.projects.create(context, &name, &aliases)?, true))
             }
         }
@@ -734,11 +765,109 @@ impl StructuredMemorySaver {
         let Ok(name) = normalize_project_name(&detected.name) else {
             return Ok(None);
         };
-        let found = self.projects.resolve(context, &name)?;
-        if let (Some(project), Some(alias)) = (&found, &detected.alias) {
-            self.projects.add_alias(context, project, alias)?;
+        let Some(project) = self.projects.resolve(context, &name)? else {
+            return Ok(None);
+        };
+        if let Some(alias) = &detected.alias {
+            // Another repository with the same name (`acme/quill` and
+            // `me/quill`): the project already has a remote, and it is not
+            // this one. A different project, not this one's alias.
+            if self.remotes_of(context, &project)?.next().is_some() {
+                return Ok(None);
+            }
+            self.projects.add_alias(context, &project, alias)?;
         }
-        Ok(found)
+        Ok(Some(project))
+    }
+
+    /// The git remotes a project is known by.
+    fn remotes_of(
+        &self,
+        context: &UserContext,
+        project: &ProjectRef,
+    ) -> Result<impl Iterator<Item = String>> {
+        Ok(self
+            .projects
+            .list(context)?
+            .into_iter()
+            .find(|record| record.project.id == project.id)
+            .map(|record| record.aliases)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|alias| is_remote(alias)))
+    }
+
+    /// A name for a detected repository whose own name another project
+    /// has: the owner's, then a number. `me/quill` → `me-quill`.
+    fn distinct_name(
+        &self,
+        context: &UserContext,
+        name: &str,
+        alias: Option<&str>,
+    ) -> Result<String> {
+        let owner = alias
+            .and_then(remote_parts)
+            .and_then(|(owner, _)| owner.rsplit('/').next())
+            .and_then(|owner| normalize_project_name(&format!("{owner}-{name}")).ok());
+        let base = owner.unwrap_or_else(|| name.to_string());
+        for n in 1.. {
+            let candidate = if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            if candidate != name
+                && normalize_project_name(&candidate).is_ok()
+                && self.projects.resolve(context, &candidate)?.is_none()
+            {
+                return Ok(candidate);
+            }
+            if n > 100 {
+                break;
+            }
+        }
+        Err(RaError::Conflict(format!(
+            "could not find a free name for another project called {name}; name it in              applies_to.project_name"
+        )))
+    }
+
+    /// Projects the detected repository may be a rename of: those whose
+    /// remote has the same owner, narrowed to the ones sharing the first
+    /// word of the name when that leaves any (E15).
+    fn renamed_from(
+        &self,
+        context: &UserContext,
+        name: &str,
+        alias: Option<&str>,
+    ) -> Result<Vec<ProjectRecord>> {
+        let Some((owner, _)) = alias.and_then(remote_parts) else {
+            return Ok(vec![]);
+        };
+        let same_owner: Vec<ProjectRecord> = self
+            .projects
+            .list(context)?
+            .into_iter()
+            .filter(|record| {
+                record
+                    .aliases
+                    .iter()
+                    .filter_map(|alias| remote_parts(alias))
+                    .any(|(other, _)| other == owner)
+            })
+            .collect();
+        let first_word = |text: &str| {
+            text.split(['-', '_', '.'])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let word = first_word(name);
+        let close: Vec<ProjectRecord> = same_owner
+            .iter()
+            .filter(|record| first_word(&record.project.name) == word)
+            .cloned()
+            .collect();
+        Ok(if close.is_empty() { same_owner } else { close })
     }
 
     pub(crate) fn plan_project(
@@ -773,6 +902,9 @@ impl StructuredMemorySaver {
                     return Ok(ProjectPlan::Existing(project));
                 }
                 let name = normalize_project_name(&detected.name)?;
+                if let Some(taken) = self.projects.resolve(context, &name)? {
+                    return self.plan_collision(context, input, detected, &name, &taken);
+                }
                 (name, detected.alias.clone().into_iter().collect())
             }
             (None, None) => {
@@ -785,26 +917,121 @@ impl StructuredMemorySaver {
         };
 
         if input.new_project {
-            return Ok(ProjectPlan::Create { name, aliases });
+            return Ok(ProjectPlan::Create {
+                name,
+                aliases,
+                instead_of: None,
+            });
         }
-        let known = self.projects.names(context)?;
-        let listed = if known.is_empty() {
-            "none yet".to_string()
-        } else {
-            known.join(", ")
-        };
+        let listed = self.known_list(context)?;
         let source = aliases
             .first()
             .map(|alias| format!(" ({alias})"))
             .unwrap_or_default();
-        Err(rejected(
-            "unknown_project",
-            format!(
-                "Unknown project {name:?}{source}; known: {listed}. If it is a new project, \
-                 confirm with the user and save again with applies_to.new_project = true. If it \
-                 is a known one under another name, use that name."
+        let renamed_from = match detected {
+            Some(detected) if input.project_name.is_none() => {
+                self.renamed_from(context, &name, detected.alias.as_deref())?
+            }
+            _ => vec![],
+        };
+        let hint = match renamed_from.as_slice() {
+            [] => "If it is a known one under another name, use that name.".to_string(),
+            [one] => format!(
+                "Is it a rename of {old} ({remotes})? If so, ask the user and use \
+                 project_rename ({old} → {name}): its memories follow, and this remote is \
+                 learned.",
+                old = one.project.name,
+                remotes = one
+                    .aliases
+                    .iter()
+                    .filter(|alias| is_remote(alias))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ),
-        ))
+            several => format!(
+                "Is it a rename of one of {}? If so, ask the user which, and use \
+                 project_rename: its memories follow, and this remote is learned.",
+                several
+                    .iter()
+                    .map(|record| record.project.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        Err(RaError::Rejected {
+            code: "unknown_project".to_string(),
+            message: format!(
+                "Unknown project {name:?}{source}; known: {listed}. {hint} If it is a new \
+                 project, confirm with the user and save again with applies_to.new_project = \
+                 true."
+            ),
+            details: Some(json!({
+                "project": name,
+                "remote": aliases.first(),
+                "rename_of": renamed_from
+                    .iter()
+                    .map(|record| record.project.name.clone())
+                    .collect::<Vec<_>>(),
+            })),
+        })
+    }
+
+    /// The detected repository's name is another project's (plan §6,
+    /// collisions): it becomes a project of its own under a distinct name,
+    /// once the user confirms it is new.
+    fn plan_collision(
+        &self,
+        context: &UserContext,
+        input: &AppliesToInput,
+        detected: &DetectedProject,
+        name: &str,
+        taken: &ProjectRef,
+    ) -> Result<ProjectPlan> {
+        let distinct = self.distinct_name(context, name, detected.alias.as_deref())?;
+        let aliases: Vec<String> = detected.alias.clone().into_iter().collect();
+        if input.new_project {
+            return Ok(ProjectPlan::Create {
+                name: distinct,
+                aliases,
+                instead_of: Some(taken.name.clone()),
+            });
+        }
+        let theirs: Vec<String> = self.remotes_of(context, taken)?.collect();
+        let source = aliases
+            .first()
+            .map(|alias| format!(" ({alias})"))
+            .unwrap_or_default();
+        Err(RaError::Rejected {
+            code: "unknown_project".to_string(),
+            message: format!(
+                "This repository{source} is not a known project: the project {taken} is \
+                 {theirs}. If it is a new project, confirm with the user and save again with \
+                 applies_to.new_project = true; it will be called {distinct}. If it is {taken}, \
+                 moved to a new remote, ask the user and use project_rename ({taken} → \
+                 {taken}) from here, which adds this remote.",
+                taken = taken.name,
+                theirs = if theirs.is_empty() {
+                    "another repository".to_string()
+                } else {
+                    theirs.join(", ")
+                },
+            ),
+            details: Some(json!({
+                "project": distinct,
+                "remote": aliases.first(),
+                "collides_with": taken.name,
+            })),
+        })
+    }
+
+    fn known_list(&self, context: &UserContext) -> Result<String> {
+        let known = self.projects.names(context)?;
+        Ok(if known.is_empty() {
+            "none yet".to_string()
+        } else {
+            known.join(", ")
+        })
     }
 
     pub(crate) fn check_valid_until(
@@ -1570,6 +1797,159 @@ mod tests {
                 .is_some(),
             "the remote is remembered"
         );
+    }
+
+    fn detected_in(save: StructuredSave, name: &str, remote: &str) -> StructuredSave {
+        StructuredSave {
+            detected_project: Some(DetectedProject {
+                name: name.to_string(),
+                alias: Some(remote.to_string()),
+            }),
+            ..save
+        }
+    }
+
+    fn project_rule(content: &str) -> StructuredSave {
+        save(content, "rule", "coding", Some("project"), "user_said")
+    }
+
+    fn details(error: RaError) -> (String, serde_json::Value) {
+        match error {
+            RaError::Rejected {
+                message, details, ..
+            } => (message, details.unwrap_or_default()),
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn another_repository_with_the_same_name_is_another_project() {
+        // Plan §6, collisions: acme/quill and me/quill are not one project.
+        let harness = harness();
+        let quill = harness.quill();
+        let fork = detected_in(
+            project_rule("Releases are cut from the fork's main"),
+            "quill",
+            "github.com/me/quill",
+        );
+
+        let (message, details) = details(harness.run(fork.clone()).unwrap_err());
+        assert!(message.contains("github.com/acme/quill"), "{message}");
+        assert!(message.contains("called me-quill"), "{message}");
+        assert_eq!(details["collides_with"], "quill");
+        assert_eq!(
+            harness
+                .projects
+                .resolve(&harness.fixture.alex, "github.com/me/quill")
+                .unwrap(),
+            None,
+            "the fork's remote was not filed under quill"
+        );
+
+        let mut confirmed = fork;
+        confirmed.applies_to.as_mut().unwrap().new_project = true;
+        let saved = harness.run(confirmed.clone()).unwrap();
+        assert!(
+            saved
+                .message()
+                .contains("Created the project me-quill: quill is another repository's project."),
+            "{}",
+            saved.message()
+        );
+        let fork_project = harness
+            .projects
+            .resolve(&harness.fixture.alex, "github.com/me/quill")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fork_project.name, "me-quill");
+        assert_ne!(fork_project.id, quill.id);
+
+        // From then on the fork resolves by its remote, with nothing to ask.
+        let mut again = confirmed;
+        again.content = "The fork tracks upstream weekly".to_string();
+        again.applies_to.as_mut().unwrap().new_project = false;
+        let saved = harness.run(again).unwrap();
+        assert_eq!(
+            saved.memory.structure().applies_to().project().unwrap().id,
+            fork_project.id
+        );
+    }
+
+    #[test]
+    fn a_name_without_a_remote_learns_the_first_one_it_is_seen_with() {
+        // A project created by name (the web UI) is the folder's, not a
+        // collision.
+        let harness = harness();
+        let quill = harness
+            .projects
+            .create(&harness.fixture.alex, "quill", &[])
+            .unwrap();
+
+        let saved = harness
+            .run(in_quill(project_rule("Migrations are forward-only")))
+            .unwrap();
+
+        assert_eq!(
+            saved.memory.structure().applies_to().project().unwrap().id,
+            quill.id
+        );
+        assert_eq!(
+            harness
+                .projects
+                .resolve(&harness.fixture.alex, "github.com/acme/quill")
+                .unwrap()
+                .unwrap()
+                .id,
+            quill.id
+        );
+    }
+
+    #[test]
+    fn e15_a_renamed_repository_is_offered_as_a_rename() {
+        let harness = harness();
+        harness.quill();
+        harness
+            .projects
+            .create(
+                &harness.fixture.alex,
+                "fern",
+                &["github.com/other/fern".to_string()],
+            )
+            .unwrap();
+        let moved = detected_in(
+            project_rule("Migrations are forward-only"),
+            "quill-app",
+            "github.com/acme/quill-app",
+        );
+
+        let (message, details) = details(harness.run(moved).unwrap_err());
+
+        assert!(
+            message.contains("Is it a rename of quill (github.com/acme/quill)?"),
+            "{message}"
+        );
+        assert!(
+            message.contains("project_rename (quill → quill-app)"),
+            "{message}"
+        );
+        assert_eq!(details["rename_of"], serde_json::json!(["quill"]));
+        assert_eq!(details["remote"], "github.com/acme/quill-app");
+    }
+
+    #[test]
+    fn no_rename_is_offered_for_a_repository_of_another_owner() {
+        let harness = harness();
+        harness.quill();
+        let elsewhere = detected_in(
+            project_rule("Migrations are forward-only"),
+            "ledger",
+            "github.com/someone/ledger",
+        );
+
+        let (message, details) = details(harness.run(elsewhere).unwrap_err());
+
+        assert!(!message.contains("rename"), "{message}");
+        assert_eq!(details["rename_of"], serde_json::json!([]));
     }
 
     #[test]
