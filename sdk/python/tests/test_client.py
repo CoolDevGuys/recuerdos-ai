@@ -724,3 +724,28 @@ def test_rename_and_merge_send_what_the_api_takes() -> None:
         "/v1/projects/me-quill/merge",
     )
     assert json.loads(seen[1].content) == {"into": "quill"}
+
+
+def test_search_sends_the_structure_filters_and_the_context() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"results": [], "took_ms": 1})
+
+    client_for(handler).search(
+        "naming",
+        kinds=["convention"],
+        targets=["project"],
+        projects=["quill"],
+        project="fern",
+        scope="all",
+    )
+
+    body = json.loads(seen[0].content)
+    assert body["kinds"] == ["convention"]
+    assert body["targets"] == ["project"]
+    assert body["projects"] == ["quill"]
+    assert body["project"] == "fern"
+    assert body["scope"] == "all"
+    assert "topics" not in body, "an empty filter is not sent"

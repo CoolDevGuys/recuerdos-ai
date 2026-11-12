@@ -162,7 +162,12 @@ unrecallable memory.
 
 ## Reading
 
-### `search(query, *, limit, categories, tags, since, as_of, include_superseded) -> list[SearchHit]`
+### `search(query, *, limit, categories, tags, since, as_of, include_superseded, kinds, topics, targets, projects, project, scope) -> list[SearchHit]`
+
+`kinds`, `topics`, `targets` and `projects` filter by structure (each OR-ed).
+`project` is the project the caller works in: its memories rank with the user's
+own, and other projects' count half unless the query names them. `scope="all"`
+ranks every project alike. Each hit carries `relevance`.
 
 Hybrid recall — semantic, keyword, and a graph-hop leg fused by reciprocal
 rank.

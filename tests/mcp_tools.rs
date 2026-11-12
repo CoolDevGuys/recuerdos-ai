@@ -311,8 +311,8 @@ async fn save_then_recall_round_trips_through_the_protocol() {
 
     assert!(recalled.contains("barrel files"), "{recalled}");
     assert!(
-        recalled.starts_with("1. [preference.coding]"),
-        "results should be numbered and category-first: {recalled}"
+        recalled.starts_with("1. [preference · coding · me]"),
+        "results should be numbered and scope-first: {recalled}"
     );
 }
 
@@ -809,4 +809,48 @@ async fn project_merge_folds_one_project_into_another_and_refusals_are_explained
     );
     let listed = quill.call("project_list", json!({})).await;
     assert!(listed.contains("quill — 2 memories"), "{listed}");
+}
+
+/// Recall lines name what a memory is and who it is for, and the shim's
+/// folder is the project recall ranks with the user's own (plan §9).
+#[tokio::test]
+async fn recall_names_each_memorys_scope() {
+    let client = McpClient::connect_in_repository("git@github.com:acme/quill.git").await;
+    client
+        .call(
+            "memory_save",
+            json!({"content": "Use cases are named by intent, with no Service suffix",
+                   "kind": "convention", "topic": "coding",
+                   "applies_to": {"target": "project", "new_project": true},
+                   "origin": "user_said"}),
+        )
+        .await;
+    client
+        .call(
+            "memory_save",
+            json!({"content": "The user prefers Vitest over Jest for unit tests",
+                   "kind": "preference", "topic": "coding",
+                   "applies_to": {"target": "me"}, "origin": "user_said"}),
+        )
+        .await;
+
+    let recalled = client
+        .call("memory_recall", json!({"query": "how are use cases named"}))
+        .await;
+    assert!(
+        recalled.contains("1. [convention · coding · quill] Use cases are named by intent"),
+        "{recalled}"
+    );
+
+    let mine = client
+        .call(
+            "memory_recall",
+            json!({"query": "unit tests", "targets": ["me"]}),
+        )
+        .await;
+    assert!(
+        mine.contains("[preference · coding · me] The user prefers Vitest"),
+        "{mine}"
+    );
+    assert!(!mine.contains("Use cases"), "{mine}");
 }

@@ -33,17 +33,19 @@ use super::memory_toolbox::{
 };
 
 pub const PROFILE_DESCRIPTION: &str = "\
-A short digest of who this user is: their standing preferences, \
-decisions, and durable project facts, grouped by category.
+A short digest of who this user is: their own preferences, rules and \
+goals, then the current project's conventions and rules, then the general \
+rules and procedures of their world. Other projects are left out.
 
 Read this at the start of a session, before doing work. It is the \
 context the user should not have to repeat.";
 
 /// Renders recall results for an agent's context window.
 ///
-/// Numbered, one line each, category first. The category is the strongest
-/// signal for how much weight to give a line — a `preference.coding` is an
-/// instruction, a `fact.project` is background.
+/// Numbered, one line each, scope first: `[preference · coding · me]` is
+/// the user's own instruction everywhere, `[convention · coding · quill]`
+/// one project's, and the strongest signal for how much weight to give a
+/// line. A daemon that predates structured memories shows the category.
 pub fn render_recall(memories: &[ToolMemory]) -> String {
     if memories.is_empty() {
         // Careful not to claim nothing was *stored*: results below the
@@ -61,7 +63,7 @@ stored."
         output.push_str(&format!(
             "{}. [{}] {}",
             index + 1,
-            memory.category,
+            memory.label(),
             memory.content.replace('\n', " ")
         ));
 
@@ -230,7 +232,7 @@ pub fn render_distilled(memories: &[ToolMemory]) -> String {
     for memory in memories {
         output.push_str(&format!(
             "- [{}] {} (id {})\n",
-            memory.category,
+            memory.label(),
             memory.content.replace('\n', " "),
             memory.id
         ));
@@ -259,7 +261,7 @@ or a distinctive phrase — rather than deleting a near miss."
         output.push_str(&format!(
             "- {} — [{}] {}\n",
             memory.id,
-            memory.category,
+            memory.label(),
             memory.content.replace('\n', " ")
         ));
     }
@@ -327,6 +329,7 @@ mod tests {
             tags: vec!["typescript".to_string()],
             created_at: Utc.with_ymd_and_hms(2026, 6, 2, 12, 0, 0).unwrap(),
             relevance,
+            scope: None,
         }
     }
 

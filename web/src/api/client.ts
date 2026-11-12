@@ -183,7 +183,12 @@ export class HttpApiClient implements ApiClient {
   }
 
   async recall(query: string, limit: number): Promise<RecallHit[]> {
-    const body = await this.request("/v1/memories/search", { method: "POST", body: { query, limit } });
+    // `scope: "all"`: a person searching their own store wants every project's
+    // memories ranked alike, not demoted the way an agent working in one is.
+    const body = await this.request("/v1/memories/search", {
+      method: "POST",
+      body: { query, limit, scope: "all" },
+    });
     if (!isObject(body) || !Array.isArray(body.results)) throw malformed("recall result");
     return body.results.map(parseRecallHit);
   }

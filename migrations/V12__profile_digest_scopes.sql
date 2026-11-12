@@ -1,0 +1,12 @@
+-- V12__profile_digest_scopes.sql
+--
+-- The profile digest is cached per scope now (ai-specs/memory-structure-plan.md
+-- §9): `me`, `general`, and `project:<id>` for each project, so a profile read
+-- inside a project shows the user's own digest, that project's and the general
+-- one, and a save regenerates only the digest it changed.
+--
+-- The old per-category halves (`coding`, `personal`) are never read again. The
+-- table is a cache, so they go: each user's digests regenerate on their next
+-- memory change or nightly consolidation, and until then a read assembles the
+-- profile from the memories, as it does on a cold cache.
+DELETE FROM profile_digests WHERE domain IN ('coding', 'personal');

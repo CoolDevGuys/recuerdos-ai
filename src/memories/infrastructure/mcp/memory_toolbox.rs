@@ -45,6 +45,17 @@ pub struct ToolMemory {
     /// noise. Relevance is measured from the matches themselves, so a low
     /// one means "nothing here is about your question".
     pub relevance: Option<f32>,
+    /// What it is and who it is for, as one label: `preference · coding ·
+    /// me`, `convention · coding · quill` (memory-structure-plan.md §9).
+    /// `None` from a daemon that predates structured memories.
+    pub scope: Option<String>,
+}
+
+impl ToolMemory {
+    /// What a rendered line leads with: the scope label, else the category.
+    pub fn label(&self) -> &str {
+        self.scope.as_deref().unwrap_or(&self.category)
+    }
 }
 
 /// A project as the project tools show it (plan §6).
@@ -200,10 +211,21 @@ pub struct BatchSaveOutcome {
     pub understanding: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RecallRequest {
     pub query: String,
     pub categories: Vec<String>,
+    /// Structure filters, each OR-ed within itself.
+    pub kinds: Vec<String>,
+    pub topics: Vec<String>,
+    pub targets: Vec<String>,
+    pub projects: Vec<String>,
+    /// The project the caller works in, when the transport has no folder to
+    /// detect it from (HTTP MCP). The stdio shim sends its folder's instead.
+    pub project: Option<String>,
+    /// Rank every scope alike rather than demoting other projects: what a
+    /// search for a memory to delete wants, since the user described it.
+    pub all_scopes: bool,
     /// Signed to match the domain: a caller passing `-5` should meet the
     /// explanation of the allowed range, not a deserializer's.
     pub limit: Option<i64>,

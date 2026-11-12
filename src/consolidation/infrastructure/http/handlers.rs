@@ -4,10 +4,12 @@ use super::dto::{DistillRequest, DistillResponse};
 use crate::bootstrap::state::AppState;
 use crate::consolidation::domain::distillation::SessionTranscript;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
+use crate::memories::application::structured_memory_saver::DetectedProject;
+use crate::shared::blocking::blocking;
 use crate::shared::error::Result;
 use crate::understanding::domain::ingest_job::ProjectHint;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 
@@ -34,6 +36,12 @@ pub async fn distill_session(
     Ok(Json(DistillResponse::from(&distillation)))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct ProfileParams {
+    #[serde(default)]
+    project: Option<String>,
+}
+
 /// `GET /v1/profile` — the same briefing the MCP `memory://profile`
 /// resource returns.
 ///
@@ -46,11 +54,31 @@ pub async fn distill_session(
 pub async fn read_profile(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
+    request_headers: HeaderMap,
+    Query(params): Query<ProfileParams>,
 ) -> Result<impl IntoResponse> {
+    // The project the caller works in (memory-structure-plan.md §9): named
+    // in `?project=`, or the folder the local MCP server sends. Its
+    // memories follow the user's own; other projects' are left out. A
+    // folder no project is known by simply has none.
+    let detected = crate::shared::project_headers::project_from(&request_headers)
+        .map(|(name, alias)| DetectedProject { name, alias });
+    let memories = state.memories.clone();
+    let lookup = context.clone();
+    let project = blocking(move || {
+        let curator = &memories.project_curator;
+        match (params.project, detected) {
+            (Some(named), _) => curator.find(&lookup, &named).map(Some),
+            (None, Some(detected)) => curator.locate(&lookup, &detected),
+            (None, None) => Ok(None),
+        }
+    })
+    .await?;
+
     let profile = state
         .consolidation
         .profile_digest_writer
-        .execute(&context)
+        .execute_in(&context, project.as_ref())
         .await?;
 
     let mut headers = HeaderMap::new();

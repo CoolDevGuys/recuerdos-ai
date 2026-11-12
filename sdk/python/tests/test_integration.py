@@ -371,3 +371,45 @@ def test_a_project_is_renamed_and_merged(ra: Client, tag: str) -> None:
     with pytest.raises(RejectedError) as refused:
         ra.project(f"{tag}-nope")
     assert refused.value.code == "unknown_project"
+
+
+def test_search_filters_by_structure_and_ranks_by_project(ra: Client, tag: str) -> None:
+    ra.save_direct(
+        "Command handlers are named after the command they run",
+        kind="convention",
+        topic="coding",
+        applies_to={
+            "target": "project",
+            "project_name": f"{tag}-q",
+            "new_project": True,
+        },
+        origin="user_said",
+        tags=[tag],
+    )
+    ra.save_direct(
+        "The user prefers short handler names",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+
+    conventions = ra.search("handler names", kinds=["convention"], tags=[tag])
+    assert [hit.kind for hit in conventions] == ["convention"]
+
+    mine = ra.search("handler names", targets=["me"], tags=[tag])
+    assert [hit.content for hit in mine] == ["The user prefers short handler names"]
+
+    inside = ra.search(
+        "how are command handlers named",
+        project=f"{tag}-q",
+        tags=[tag],
+        min_relevance=0.0,
+    )
+    outside = ra.search("how are command handlers named", tags=[tag], min_relevance=0.0)
+    relevance = {
+        name: next(h.relevance for h in hits if h.kind == "convention")
+        for name, hits in (("inside", inside), ("outside", outside))
+    }
+    assert relevance["outside"] < relevance["inside"], relevance

@@ -6,7 +6,7 @@ not my standards. Is there a way to improve how memories are stored — a better
 classification — so that recall can tell them apart? I would like to define as much structure as
 possible when memories are saved, instead of relying on the harness to get it right.*
 
-Status: **S0–S3 implemented** (2026-11-12, branch `feat/memory-structure`); S4–S5 to do. The shape,
+Status: **S0–S4 implemented** (2026-11-12, branch `feat/memory-structure`); S5 to do. The shape,
 the rules and the examples in §3–§7 were settled with the owner in conversation on 2026-11-11/12
 (§1). §11 records how the last open questions were resolved; none remain. §12 records how each
 phase went.
@@ -516,4 +516,44 @@ and the legend and tooltips name the kind, so colour is never the only cue.
   `rename_of` (or `collides_with`) for clients.
 - **The web UI's Projects tab is S5**; the SDK got the four calls now, since every
   REST surface has had SDK parity.
+
+### S4 (2026-11-12)
+
+- **Demotion, not a filter**: `recall_ranker::demote_out_of_scope` multiplies another
+  project's score *and relevance* by `OTHER_PROJECT_WEIGHT` (0.5), after
+  `apply_relevance` and before the floor, then re-sorts with the relevance tiebreak so
+  undemoted memories keep their order. Halving relevance is what makes E16 and E18
+  hold: the agent-facing floor (0.25) drops a weak match from elsewhere, while a strong
+  one (E17's names the project anyway) still shows. Measured on the default embedder:
+  quill's conventions answer "what are my coding preferences?" at 0.39 / 0.35 unscoped
+  and 0.20 / 0.17 scoped; quill's React fact answers "my favourite frontend framework?"
+  at 0.36 / 0.18.
+- **Only agent-facing reads are scoped** (`RecallQuery::in_context`): REST search by
+  default, and so every MCP recall. Reconciliation, the conflict check, consolidation
+  and the eval's existing cases stay unscoped: they ask "what is related?", and a
+  demoted neighbour is still a neighbour. The web UI and `memory_forget` ask for
+  `scope: "all"`.
+- **"The query names the project"** is the project's current name matched as words
+  (`-`, `_`, `.` read as spaces). Former names do not count yet.
+- **The context is located, never learned**: `ProjectCurator::locate` resolves the
+  folder by remote, then by name unless that project has a different remote (S3's
+  collision rule), and records nothing. An unknown folder is "no project".
+- **The profile is three parts**: `ProfileScope` (me, the current project, general),
+  each listing its kinds in priority order (me: preference, rule, goal…; project:
+  convention, rule, decision…; general: rule, procedure, plan…). D14 is read as
+  ordering, not exclusion: general references and facts still appear after the rules
+  and procedures, since the migrated store is mostly general memories.
+- **Digests are keyed by scope** (`me`, `general`, `project:<id>`), replacing the
+  coding / personal halves; the word budget is split three ways. V12 deletes the old
+  rows.
+- **Expiry** needed nothing new: `valid_until` is `expires_at`, which recall already
+  excluded and the nightly maintainer already retired.
+- **The field set** is unaffected by construction: the frozen field store maps no
+  memory to a project (§8), so the demotion never fires on it; the main eval is
+  identical to its baseline.
+- **The scope eval** lives in its own file so the main baseline means what it meant.
+  E16's `forbid` does not discriminate there (the user's four coding memories fill the
+  top five either way); the integration test, with its control, is the check for E16.
+- **Left for S5**: the §9 suggestion of a `me` rule from three projects' identical
+  conventions, with the review queue.
 

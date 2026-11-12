@@ -38,7 +38,7 @@ use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::memories::domain::recall_ranker::{
-    RankedIds, RecallRanker, ScoredMemory, apply_expansion,
+    RankedIds, RecallRanker, ScoredMemory, apply_expansion, demote_out_of_scope,
 };
 use crate::memories::domain::reranker::{RerankCandidate, RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
@@ -468,6 +468,13 @@ impl MemoryRecaller {
         // "knob at zero, no change" — and the byte-identical eval baseline — a
         // code path rather than an arithmetic coincidence.
         self.ranker.apply_relevance(&mut ranked);
+
+        // Scope (memory-structure-plan.md §9): another project's memories rank
+        // below the user's own, the general ones and the current project's,
+        // unless the query names that project. Before the floor, so a weak
+        // match from elsewhere is dropped rather than shown at the bottom. A
+        // store with no project memories, or an unscoped read, is untouched.
+        demote_out_of_scope(&mut ranked, query);
 
         // Before the truncate, so a caller asking for five results gets
         // five relevant ones rather than three once the floor has eaten two
@@ -1137,6 +1144,29 @@ fn matches(memory: &Memory, query: &RecallQuery, now: chrono::DateTime<chrono::U
         return false;
     }
     if !query.categories().is_empty() && !query.categories().contains(memory.category()) {
+        return false;
+    }
+    let structure = memory.structure();
+    if !query.kinds().is_empty() && !query.kinds().contains(&structure.kind()) {
+        return false;
+    }
+    if !query.topics().is_empty()
+        && !query
+            .topics()
+            .iter()
+            .any(|topic| topic == structure.topic().as_str())
+    {
+        return false;
+    }
+    if !query.targets().is_empty() && !query.targets().contains(&structure.applies_to().target()) {
+        return false;
+    }
+    if !query.projects().is_empty()
+        && !structure
+            .applies_to()
+            .project()
+            .is_some_and(|project| query.projects().contains(&project.id))
+    {
         return false;
     }
     // Subcategories are OR-ed: matching any one is enough.

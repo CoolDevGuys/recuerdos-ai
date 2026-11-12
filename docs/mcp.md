@@ -248,14 +248,21 @@ graph — over this user's memories.
 ```
 
 ```
-1. [preference.coding] User forbids barrel files and index.ts re-exports (saved 2026-06-02, score 0.03, typescript)
+1. [preference · coding · me] User forbids barrel files and index.ts re-exports (saved 2026-06-02, relevance 0.71, typescript)
+2. [convention · coding · quill] Use cases are named by intent, no Service suffix (saved 2026-09-14, relevance 0.48)
 ```
 
 Results are numbered plain text, not JSON: tool output is spent from the
 agent's context window, and JSON would spend a chunk of it on
-punctuation. The category comes first because it is the strongest signal
-for how much weight a line deserves — a `preference.coding` is an
-instruction, a `fact.project` is background.
+punctuation. The scope comes first because it is the strongest signal
+for how much weight a line deserves — your `preference` is an instruction
+everywhere, a project's `convention` only in that project.
+
+Optional filters: `kinds`, `topics`, `targets` (`me`, `project`, `general`) and
+`projects`, each a list. The stdio shim's folder is the project the recall ranks with
+your own memories; other projects' rank lower unless the question names them. Over
+HTTP MCP, which has no folder, pass `project`. See
+[memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
 
 The graph leg is what lets a question reach a memory it shares no words
 with: "who owns the billing service's data?" surfaces the memory naming
@@ -346,28 +353,36 @@ one yet still needs to know you forbid barrel files.
 ```markdown
 # Memory profile: alex (updated 2026-07-20)
 
-## How they work
+## About you (everywhere)
 
 - Uses pnpm; never npm or yarn
 - No barrel files or index.ts re-exports
+
+## This project: quill
+
+- Use cases are named by intent, no Service suffix
 - SQLite over Postgres, chosen for installer size
 
-## About them
+## Your world (not tied to a project)
 
-- Vegetarian
+- NAS backups are in /mnt/tank/backups
 ```
+
+The project part is the one the stdio shim's folder is in; read without one (over
+HTTP MCP, or `GET /v1/profile` with no `?project=`), the profile has no project part,
+and another project's memories are never in it.
 
 With a provider configured, this is **written by a model** from the
 user's memories and cached until those memories change — so it
 compresses ("uses pnpm, Vitest and Biome" in one line) rather than
-listing forty preferences and truncating at eight. Regeneration happens
-per half: saving a coding preference does not rewrite the personal
-section.
+listing forty preferences and truncating at eight. There is one cached
+digest per scope — yours, the general one, one per project — so saving a
+project convention regenerates only that project's.
 
 Without a provider it is **assembled** instead: the highest-value
-memories per category, grouped under category headings. Same route, same
-media type, same shape — a client cannot tell which it got, and does not
-need to.
+memories per kind within each part, preferences, rules and conventions
+first. Same route, same media type — a client cannot tell which it got,
+and does not need to.
 
 Capped at roughly 1500 tokens either way. Whatever it returns is rent
 paid on every session forever, which is why it is bounded rather than

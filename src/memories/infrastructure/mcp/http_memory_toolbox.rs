@@ -279,7 +279,17 @@ impl MemoryToolbox for HttpMemoryToolbox {
         let mut body = json!({
             "query": request.query,
             "categories": request.categories,
+            "kinds": request.kinds,
+            "topics": request.topics,
+            "targets": request.targets,
+            "projects": request.projects,
         });
+        if let Some(project) = request.project {
+            body["project"] = json!(project);
+        }
+        if request.all_scopes {
+            body["scope"] = json!("all");
+        }
         if let Some(limit) = request.limit {
             body["limit"] = json!(limit);
         }
@@ -345,7 +355,8 @@ impl MemoryToolbox for HttpMemoryToolbox {
             // Stricter than a recall, because the caller is about to delete
             // one of these. See `RecallRequest::FORGET_MIN_RELEVANCE`.
             min_relevance: Some(RecallRequest::FORGET_MIN_RELEVANCE),
-            as_of: None,
+            all_scopes: true,
+            ..RecallRequest::default()
         })
         .await
     }
@@ -447,7 +458,20 @@ fn parse_memory(value: &Value) -> Result<ToolMemory> {
             .unwrap_or_default(),
         created_at: parse_timestamp(&field("created_at")?)?,
         relevance: value["relevance"].as_f64().map(|value| value as f32),
+        scope: scope_label(value),
     })
+}
+
+/// `preference · coding · me`, `convention · coding · quill`.
+fn scope_label(value: &Value) -> Option<String> {
+    let kind = value["kind"].as_str()?;
+    let topic = value["topic"].as_str()?;
+    let applies_to = &value["applies_to"];
+    let scope = match applies_to["target"].as_str()? {
+        "project" => applies_to["project_name"].as_str().unwrap_or("project"),
+        target => target,
+    };
+    Some(format!("{kind} · {topic} · {scope}"))
 }
 
 fn parse_timestamp(raw: &str) -> Result<DateTime<Utc>> {

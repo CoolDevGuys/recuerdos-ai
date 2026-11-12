@@ -166,9 +166,25 @@ pub struct SaveBatchParams {
 pub struct RecallParams {
     /// The question you actually have.
     pub query: String,
-    /// Optional category filter.
+    /// Optional category filter (the older labels; prefer the filters below).
     #[serde(default)]
     pub categories: Vec<String>,
+    /// Only these kinds, e.g. ["preference", "rule"] for "how do I like things done".
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Only these topics, e.g. ["coding"].
+    #[serde(default)]
+    pub topics: Vec<String>,
+    /// Only memories that apply to these: "me", "project", "general".
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Only these projects' memories, by name.
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// The project you are working in, when the server cannot tell from your folder
+    /// (over HTTP). Its memories rank with the user's own; other projects' rank lower
+    /// unless the question names them.
+    pub project: Option<String>,
     /// How many to return, at least 1. Defaults to the server's configured limit.
     pub limit: Option<i64>,
     /// Optional point in time (RFC 3339, e.g. "2026-06-01T00:00:00Z") to
@@ -474,12 +490,18 @@ impl MemoryMcpServer {
             .recall(RecallRequest {
                 query: params.query,
                 categories: params.categories,
+                kinds: params.kinds,
+                topics: params.topics,
+                targets: params.targets,
+                projects: params.projects,
+                project: params.project,
                 limit: params.limit,
                 // The server's floor: a caller with an opinion about it has
                 // the REST surface, and every MCP caller is an agent, which
                 // is exactly the audience the floor is tuned for.
                 min_relevance: None,
                 as_of,
+                all_scopes: false,
             })
             .await
             .map_err(to_mcp_error)?;

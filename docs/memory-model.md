@@ -167,6 +167,39 @@ A memory that applies to a project stores the project's id, not its name.
   behind as aliases of the one that stays. Both are `project_rename` and
   `project_merge` over MCP, and `/v1/projects` over REST; ask the user first.
 
+## Recall and the profile know where you are
+
+A request from inside a project carries it: the local MCP server sends the folder's
+project with every call, and REST and HTTP MCP take it as `project` (or the
+`X-Recuerdos-Project` headers).
+
+- **Recall ranks your own memories, the general ones and the current project's as it
+  always did. Another project's count half**, in rank and in relevance, so a weak
+  match from elsewhere falls under the agent-facing floor and a strong one still
+  shows, lower down. Asked inside `fern`, "what are my coding preferences?" answers
+  with yours, then fern's conventions, and none of quill's (E16).
+- **A question that names a project is about it**: "how did quill handle command
+  handlers?" asked inside `fern` finds quill's convention first (E17). The name is
+  matched as words, so "quill's" and "Quill" count.
+- **Outside any project** (a chat assistant, a script), every project's memories
+  count half. "What's my favourite frontend framework?" is not answered by one
+  project's React stack (E18); with nothing of yours stored, the answer is empty.
+- **Filters**: `kinds`, `topics`, `targets` and `projects` narrow a recall, each
+  OR-ed within itself (`kinds: ["rule", "convention"]`). `categories` still works.
+  A filtered recall drops the default relevance floor, as a category filter always did.
+- **`scope: "all"`** ranks every project alike, for a person searching their own
+  store; the web UI sends it. Forget candidates are found this way too.
+- **Recall lines name the scope**: `1. [convention · coding · quill] Use cases are named
+  by intent`, `[preference · coding · me]`.
+- **The profile** (`memory://profile`, `GET /v1/profile`) is three parts, within its
+  ~1500-token budget: **about you** (your preferences, rules and active goals first),
+  **this project** (its conventions and rules first) when there is one, and **your
+  world** (general rules and procedures first). Other projects' memories are not in
+  it. With a model, each part is its own cached digest — yours, the general one, and
+  one per project — so a new project convention regenerates only that project's.
+- **Expired memories** (`valid_until` passed) leave recall, and the nightly run retires
+  them; a closed goal leaves recall and the profile.
+
 ## Contradictions: amend, replace, or keep both
 
 Before a memory is stored, it is compared with the nearest stored memories **for

@@ -25,7 +25,9 @@ use crate::memories::application::memory_bulk_editor::BulkEdit;
 use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::application::memory_mapper::{MapDetail, MapQuery};
 use crate::memories::application::structured_memory_saver::{DetectedProject, SaveResult};
+use crate::memories::domain::applies_to::Target;
 use crate::memories::domain::category::Category;
+use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::blocking::blocking;
@@ -111,39 +113,29 @@ pub async fn save_memory(
 pub async fn search_memories(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
+    headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>> {
     let memories = state.memories.clone();
 
-    let categories = if request.categories.is_empty() {
-        Vec::new()
-    } else {
-        let names = request.categories.clone();
-        let lookup = memories.clone();
-        let filter_context = context.clone();
-        blocking(move || {
-            let custom = lookup.catalog.custom_ids(&filter_context)?;
-            names
-                .iter()
-                .map(|raw| Category::parse_with_extras(raw, &custom))
-                .collect::<Result<Vec<_>>>()
-        })
-        .await?
-    };
-
     // The default floor exists for a caller who can only describe what they
     // want in prose: without it, a weak similarity and a strong one look
     // identical and unrelated memories arrive dressed as matches. A request
-    // that names a category, subcategory or tag has already said what it wants
-    // in the store's own vocabulary, so its prose is a preference *inside*
-    // that slice rather than the definition of it — holding the floor there
-    // would turn "what decisions have I stored?" into an empty answer merely
-    // because the wording was a poor vector match.
+    // that names a category, subcategory, tag or any structure filter has
+    // already said what it wants in the store's own vocabulary, so its prose
+    // is a preference *inside* that slice rather than the definition of it —
+    // holding the floor there would turn "what decisions have I stored?"
+    // into an empty answer merely because the wording was a poor vector
+    // match.
     //
     // An explicit number is never second-guessed, filtered or not.
     let structurally_filtered = !request.categories.is_empty()
         || !request.subcategories.is_empty()
-        || !request.tags.is_empty();
+        || !request.tags.is_empty()
+        || !request.kinds.is_empty()
+        || !request.topics.is_empty()
+        || !request.targets.is_empty()
+        || !request.projects.is_empty();
     let min_relevance = match request.min_relevance {
         Some(explicit) => explicit,
         None if structurally_filtered => 0.0,
@@ -151,19 +143,73 @@ pub async fn search_memories(
     }
     .clamp(0.0, 1.0);
 
-    let mut query = RecallQuery::new(
-        &request.query,
-        request.limit.unwrap_or(memories.default_limit as i64),
-    )?
-    .with_categories(categories)
-    .with_subcategories(request.subcategories)
-    .with_tags(request.tags)
-    .with_since(request.since)
-    .with_as_of(request.as_of)
-    .with_min_relevance(min_relevance);
-    if request.include_superseded {
-        query = query.including_superseded();
-    }
+    let detected = detected_project(&headers);
+    let lookup = memories.clone();
+    let filter_context = context.clone();
+    let query = blocking(move || {
+        let categories = if request.categories.is_empty() {
+            Vec::new()
+        } else {
+            let custom = lookup.catalog.custom_ids(&filter_context)?;
+            request
+                .categories
+                .iter()
+                .map(|raw| Category::parse_with_extras(raw, &custom))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let curator = &lookup.project_curator;
+        let kinds = request
+            .kinds
+            .iter()
+            .map(|raw| raw.parse::<Kind>())
+            .collect::<Result<Vec<_>>>()?;
+        let targets = request
+            .targets
+            .iter()
+            .map(|raw| raw.parse::<Target>())
+            .collect::<Result<Vec<_>>>()?;
+        let projects = request
+            .projects
+            .iter()
+            .map(|raw| curator.find(&filter_context, raw).map(|project| project.id))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut query = RecallQuery::new(
+            &request.query,
+            request.limit.unwrap_or(lookup.default_limit as i64),
+        )?
+        .with_categories(categories)
+        .with_subcategories(request.subcategories)
+        .with_tags(request.tags)
+        .with_since(request.since)
+        .with_as_of(request.as_of)
+        .with_min_relevance(min_relevance)
+        .with_kinds(kinds)
+        .with_topics(request.topics)
+        .with_targets(targets)
+        .with_projects(projects);
+        if request.include_superseded {
+            query = query.including_superseded();
+        }
+        match request.scope.as_deref().map(str::trim) {
+            None | Some("context") => {
+                let current = match (&request.project, &detected) {
+                    (Some(named), _) => Some(curator.find(&filter_context, named)?),
+                    (None, Some(detected)) => curator.locate(&filter_context, detected)?,
+                    (None, None) => None,
+                };
+                query = query.in_context(current);
+            }
+            Some("all") => {}
+            Some(other) => {
+                return Err(RaError::Validation(format!(
+                    "unknown scope {other:?}: \"context\" (the default) or \"all\""
+                )));
+            }
+        }
+        Ok(query)
+    })
+    .await?;
 
     let started = Instant::now();
     // Traced, so a second stage that was configured and did not run is

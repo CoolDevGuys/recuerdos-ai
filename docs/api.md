@@ -450,6 +450,17 @@ both halves (`queued_ms`, `inference_ms`) for every leg like that.
 | `since` | RFC 3339; excludes memories created before it |
 | `as_of` | RFC 3339. Reads the **graph hop** as of that instant in valid time — "who owned this before the reorg?" Omitted means now. Only the graph leg is affected; the vector and keyword legs ignore it |
 | `include_superseded` | Default `false` |
+| `kinds` | OR-ed: `preference`, `rule`, `convention`, … Unknown → `400` |
+| `topics` | OR-ed topic ids: `coding`, or one of yours |
+| `targets` | OR-ed: `me`, `project`, `general` |
+| `projects` | OR-ed project names, aliases or ids. Unknown → `422 unknown_project` |
+| `project` | The project the caller works in, when not sent as the `X-Recuerdos-Project` headers. Its memories rank with the user's own |
+| `scope` | `context` (default): another project's memories count half in rank and relevance, unless the query names that project. `all`: every scope alike |
+
+Any structure filter, like a category or tag filter, lifts the default relevance
+floor when `min_relevance` is not given. Each hit carries its `kind`, `topic` and
+`applies_to`; its `relevance` is the one the floor compared, demotion included.
+See [memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
 
 `as_of` is *valid* time — when a relation was true in the world — which is
 a different clock from `since` and `created_at`, both of which are
@@ -758,8 +769,10 @@ than storing nothing.
 ### `GET /v1/profile`
 
 Requires `read`. Returns the markdown digest described in
-[mcp.md](mcp.md#resource-memoryprofile) — the user's standing
-preferences, decisions and durable facts, capped at roughly 1500 tokens.
+[mcp.md](mcp.md#resource-memoryprofile) — about the user, then the current
+project, then their general world — capped at roughly 1500 tokens. The
+project is `?project=<name>`, or the `X-Recuerdos-Project` headers; without
+one, no project's memories are in it.
 
 With a provider configured this is written by a model and cached until
 the memories under it change; without one it is assembled from the

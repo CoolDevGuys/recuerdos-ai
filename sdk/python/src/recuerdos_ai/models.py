@@ -135,6 +135,10 @@ class MatchDetail(_Model):
 class SearchHit(Memory):
     """A memory, plus why it came back."""
 
+    #: How well it answers the query, ``0.0``–``1.0``: the number to read. A
+    #: memory of a project the caller is not in counts half, unless the query
+    #: names that project.
+    relevance: float = 0.0
     score: float = 0.0
     matched: MatchDetail = Field(default_factory=MatchDetail)
 

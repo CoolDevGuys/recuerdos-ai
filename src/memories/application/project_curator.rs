@@ -21,7 +21,7 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::applies_to::ProjectRef;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::project_registry::{
-    ProjectRecord, ProjectRegistry, normalize_project_name,
+    ProjectRecord, ProjectRegistry, is_remote, normalize_project_name,
 };
 use crate::shared::clock::Clock;
 use crate::shared::error::{RaError, Result};
@@ -163,6 +163,40 @@ impl ProjectCurator {
                 }
             ),
         ))
+    }
+
+    /// The project a request's folder is, for reading: by its remote, then
+    /// by its name unless that project is another repository's (it has a
+    /// different remote). Learns nothing and creates nothing, so a recall
+    /// or a profile read from an unknown folder simply has no project.
+    pub fn locate(
+        &self,
+        context: &UserContext,
+        detected: &DetectedProject,
+    ) -> Result<Option<ProjectRef>> {
+        if let Some(alias) = &detected.alias
+            && let Some(project) = self.projects.resolve(context, alias)?
+        {
+            return Ok(Some(project));
+        }
+        let Ok(name) = normalize_project_name(&detected.name) else {
+            return Ok(None);
+        };
+        let Some(project) = self.projects.resolve(context, &name)? else {
+            return Ok(None);
+        };
+        if detected.alias.is_some() {
+            let has_remote = self
+                .projects
+                .list(context)?
+                .into_iter()
+                .find(|record| record.project.id == project.id)
+                .is_some_and(|record| record.aliases.iter().any(|alias| is_remote(alias)));
+            if has_remote {
+                return Ok(None);
+            }
+        }
+        Ok(Some(project))
     }
 
     pub fn view(&self, context: &UserContext, project: &ProjectRef) -> Result<ProjectView> {
@@ -527,6 +561,37 @@ mod tests {
             matches!(&error, RaError::Rejected { code, message, .. }
                 if code == "unknown_project" && message.contains("known: quill")),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_folder_is_located_by_remote_then_by_name_and_nothing_is_learned() {
+        let h = harness();
+        let quill = h.project("quill", &["github.com/acme/quill"]);
+        let folder = |name: &str, remote: Option<&str>| DetectedProject {
+            name: name.to_string(),
+            alias: remote.map(str::to_string),
+        };
+        let alex = &h.fixture.alex;
+
+        let found = |detected| h.curator.locate(alex, &detected).unwrap().map(|p| p.id);
+        assert_eq!(
+            found(folder("anything", Some("github.com/acme/quill"))),
+            Some(quill.id)
+        );
+        assert_eq!(found(folder("quill", None)), Some(quill.id));
+        assert_eq!(
+            found(folder("quill", Some("github.com/me/quill"))),
+            None,
+            "another repository with the same name"
+        );
+        assert_eq!(found(folder("fern", Some("github.com/acme/fern"))), None);
+        assert!(
+            h.registry
+                .resolve(alex, "github.com/me/quill")
+                .unwrap()
+                .is_none(),
+            "a read learns no alias"
         );
     }
 

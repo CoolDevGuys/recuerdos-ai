@@ -270,6 +270,25 @@ pub struct SearchRequest {
     pub as_of: Option<DateTime<Utc>>,
     #[serde(default)]
     pub include_superseded: bool,
+    /// Structure filters (ai-specs/memory-structure-plan.md §9), each OR-ed
+    /// within itself: kinds (`rule`), topics (`coding`), targets (`me`,
+    /// `project`, `general`) and projects (by name, alias or id).
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// The project the caller works in, when it is not sent as the
+    /// `X-Recuerdos-Project` headers. Its memories rank with the user's
+    /// own; other projects' are demoted.
+    pub project: Option<String>,
+    /// `context` (the default): demote other projects' memories, as an
+    /// agent wants. `all`: rank every scope alike, as a person browsing
+    /// their whole store does.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,14 +1,16 @@
 //! The cached, LLM-written profile — what it covers, and how it knows
 //! when it is out of date.
 //!
-//! # Why two domains rather than one document
+//! # Why one digest per scope rather than one document
 //!
 //! The digest is regenerated when the memories under it change. With one
-//! document, saving a single coding preference reprints the user's
-//! personal profile too — a model call and a paragraph of rewriting for
-//! a section nothing touched. Splitting it means each half is
-//! regenerated only when its own memories move, which is most of the
-//! saving.
+//! document, saving a single project convention reprints the user's whole
+//! profile — a model call and a page of rewriting for sections nothing
+//! touched. So there is one digest per scope (ai-specs/memory-structure-plan.md
+//! §9): the user's own memories, their general ones, and one per project.
+//! A profile read from inside a project is three of them side by side — yours,
+//! this project's, general — and a save regenerates only the one it changed.
+//! Another project's digest is never in it.
 //!
 //! # Why staleness is computed, not flagged
 //!
@@ -23,54 +25,38 @@
 //! longer matches, the digest is stale. A new write site cannot forget
 //! to participate, because it does not have to.
 
-use crate::memories::domain::category::Category;
+use crate::memories::domain::applies_to::AppliesTo;
 use crate::memories::domain::memory::Memory;
+use crate::shared::ids::ProjectId;
 use chrono::{DateTime, Utc};
 
-/// The halves of a profile.
-///
-/// Two, not eight. The split exists to avoid regenerating unrelated
-/// prose, and a category is only worth its own digest if it changes on a
-/// different rhythm from the rest — which is true of "how this person
-/// works" versus "who this person is", and not of finer cuts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One cached part of a profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Domain {
-    /// How they work: preferences, decisions, the project, what they
-    /// know, what they learned the hard way.
-    Coding,
-    /// Who they are: personal preferences and the people around them.
-    Personal,
+    /// Who the user is and how they like things done, everywhere.
+    Me,
+    /// One project's conventions, rules and facts.
+    Project(ProjectId),
+    /// The user's world outside any project.
+    General,
 }
-
-pub const DOMAINS: &[Domain] = &[Domain::Coding, Domain::Personal];
 
 impl Domain {
     /// The stored spelling, and the primary key alongside the user id.
-    pub fn as_str(&self) -> &'static str {
+    pub fn key(&self) -> String {
         match self {
-            Domain::Coding => "coding",
-            Domain::Personal => "personal",
+            Domain::Me => "me".to_string(),
+            Domain::General => "general".to_string(),
+            Domain::Project(id) => format!("project:{id}"),
         }
     }
 
-    /// Which domain a memory belongs to.
-    ///
-    /// Everything unrecognised — including categories added through
-    /// `[understanding.taxonomy].extra_categories` — lands in `Coding`.
-    /// That is the default rather than a third bucket because an
-    /// unclassified memory being slightly misfiled is a much smaller
-    /// problem than it being invisible in the profile entirely.
-    pub fn of(category: &Category) -> Domain {
-        match category {
-            Category::PreferencePersonal | Category::FactPerson => Domain::Personal,
-            _ => Domain::Coding,
-        }
-    }
-
-    pub fn heading(&self) -> &'static str {
-        match self {
-            Domain::Coding => "How they work",
-            Domain::Personal => "About them",
+    /// Which digest a memory belongs to.
+    pub fn of(memory: &Memory) -> Domain {
+        match memory.structure().applies_to() {
+            AppliesTo::Me => Domain::Me,
+            AppliesTo::Project(project) => Domain::Project(project.id),
+            AppliesTo::General => Domain::General,
         }
     }
 }
@@ -146,6 +132,7 @@ pub trait ProfileDigestStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memories::domain::category::Category;
     use crate::memories::domain::memory::{MemorySource, NewMemory};
     use crate::shared::ids::UserId;
     use chrono::Duration;
@@ -173,40 +160,35 @@ mod tests {
     }
 
     #[test]
-    fn personal_categories_go_to_the_personal_domain() {
-        assert_eq!(Domain::of(&Category::PreferencePersonal), Domain::Personal);
-        assert_eq!(Domain::of(&Category::FactPerson), Domain::Personal);
-    }
-
-    #[test]
-    fn working_categories_go_to_the_coding_domain() {
-        for category in [
-            Category::PreferenceCoding,
-            Category::Decision,
-            Category::FactProject,
-            Category::Skill,
-            Category::Experience,
-            Category::Reference,
-        ] {
-            assert_eq!(Domain::of(&category), Domain::Coding, "{category:?}");
-        }
-    }
-
-    #[test]
-    fn a_configured_extra_category_is_filed_rather_than_dropped() {
-        // Misfiled is recoverable; invisible is not.
+    fn a_memory_goes_to_the_digest_of_its_scope() {
+        // Legacy categories map to a scope (plan §8): a coding preference
+        // is the user's, a reference is general.
         assert_eq!(
-            Domain::of(&Category::Custom("fact.homelab".to_string())),
-            Domain::Coding
+            Domain::of(&memory(Category::PreferenceCoding, now())),
+            Domain::Me
+        );
+        assert_eq!(
+            Domain::of(&memory(Category::Reference, now())),
+            Domain::General
         );
     }
 
     #[test]
     fn every_domain_has_a_distinct_stored_name() {
         // They are half of a primary key.
-        let names: Vec<&str> = DOMAINS.iter().map(Domain::as_str).collect();
-        assert_eq!(names.len(), 2);
-        assert_ne!(names[0], names[1]);
+        let project = ProjectId::new();
+        let keys = [
+            Domain::Me.key(),
+            Domain::General.key(),
+            Domain::Project(project).key(),
+            Domain::Project(ProjectId::new()).key(),
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(Domain::Project(project).key(), format!("project:{project}"));
     }
 
     #[test]

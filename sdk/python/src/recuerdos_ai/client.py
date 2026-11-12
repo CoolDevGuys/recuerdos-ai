@@ -314,6 +314,12 @@ class Client:
         as_of: datetime | None = None,
         min_relevance: float | None = None,
         include_superseded: bool = False,
+        kinds: list[str] | None = None,
+        topics: list[str] | None = None,
+        targets: list[str] | None = None,
+        projects: list[str] | None = None,
+        project: str | None = None,
+        scope: str | None = None,
     ) -> list[SearchHit]:
         """Hybrid recall: semantic, keyword, and a graph hop, fused by
         reciprocal rank.
@@ -348,6 +354,17 @@ class Client:
                 a cost to being wrong supplies a higher one, and a caller
                 determined to see the near-misses passes ``0.0``.
             include_superseded: Include memories a later one replaced.
+            kinds: Only these kinds (``"preference"``, ``"rule"``, …). OR-ed.
+            topics: Only these topics (``"coding"``). OR-ed.
+            targets: Only memories for ``"me"``, ``"project"`` or
+                ``"general"``. OR-ed.
+            projects: Only these projects' memories, by name or alias.
+            project: The project the caller works in. Its memories rank with
+                the user's own; other projects' are demoted unless the query
+                names them. Without it, every project's memories are.
+            scope: ``"context"`` (the default) demotes other projects, as an
+                agent wants; ``"all"`` ranks every scope alike, as a person
+                browsing the whole store does.
         """
         return self.search_report(
             query,
@@ -358,6 +375,12 @@ class Client:
             as_of=as_of,
             min_relevance=min_relevance,
             include_superseded=include_superseded,
+            kinds=kinds,
+            topics=topics,
+            targets=targets,
+            projects=projects,
+            project=project,
+            scope=scope,
         ).hits
 
     def search_report(
@@ -371,6 +394,12 @@ class Client:
         as_of: datetime | None = None,
         min_relevance: float | None = None,
         include_superseded: bool = False,
+        kinds: list[str] | None = None,
+        topics: list[str] | None = None,
+        targets: list[str] | None = None,
+        projects: list[str] | None = None,
+        project: str | None = None,
+        scope: str | None = None,
     ) -> SearchReport:
         """[`search`][`Client.search`], plus what the response says above the results.
 
@@ -406,6 +435,18 @@ class Client:
             body["min_relevance"] = min_relevance
         if include_superseded:
             body["include_superseded"] = True
+        for field, values in (
+            ("kinds", kinds),
+            ("topics", topics),
+            ("targets", targets),
+            ("projects", projects),
+        ):
+            if values:
+                body[field] = values
+        if project is not None:
+            body["project"] = project
+        if scope is not None:
+            body["scope"] = scope
 
         payload = self._request("POST", "/v1/memories/search", json=body)
         if not isinstance(payload, dict):

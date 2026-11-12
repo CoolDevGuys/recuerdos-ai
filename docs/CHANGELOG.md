@@ -5,6 +5,38 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S4: recall and the profile know which project you are in
+
+Phase S4 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in
+[memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
+
+- **Scope-aware recall**: the caller's project (the stdio shim's folder, the
+  `X-Recuerdos-Project` headers, or `project` in the request) ranks with the user's own
+  and general memories; another project's memories count half, in rank and in
+  relevance, unless the query names that project. Outside any project every project's
+  memories count half. E16–E18 pass end to end on the real embedder, with a control
+  test showing that without the demotion quill's memories would answer both "my coding
+  preferences" (relevance 0.39) and "my favourite frontend framework" (0.36).
+- **`scope: "all"`** on `POST /v1/memories/search` ranks every scope alike; the web UI
+  sends it, and `memory_forget` finds its candidates that way.
+- **Filters** on search, `memory_recall` and the SDK: `kinds`, `topics`, `targets`,
+  `projects`. `categories` still works.
+- **Recall lines name the scope**: `[convention · coding · quill]`,
+  `[preference · coding · me]`.
+- **The profile is per project**: about you, then the current project, then your
+  general world; other projects are left out. `GET /v1/profile?project=` or the
+  headers pick the project. With a model there is one cached digest per scope (`me`,
+  `general`, one per project), so a project convention regenerates only that
+  project's. V12 drops the old `coding` / `personal` digest rows; each user's profile is
+  assembled until their next refresh.
+- **Eval**: `eval/scope.toml` (17 memories, 12 cases; `just eval-scope`). Cases can
+  seed a structure, set the agent's `context` and `forbid` answers. On it: recall@5
+  100%, p@1 90.9%, MRR 93.9% (81.8% and 89.4% with the demotion off, which also fails
+  E18). The main set is unchanged against its baseline (0.0 on every gated number).
+- Python SDK: `search` takes the filters, `project` and `scope`; `SearchHit.relevance`
+  is declared.
+
 ### Structured memories, phase S3: projects can be listed, renamed and merged
 
 Phase S3 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
