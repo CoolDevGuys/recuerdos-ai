@@ -5,55 +5,135 @@
 //! are where that promise is written down.
 
 use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
+use crate::memories::application::structured_memory_saver::{
+    AppliesToInput, DetectedProject, SaveNote, SavedMemory, StructuredSave,
+};
 use crate::memories::domain::applies_to::AppliesTo;
-use crate::memories::domain::category::Category;
-use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
+use crate::memories::domain::memory::{Memory, MemorySource};
 use crate::memories::domain::recall_ranker::ScoredMemory;
-use crate::shared::error::Result;
+use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-fn default_confidence() -> f32 {
-    1.0
-}
-
+/// `POST /v1/memories:direct`: a memory and its structure
+/// (ai-specs/memory-structure-plan.md §3.1). `kind`, `topic` and `origin` are
+/// required; the rules in `StructuredMemorySaver` decide the rest.
 #[derive(Debug, Deserialize)]
 pub struct SaveMemoryRequest {
     pub content: String,
-    /// Defaults to `fact.project` when a client has no opinion. Phase 4's
-    /// pipeline is what makes this a real classification; a verbatim save
-    /// should not be forced to guess.
-    pub category: Option<String>,
-    pub subcategory: Option<String>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<AppliesToRequest>,
+    pub origin: Option<String>,
+    pub subtopic: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default = "default_confidence")]
-    pub confidence: f32,
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Optional while categories still drive recall filters and the map;
+    /// derived from kind and topic when absent.
+    pub category: Option<String>,
     pub client: Option<String>,
     pub session_id: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
+    // Fields of the old shape, refused by name so a client learns the new
+    // one instead of having its value silently dropped.
+    subcategory: Option<serde_json::Value>,
+    confidence: Option<serde_json::Value>,
+    expires_at: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppliesToRequest {
+    pub target: Option<String>,
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub new_project: bool,
 }
 
 impl SaveMemoryRequest {
-    pub fn into_new_memory(self, extra_categories: &[String]) -> Result<NewMemory> {
-        let category = match self.category.as_deref() {
-            Some(raw) => Category::parse_with_extras(raw, extra_categories)?,
-            None => Category::FactProject,
-        };
-
-        Ok(NewMemory {
+    pub fn into_structured(self, detected: Option<DetectedProject>) -> Result<StructuredSave> {
+        let retired = [
+            (
+                self.subcategory.is_some(),
+                "subcategory",
+                "it is called subtopic now",
+            ),
+            (
+                self.confidence.is_some(),
+                "confidence",
+                "it is derived from origin now",
+            ),
+            (
+                self.expires_at.is_some(),
+                "expires_at",
+                "it is called valid_until now",
+            ),
+        ];
+        if let Some((_, field, why)) = retired.iter().find(|(present, _, _)| *present) {
+            return Err(RaError::Rejected {
+                code: "invalid_value".to_string(),
+                message: format!("{field} is no longer accepted: {why}."),
+            });
+        }
+        if self.kind.is_none() && self.topic.is_none() && self.origin.is_none() {
+            return Err(RaError::Rejected {
+                code: "missing_field".to_string(),
+                message: "This is the old save shape. A memory now needs kind, topic, \
+                          applies_to and origin; a category alone is not enough. See \
+                          docs/memory-model.md."
+                    .to_string(),
+            });
+        }
+        Ok(StructuredSave {
             content: self.content,
-            category,
-            subcategory: self.subcategory,
+            kind: self.kind,
+            topic: self.topic,
+            applies_to: self.applies_to.map(|applies_to| AppliesToInput {
+                target: applies_to.target,
+                project_name: applies_to.project_name,
+                new_project: applies_to.new_project,
+            }),
+            origin: self.origin,
+            subtopic: self.subtopic,
             tags: self.tags,
-            entities: Vec::new(),
-            confidence: self.confidence,
+            valid_until: self.valid_until,
+            category: self.category,
             source: MemorySource {
                 client: self.client,
                 session_id: self.session_id,
             },
-            expires_at: self.expires_at,
+            detected_project: detected,
         })
+    }
+}
+
+/// A saved memory, plus what to tell the user about how it was filed.
+#[derive(Debug, Serialize)]
+pub struct SavedMemoryResponse {
+    #[serde(flatten)]
+    pub memory: MemoryResponse,
+    /// The sentence to repeat to the user: "Saved as your personal coding
+    /// preference (applies to you everywhere)."
+    pub message: String,
+    /// Machine-readable notes: `applies_to_defaulted`, `filed_from_document`,
+    /// `project_created`.
+    pub notes: Vec<&'static str>,
+}
+
+impl From<&SavedMemory> for SavedMemoryResponse {
+    fn from(saved: &SavedMemory) -> Self {
+        Self {
+            memory: MemoryResponse::from(&saved.memory),
+            message: saved.message(),
+            notes: saved
+                .notes
+                .iter()
+                .map(|note| match note {
+                    SaveNote::AppliesToDefaulted => "applies_to_defaulted",
+                    SaveNote::FiledFromDocument => "filed_from_document",
+                    SaveNote::ProjectCreated(_) => "project_created",
+                })
+                .collect(),
+        }
     }
 }
 
@@ -508,47 +588,63 @@ mod serde_with_double_option {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memories::domain::category::Category;
+    use crate::memories::domain::memory::NewMemory;
 
-    #[test]
-    fn a_save_request_defaults_its_optional_fields() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"User prefers pnpm"}"#).unwrap();
+    fn structured(body: &str) -> Result<StructuredSave> {
+        serde_json::from_str::<SaveMemoryRequest>(body)
+            .unwrap()
+            .into_structured(None)
+    }
 
-        assert_eq!(request.confidence, 1.0);
-        assert!(request.tags.is_empty());
-
-        let new = request.into_new_memory(&[]).unwrap();
-        assert_eq!(new.category, Category::FactProject);
+    fn code(result: Result<StructuredSave>) -> String {
+        match result {
+            Err(RaError::Rejected { code, .. }) => code,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
     }
 
     #[test]
-    fn a_save_request_parses_its_category() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"preference.coding","tags":["ts"]}"#)
-                .unwrap();
+    fn a_save_request_carries_its_structure() {
+        let save = structured(
+            r#"{"content":"x","kind":"preference","topic":"coding","origin":"user_said",
+                "applies_to":{"target":"me"},"tags":["ts"],"subtopic":"testing"}"#,
+        )
+        .unwrap();
 
-        let new = request.into_new_memory(&[]).unwrap();
-        assert_eq!(new.category, Category::PreferenceCoding);
-        assert_eq!(new.tags, vec!["ts".to_string()]);
+        assert_eq!(save.kind.as_deref(), Some("preference"));
+        assert_eq!(save.applies_to.unwrap().target.as_deref(), Some("me"));
+        assert_eq!(save.subtopic.as_deref(), Some("testing"));
+        assert_eq!(save.tags, vec!["ts".to_string()]);
     }
 
     #[test]
-    fn an_unknown_category_is_rejected() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"nonsense"}"#).unwrap();
-
-        assert!(request.into_new_memory(&[]).is_err());
+    fn e14_the_old_category_only_shape_is_refused_naming_the_new_fields() {
+        let error = structured(r#"{"content":"x","category":"preference.coding"}"#).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("missing_field"), "{message}");
+        for field in ["kind", "topic", "applies_to", "origin"] {
+            assert!(message.contains(field), "{field}: {message}");
+        }
     }
 
     #[test]
-    fn a_configured_extra_category_is_accepted() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"fact.homelab"}"#).unwrap();
-
-        let new = request
-            .into_new_memory(&["fact.homelab".to_string()])
-            .unwrap();
-        assert_eq!(new.category.as_str(), "fact.homelab");
+    fn retired_fields_are_refused_with_their_new_name() {
+        let base = r#""content":"x","kind":"fact","topic":"tech","origin":"user_said""#;
+        assert_eq!(
+            code(structured(&format!(r#"{{{base},"subcategory":"a"}}"#))),
+            "invalid_value"
+        );
+        assert_eq!(
+            code(structured(&format!(r#"{{{base},"confidence":0.4}}"#))),
+            "invalid_value"
+        );
+        assert_eq!(
+            code(structured(&format!(
+                r#"{{{base},"expires_at":"2030-01-01T00:00:00Z"}}"#
+            ))),
+            "invalid_value"
+        );
     }
 
     #[test]

@@ -2,8 +2,16 @@ import { useId, useState, type FormEvent } from "react";
 import type { Category, Memory } from "../api/types";
 import { describeIngest } from "../domain/ingest";
 import { emptyValues, validate, validateField, type FormErrors, type FormValues } from "../domain/memoryForm";
+import {
+  emptyStructure,
+  structureOf,
+  validateStructure,
+  type StructureErrors,
+  type StructureValues,
+} from "../domain/structureForm";
 import type { MemoryActions } from "../state/memories";
 import { MemoryFieldset } from "./MemoryFieldset";
+import { StructureFieldset } from "./StructureFieldset";
 import * as styles from "./styles";
 
 export type Added =
@@ -27,12 +35,15 @@ export function AddMemory({
   const toggleId = useId();
   const [values, setValues] = useState<FormValues>(() => emptyValues("fact.project"));
   const [errors, setErrors] = useState<FormErrors>({});
+  const [structure, setStructure] = useState<StructureValues>(emptyStructure);
+  const [structureErrors, setStructureErrors] = useState<StructureErrors>({});
   const [useAi, setUseAi] = useState(false);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
   // With the AI on, only the text is required; the category is a hint.
-  const checked: (keyof FormValues)[] = useAi ? ["content", "tags"] : ["content", "category", "subcategory", "tags"];
+  // Saved as written, the structure says what it is, and the category follows.
+  const checked: (keyof FormValues)[] = useAi ? ["content", "tags"] : ["content", "subcategory", "tags"];
 
   const change = (field: keyof FormValues, value: string) => {
     setValues((current) => ({ ...current, [field]: value }));
@@ -40,6 +51,12 @@ export function AddMemory({
   };
   const blur = (field: keyof FormValues) => {
     if (checked.includes(field)) setErrors((current) => ({ ...current, [field]: validateField(field, values) }));
+  };
+
+  const changeStructure = (field: keyof StructureValues, value: string) => {
+    const next = { ...structure, [field]: value } as StructureValues;
+    setStructure(next);
+    if (Object.keys(structureErrors).length > 0) setStructureErrors(validateStructure(next));
   };
 
   const toggleAi = (on: boolean) => {
@@ -51,8 +68,10 @@ export function AddMemory({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const found = validate(values, checked);
+    const structureFound = useAi ? {} : validateStructure(structure);
     setErrors(found);
-    if (Object.keys(found).length > 0) return;
+    setStructureErrors(structureFound);
+    if (Object.keys(found).length > 0 || Object.keys(structureFound).length > 0) return;
 
     setPending(true);
     setFailure(null);
@@ -62,7 +81,7 @@ export function AddMemory({
       if (outcome.kind === "failed") return setFailure(outcome.message);
       onAdded({ kind: "ingested", ...describeIngest(outcome.value), firstId: outcome.value.memoryIds[0] ?? null });
     } else {
-      const outcome = await actions.create(values);
+      const outcome = await actions.create(values, structureOf(structure));
       setPending(false);
       if (outcome.kind === "failed") return setFailure(outcome.message);
       onAdded({ kind: "saved", memory: outcome.value });
@@ -77,9 +96,18 @@ export function AddMemory({
         categories={categories}
         readOnly={pending}
         categoryOptional={useAi}
+        showCategory={useAi}
         onChange={change}
         onBlur={blur}
       />
+      {!useAi && (
+        <StructureFieldset
+          values={structure}
+          errors={structureErrors}
+          readOnly={pending}
+          onChange={changeStructure}
+        />
+      )}
 
       <div className="mt-5 flex items-start gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-700">
         <input

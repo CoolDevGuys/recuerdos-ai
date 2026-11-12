@@ -74,8 +74,31 @@ async function call(method, path, body) {
   return response;
 }
 
+// The structured save shape (ai-specs/memory-structure-plan.md §3): what each
+// memory is, what it is about and who it is true for. The category is kept so
+// the map groups the demo the same way.
+const STRUCTURE = {
+  "preference.coding": ["preference", "coding", "me"],
+  "preference.personal": ["preference", "lifestyle", "me"],
+  decision: ["decision", "work", "general"],
+  "fact.project": ["fact", "coding", "general"],
+  "fact.person": ["fact", "people", "general"],
+  experience: ["experience", "work", "general"],
+  skill: ["procedure", "tech", "general"],
+  reference: ["reference", "coding", "general"],
+  "health.sleep": ["fact", "health", "general"],
+};
+
 await call("POST", "/v1/categories", { id: "health.sleep", label: "Sleep" });
-for (const memory of memories) {
-  await call("POST", "/v1/memories:direct", { ...memory, subcategory: memory.subcategory ?? null });
+for (const { subcategory, ...memory } of memories) {
+  const [kind, topic, target] = STRUCTURE[memory.category];
+  await call("POST", "/v1/memories:direct", {
+    ...memory,
+    ...(subcategory != null && { subtopic: subcategory }),
+    kind,
+    topic,
+    applies_to: { target },
+    origin: "user_said",
+  });
 }
 console.log(`Saved ${memories.length} memories.`);

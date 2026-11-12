@@ -470,7 +470,9 @@ async fn the_direct_endpoint_still_bypasses_the_pipeline_entirely() {
     let (status, memory) = pipeline
         .post(
             "/v1/memories:direct",
-            json!({"content": "Stored exactly as written", "category": "fact.project"}),
+            common::structured(
+                json!({"content": "Stored exactly as written", "category": "fact.project"}),
+            ),
         )
         .await;
 

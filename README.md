@@ -265,8 +265,14 @@ Once the daemon is running, store something:
 ```bash
 curl -X POST localhost:7070/v1/memories:direct -H 'Content-Type: application/json' \
   -d '{"content": "User forbids barrel files / index.ts re-exports",
-       "category": "preference.coding"}'
+       "kind": "preference", "topic": "coding",
+       "applies_to": {"target": "me"}, "origin": "user_said"}'
 ```
+
+It answers with how it filed it — *"Saved as your personal coding preference
+(applies to you everywhere)."* — because a memory says what it is and who it is
+true for. That is what keeps one project's rules out of your own preferences; see
+[docs/memory-model.md](docs/memory-model.md).
 
 Then ask a question that shares almost none of its words:
 
@@ -470,6 +476,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 | 🚀 [deployment.md](docs/deployment.md) | Run it on a server, with HTTPS and auth |
 | 🌐 [api.md](docs/api.md) | Every REST endpoint and field |
 | 🔌 [mcp.md](docs/mcp.md) | MCP tools and the `memory://profile` resource |
+| 🧭 [memory-model.md](docs/memory-model.md) | What a memory is, who it is true for, and the save rules |
 | ⚙️ [configuration.md](docs/configuration.md) | Every config key |
 | 🖥️ [web-ui.md](docs/web-ui.md) | The browser UI at `/ui` |
 | 🐍 [sdk-python.md](docs/sdk-python.md) | The Python client |

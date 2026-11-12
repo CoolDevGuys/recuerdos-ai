@@ -254,6 +254,26 @@ impl Fixture {
         )
     }
 
+    /// The real SQLite project registry over the fixture's database.
+    pub fn project_registry(
+        &self,
+    ) -> Arc<dyn crate::memories::domain::project_registry::ProjectRegistry> {
+        Arc::new(
+            crate::memories::infrastructure::sqlite_project_registry::SqliteProjectRegistry::new(
+                Arc::clone(&self.database),
+            ),
+        )
+    }
+
+    /// The real SQLite topic list over the fixture's database.
+    pub fn topic_catalog(&self) -> Arc<dyn crate::memories::domain::topic_catalog::TopicCatalog> {
+        Arc::new(
+            crate::memories::infrastructure::sqlite_topic_catalog::SqliteTopicCatalog::new(
+                Arc::clone(&self.database),
+            ),
+        )
+    }
+
     pub fn category_curator(
         &self,
         extras: &[&str],

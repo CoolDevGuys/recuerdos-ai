@@ -18,7 +18,9 @@ async fn save(
     let response = reqwest::Client::new()
         .post(format!("{}/v1/memories:direct", app.base_url))
         .bearer_auth(key)
-        .json(&json!({"content": content, "category": category, "subcategory": subcategory}))
+        .json(&common::structured(
+            json!({"content": content, "category": category, "subcategory": subcategory}),
+        ))
         .send()
         .await
         .unwrap();

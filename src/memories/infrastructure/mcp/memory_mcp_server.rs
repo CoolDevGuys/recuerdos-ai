@@ -6,7 +6,8 @@
 
 use super::http_memory_toolbox::HttpMemoryToolbox;
 use super::memory_toolbox::{
-    BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome, SaveRequest,
+    BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveAppliesTo, SaveOutcome,
+    SaveRequest,
 };
 use super::tool_text;
 use crate::shared::error::RaError;
@@ -25,32 +26,84 @@ use std::sync::Arc;
 
 pub const PROFILE_URI: &str = "memory://profile";
 
+/// One memory and its structure. The same shape for `memory_save` and each
+/// item of `memory_save_batch` (ai-specs/memory-structure-plan.md §3).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SaveParams {
-    /// The memory, written as a standalone sentence.
+    /// The memory, as one standalone sentence that still makes sense months
+    /// from now with no conversation around it. Write the subject out ("The
+    /// user prefers…", "Quill's API…"), one fact per memory, and never a
+    /// secret: store how to reach something (host, user, which key file), not
+    /// the password or key itself.
     pub content: String,
-    /// One of: preference.coding, preference.personal, decision,
-    /// fact.project, fact.person, experience, skill, reference.
-    pub category: Option<String>,
+    /// What sort of statement it is. Ask yourself:
+    /// preference — what the user picks when free to choose (only ever about
+    /// the user: target "me");
+    /// rule — a hard line never to cross;
+    /// convention — how one project agreed to do things (target "project");
+    /// decision — a choice made at a point in time, for a reason;
+    /// fact — a durable truth about something or someone;
+    /// experience — something that happened;
+    /// learning — the lesson drawn from it;
+    /// procedure — steps to follow again;
+    /// reference — a pointer: a URL, a file path, a ticket;
+    /// goal — something the user is working towards (stays open until the
+    /// user says it is done);
+    /// plan — a dated thing ahead (needs valid_until).
+    pub kind: String,
+    /// What it is about: coding (writing software), tech (machines, servers,
+    /// services, configuration outside a codebase), work, family (relatives,
+    /// the household), people (everyone else), health, lifestyle (routines,
+    /// hobbies), home, finance, travel, food — or one of the user's own topics.
+    pub topic: String,
+    /// Who or what it is true for. If you are not sure, ask the user before
+    /// saving. Omitted, it defaults to the current project when one is known,
+    /// else "general" — never "me" — and the reply asks you to confirm.
+    pub applies_to: Option<AppliesToParams>,
+    /// Where it came from:
+    /// user_said — the user stated it in this conversation;
+    /// user_confirmed — you proposed it and the user said yes;
+    /// inferred — you noticed it yourself (refused for the user's own
+    /// preferences: ask them first, then save as user_confirmed);
+    /// document — read from a file such as CLAUDE.md or a README (filed under
+    /// that file's project).
+    pub origin: String,
+    /// Optional finer label within the topic, for filtering: "testing",
+    /// "sleep".
+    pub subtopic: Option<String>,
+    /// Optional lowercase keywords for filtering.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// When it stops being true: an RFC 3339 time, or a date (YYYY-MM-DD,
+    /// meaning through the end of that day, UTC). Required for a plan; not
+    /// allowed on a goal.
+    pub valid_until: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AppliesToParams {
+    /// me — who the user is and how they like things, everywhere ("my", "I
+    /// always", "personally", "in every project").
+    /// project — true of one project ("here", "this repo", "we", anything read
+    /// from a project's files).
+    /// general — the user's world outside any project: machines, files,
+    /// services, places, accounts, appointments.
+    pub target: String,
+    /// The project's name, only with target "project". Inside a project
+    /// folder it is detected for you; give it when there is no folder (or to
+    /// name another project). Lowercase, like "quill".
+    pub project_name: Option<String>,
+    /// Set to true only after the user confirmed that a project the server
+    /// does not know yet is a new one.
+    #[serde(default)]
+    pub new_project: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SaveBatchParams {
-    /// The memories to save, each written as a standalone sentence.
-    pub items: Vec<SaveBatchItem>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SaveBatchItem {
-    /// The memory, written as a standalone sentence.
-    pub content: String,
-    /// One of: preference.coding, preference.personal, decision,
-    /// fact.project, fact.person, experience, skill, reference.
-    pub category: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
+    /// The memories to save, each with its own structure, exactly as
+    /// `memory_save` takes one.
+    pub items: Vec<SaveParams>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -161,59 +214,50 @@ impl MemoryMcpServer {
         }
     }
 
-    /// Store a durable fact, preference, or decision the user has stated, so it is
-    /// available in future sessions.
+    /// Store something durable the user has stated, with what it is and who it is true
+    /// for, so it is available in future sessions.
     ///
     /// Call this when the user says something that stays true after this conversation
-    /// ends:
-    /// - a preference: "I prefer pnpm", "never use default exports", "always write
-    ///   table-driven tests"
-    /// - a decision and its reason: "we chose SQLite over Postgres because installer
-    ///   size matters more"
-    /// - a durable fact: "the backend deploys on Hetzner", "I'm vegetarian"
-    /// - something learned the hard way: "the migration failed because the index was
-    ///   built concurrently"
+    /// ends: a preference ("I prefer pnpm"), a rule ("never push to main"), a project's
+    /// convention, a decision and its reason, a durable fact, something learned the hard
+    /// way, a procedure, a goal, or a dated plan.
     ///
     /// Do NOT call this for transient task detail — what file you are editing, what a
     /// test just printed, or what the user asked you to do next. Those are true for ten
     /// minutes, and storing them buries the things that matter.
     ///
-    /// Write the memory as a standalone sentence that will still make sense in six
-    /// months with no surrounding conversation. Prefer the user's own wording for
-    /// preferences.
+    /// Every field is a decision, not a formality: "applies_to" is what keeps one
+    /// project's rule out of the user's personal preferences, so choose it from what the
+    /// user said, and ask when it is unclear. The reply says how the memory was filed —
+    /// repeat it to the user so they can correct it. A refusal says why and what to
+    /// change; follow it (often: ask the user) rather than rewording to get past it.
     #[tool(name = "memory_save")]
     async fn memory_save(
         &self,
         Parameters(params): Parameters<SaveParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let outcome = self
-            .toolbox(&context)
-            .save(SaveRequest {
-                content: params.content,
-                category: params.category,
-                tags: params.tags,
-                client: Some(self.client_name.clone()),
-            })
-            .await
-            .map_err(to_mcp_error)?;
-
-        let text = tool_text::render_saved(&outcome);
-        Ok(save_result(&text, &outcome))
+        let request = save_request(params, &self.client_name).map_err(to_mcp_error)?;
+        match self.toolbox(&context).save(request).await {
+            Ok(outcome) => {
+                let text = tool_text::render_saved(&outcome);
+                Ok(save_result(&text, &outcome))
+            }
+            Err(error) => rejected_result(error),
+        }
     }
 
     /// Save several memories in one call, when the user has stated multiple durable things
-    /// at once — wrapping up a session, or a message that lists several preferences and
-    /// decisions together.
+    /// at once — wrapping up a session, a message that lists several preferences, or the
+    /// rules read from a project's file (origin "document").
     ///
-    /// Prefer this over many `memory_save` calls for a burst: it stores them in a single
-    /// request, and the server paces the work so a handful of memories does not overwhelm
-    /// the model behind extraction. Each item is a standalone memory, exactly as
-    /// `memory_save` expects — do not stuff several facts into one item; give each its own.
+    /// Each item is one standalone memory with its own structure, exactly as `memory_save`
+    /// takes it — do not stuff several facts into one item. Items are saved one by one
+    /// through the same rules, so one refused item does not stop the rest.
     ///
-    /// It reports per item, including the ones that were already known (stored nothing) and
-    /// any that failed — repeat that back accurately rather than telling the user all were
-    /// saved. For a single memory, use `memory_save`.
+    /// It reports per item, including any that were refused and why — repeat that back
+    /// accurately rather than telling the user all were saved, and fix the refused ones as
+    /// their reason says. For a single memory, use `memory_save`.
     #[tool(name = "memory_save_batch")]
     async fn memory_save_batch(
         &self,
@@ -223,13 +267,9 @@ impl MemoryMcpServer {
         let requests = params
             .items
             .into_iter()
-            .map(|item| SaveRequest {
-                content: item.content,
-                category: item.category,
-                tags: item.tags,
-                client: Some(self.client_name.clone()),
-            })
-            .collect();
+            .map(|item| save_request(item, &self.client_name))
+            .collect::<Result<Vec<_>, RaError>>()
+            .map_err(to_mcp_error)?;
 
         let outcome = self
             .toolbox(&context)
@@ -507,6 +547,65 @@ fn stored_json(memories: &[super::memory_toolbox::ToolMemory]) -> Vec<Value> {
         .collect()
 }
 
+/// The tool arguments as the toolbox carries them. Only `valid_until` is
+/// parsed here; every rule is the daemon's.
+fn save_request(params: SaveParams, client: &str) -> std::result::Result<SaveRequest, RaError> {
+    Ok(SaveRequest {
+        content: params.content,
+        kind: params.kind,
+        topic: params.topic,
+        applies_to: params.applies_to.map(|applies_to| SaveAppliesTo {
+            target: applies_to.target,
+            project_name: applies_to.project_name,
+            new_project: applies_to.new_project,
+        }),
+        origin: params.origin,
+        subtopic: params.subtopic,
+        tags: params.tags,
+        valid_until: params
+            .valid_until
+            .as_deref()
+            .map(parse_valid_until)
+            .transpose()?,
+        client: Some(client.to_string()),
+    })
+}
+
+/// An RFC 3339 time, or a date meaning "through the end of that day, UTC".
+fn parse_valid_until(raw: &str) -> std::result::Result<DateTime<Utc>, RaError> {
+    let raw = raw.trim();
+    if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(at.with_timezone(&Utc));
+    }
+    chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.succ_opt())
+        .and_then(|next| next.and_hms_opt(0, 0, 0))
+        .map(|at| at.and_utc())
+        .ok_or_else(|| RaError::Rejected {
+            code: "invalid_value".to_string(),
+            message: format!(
+                "valid_until {raw:?} is neither an RFC 3339 time nor a YYYY-MM-DD date"
+            ),
+        })
+}
+
+/// A refused save as a tool result the agent reads — "not saved", the code,
+/// and how to fix it — rather than a protocol error it may not show. Any
+/// other failure stays an error.
+fn rejected_result(error: RaError) -> Result<CallToolResult, ErrorData> {
+    match error {
+        RaError::Rejected { code, message } => {
+            let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
+                "Not saved ({code}): {message}"
+            ))]);
+            result.structured_content = Some(json!({ "rejected": code, "message": message }));
+            Ok(result)
+        }
+        other => Err(to_mcp_error(other)),
+    }
+}
+
 fn parse_as_of(raw: &str) -> std::result::Result<DateTime<Utc>, RaError> {
     DateTime::parse_from_rfc3339(raw.trim())
         .map(|at| at.with_timezone(&Utc))
@@ -523,6 +622,12 @@ fn to_mcp_error(error: RaError) -> ErrorData {
         ),
         RaError::Conflict(message) | RaError::PreconditionFailed(message) => {
             ErrorData::invalid_request(message, None)
+        }
+        // The save tools turn a rejection into a tool result the agent reads
+        // and acts on (`rejected_result`); any other tool reaching one reports
+        // it the same way an invalid argument would be.
+        RaError::Rejected { code, message } => {
+            ErrorData::invalid_params(format!("{message} ({code})"), None)
         }
         // A busy second stage is not a client's mistake and never reaches
         // here anyway — the recaller serves the pre-rerank order (invariant

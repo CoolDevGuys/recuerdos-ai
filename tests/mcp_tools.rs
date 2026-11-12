@@ -22,18 +22,42 @@ use tokio::process::Command;
 struct McpClient {
     app: TestApp,
     service: RunningService<RoleClient, ()>,
+    // The folder the shim runs in, kept alive for the test.
+    _folder: tempfile::TempDir,
 }
 
 impl McpClient {
+    /// A shim started in an empty folder: no project.
     async fn connect() -> Self {
+        Self::connect_in(tempfile::tempdir().unwrap()).await
+    }
+
+    /// A shim started inside a git repository whose `origin` is `remote`, the
+    /// way a harness starts it inside the project it works on.
+    async fn connect_in_repository(remote: &str) -> Self {
+        let folder = tempfile::tempdir().unwrap();
+        for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+            let status = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(folder.path())
+                .status()
+                .expect("git is installed");
+            assert!(status.success(), "git {args:?}");
+        }
+        Self::connect_in(folder).await
+    }
+
+    async fn connect_in(folder: tempfile::TempDir) -> Self {
         let app = TestApp::spawn().await;
         let key = app.create_user_with_key("alex", "read,write");
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"));
         command
             .arg("mcp")
+            .current_dir(folder.path())
             .env("RECUERDOS_AI_API_KEY", &key)
             .env("RECUERDOS_AI_URL", &app.base_url)
+            .env_remove("RECUERDOS_AI_PROJECT")
             .env_remove("RECUERDOS_AI_LOG");
 
         let service =
@@ -41,7 +65,11 @@ impl McpClient {
                 .await
                 .expect("mcp handshake");
 
-        Self { app, service }
+        Self {
+            app,
+            service,
+            _folder: folder,
+        }
     }
 
     async fn call(&self, tool: &str, arguments: Value) -> String {
@@ -54,6 +82,29 @@ impl McpClient {
     async fn call_structured(&self, tool: &str, arguments: Value) -> (String, Option<Value>) {
         let (text, structured) = self.call_raw(tool, arguments).await;
         (text, structured)
+    }
+
+    /// A call the tool answers with a refusal (`isError`), as the text the
+    /// agent reads.
+    async fn call_refused(&self, tool: &str, arguments: Value) -> String {
+        let result = self
+            .service
+            .call_tool(
+                CallToolRequestParams::new(tool.to_string()).with_arguments(as_object(arguments)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("calling {tool} failed: {e}"));
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "{tool} should refuse: {result:?}"
+        );
+        result
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     async fn call_raw(&self, tool: &str, arguments: Value) -> (String, Option<Value>) {
@@ -121,8 +172,10 @@ async fn a_batch_save_stores_every_item_and_they_recall() {
         .call(
             "memory_save_batch",
             json!({"items": [
-                {"content": "User prefers pnpm", "category": "preference.coding"},
-                {"content": "The backend runs on Hetzner", "category": "fact.project"}
+                {"content": "User prefers pnpm", "kind": "preference", "topic": "coding",
+                 "applies_to": {"target": "me"}, "origin": "user_said"},
+                {"content": "The backend runs on Hetzner", "kind": "fact", "topic": "tech",
+                 "applies_to": {"target": "general"}, "origin": "user_said"}
             ]}),
         )
         .await;
@@ -191,12 +244,18 @@ async fn save_then_recall_round_trips_through_the_protocol() {
             "memory_save",
             json!({
                 "content": "User forbids barrel files and index.ts re-exports",
-                "category": "preference.coding",
+                "kind": "preference",
+                "topic": "coding",
+                "applies_to": {"target": "me"},
+                "origin": "user_said",
                 "tags": ["typescript"]
             }),
         )
         .await;
-    assert!(saved.contains("Saved as [preference.coding]"), "{saved}");
+    assert!(
+        saved.contains("Saved as your personal coding preference (applies to you everywhere)."),
+        "the reply says how it was filed: {saved}"
+    );
 
     let recalled = client
         .call(
@@ -227,7 +286,10 @@ async fn recall_with_no_matches_says_so_rather_than_returning_nothing() {
 async fn forget_requires_two_steps_and_deletes_nothing_on_the_first() {
     let client = McpClient::connect().await;
     client
-        .call("memory_save", json!({"content": "a memory about pnpm"}))
+        .call(
+            "memory_save",
+            common::structured(json!({"content": "a memory about pnpm"})),
+        )
         .await;
 
     // Step one: candidates only.
@@ -293,7 +355,8 @@ async fn the_profile_resource_is_listed_and_readable() {
     client
         .call(
             "memory_save",
-            json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+            json!({"content": "User prefers pnpm", "kind": "preference", "topic": "coding",
+                   "applies_to": {"target": "me"}, "origin": "user_said"}),
         )
         .await;
 
@@ -363,7 +426,10 @@ async fn memories_saved_over_mcp_are_visible_over_rest() {
     // script would disagree about what the user believes.
     let client = McpClient::connect().await;
     client
-        .call("memory_save", json!({"content": "saved through mcp"}))
+        .call(
+            "memory_save",
+            common::structured(json!({"content": "saved through mcp"})),
+        )
         .await;
 
     let key = client.app.create_user_with_key("second", "read,write");
@@ -416,7 +482,8 @@ async fn a_save_reports_its_outcome_as_structured_content() {
     let (text, structured) = client
         .call_structured(
             "memory_save",
-            json!({"content": "The backend deploys on Railway", "category": "fact.project"}),
+            json!({"content": "The backend deploys on Railway", "kind": "fact", "topic": "tech",
+                   "applies_to": {"target": "general"}, "origin": "user_said"}),
         )
         .await;
 
@@ -454,8 +521,8 @@ async fn a_batch_save_reports_one_status_per_item() {
         .call_structured(
             "memory_save_batch",
             json!({"items": [
-                {"content": "The API is written in Rust"},
-                {"content": "The migrations run with sqlx"}
+                common::structured(json!({"content": "The API is written in Rust"})),
+                common::structured(json!({"content": "The migrations run with sqlx"}))
             ]}),
         )
         .await;
@@ -470,4 +537,66 @@ async fn a_batch_save_reports_one_status_per_item() {
         assert!(item["error"].is_null(), "no item failed: {structured:#}");
         assert_eq!(item["stored"].as_array().expect("stored list").len(), 1);
     }
+}
+
+/// E3 over MCP: a refusal reaches the agent as a tool result it reads, with
+/// the code and what to do, not as a protocol error it may never show.
+#[tokio::test]
+async fn a_refused_save_tells_the_agent_why_and_what_to_do() {
+    let client = McpClient::connect().await;
+
+    let refused = client
+        .call_refused(
+            "memory_save",
+            json!({"content": "Prefers small pull requests", "kind": "preference",
+                   "topic": "coding", "applies_to": {"target": "me"}, "origin": "inferred"}),
+        )
+        .await;
+
+    assert!(
+        refused.starts_with("Not saved (needs_confirmation)"),
+        "{refused}"
+    );
+    assert!(refused.contains("Ask the user"), "{refused}");
+}
+
+/// Inside a repository the shim knows the project: a "this repo" rule needs
+/// no project name, an unknown project is only created once the user
+/// confirms, and the remote is remembered so the next save finds it.
+#[tokio::test]
+async fn inside_a_repository_the_project_is_detected_from_its_remote() {
+    let client = McpClient::connect_in_repository("git@github.com:acme/quill.git").await;
+    let rule = json!({"content": "In this repo migrations are forward-only", "kind": "rule",
+                      "topic": "coding", "applies_to": {"target": "project"},
+                      "origin": "user_said"});
+
+    let refused = client.call_refused("memory_save", rule.clone()).await;
+    assert!(
+        refused.starts_with("Not saved (unknown_project)"),
+        "{refused}"
+    );
+    assert!(refused.contains("github.com/acme/quill"), "{refused}");
+
+    let mut confirmed = rule;
+    confirmed["applies_to"]["new_project"] = json!(true);
+    let saved = client.call("memory_save", confirmed).await;
+    assert!(
+        saved.contains("Saved as a coding rule of quill."),
+        "{saved}"
+    );
+    assert!(saved.contains("Created the project quill."), "{saved}");
+
+    // No target at all: the detected project is the default (plan D4).
+    let defaulted = client
+        .call(
+            "memory_save",
+            json!({"content": "Releases are tagged from main by CI", "kind": "rule",
+                   "topic": "coding", "origin": "user_said"}),
+        )
+        .await;
+    assert!(defaulted.contains("of quill"), "{defaulted}");
+    assert!(
+        defaulted.contains("confirm that with the user"),
+        "{defaulted}"
+    );
 }

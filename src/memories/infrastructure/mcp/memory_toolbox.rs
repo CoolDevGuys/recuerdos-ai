@@ -47,11 +47,27 @@ pub struct ToolMemory {
     pub relevance: Option<f32>,
 }
 
-#[derive(Debug, Clone)]
+/// Who or what a memory is true for, as the agent stated it.
+#[derive(Debug, Clone, Default)]
+pub struct SaveAppliesTo {
+    pub target: String,
+    pub project_name: Option<String>,
+    pub new_project: bool,
+}
+
+/// A structured save (ai-specs/memory-structure-plan.md §3.1), as the tool
+/// received it. The daemon applies the memory rules; this layer only
+/// carries the fields.
+#[derive(Debug, Clone, Default)]
 pub struct SaveRequest {
     pub content: String,
-    pub category: Option<String>,
+    pub kind: String,
+    pub topic: String,
+    pub applies_to: Option<SaveAppliesTo>,
+    pub origin: String,
+    pub subtopic: Option<String>,
     pub tags: Vec<String>,
+    pub valid_until: Option<DateTime<Utc>>,
     /// Which client stored it, for the audit trail.
     pub client: Option<String>,
 }
@@ -64,6 +80,11 @@ pub struct SaveRequest {
 /// it has never seen turns a future improvement into a broken client. An
 /// unrecognised status degrades to [`SaveStatus::Unknown`], which renders as
 /// the honest "something happened, details above" rather than an error.
+// Since the structured save (plan S1) a save either stores or is refused;
+// the empty outcomes below came from the extraction pipeline, which the save
+// tools no longer use. S2's conflict check reports `AlreadyKnown` again, and
+// decides what of the rest stays.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SaveStatus {
@@ -81,6 +102,7 @@ pub enum SaveStatus {
     Unknown,
 }
 
+#[allow(dead_code)]
 impl SaveStatus {
     /// Parses the daemon's `outcome` field. Anything unrecognised — including
     /// its absence, from a daemon predating the field — is
@@ -115,6 +137,9 @@ pub struct SaveOutcome {
     /// was left inferring — inferring "saved", because that is what it was
     /// hoping for.
     pub status: SaveStatus,
+    /// The daemon's own sentence about how it was filed ("Saved as your
+    /// personal coding preference …"), to repeat to the user.
+    pub message: Option<String>,
 }
 
 /// One item's result inside a batch save.
@@ -128,6 +153,8 @@ pub struct BatchItemOutcome {
     pub error: Option<String>,
     /// What the item did, or `None` when it failed and `error` explains.
     pub status: Option<SaveStatus>,
+    /// The daemon's sentence about how the item was filed.
+    pub message: Option<String>,
 }
 
 /// What a batch save did, one entry per submitted item, in order.

@@ -12,8 +12,8 @@ use super::dto::{
     AuditEntryResponse, AuditResponse, BulkRequest, BulkResponse, CategoriesResponse,
     CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, MapCategory, MapCategoryEdge,
     MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest, RerankResponse,
-    SaveMemoryRequest, SearchHit, SearchRequest, SearchResponse, UpdateCategoryRequest,
-    UpdateMemoryRequest,
+    SaveMemoryRequest, SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse,
+    UpdateCategoryRequest, UpdateMemoryRequest,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -22,6 +22,7 @@ use crate::memories::application::category_curator::{CategoryCurator, CategoryVi
 use crate::memories::application::memory_bulk_editor::BulkEdit;
 use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::application::memory_mapper::{MapDetail, MapQuery};
+use crate::memories::application::structured_memory_saver::DetectedProject;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory::MemoryEdit;
@@ -73,21 +74,47 @@ impl<S: Send + Sync> FromRequestParts<S> for Actor {
     }
 }
 
+/// The project a local client says it is working in: the name and,
+/// optionally, the normalised git remote. Sent by the `recuerdos-ai mcp`
+/// shim, which runs inside the project folder; any other client may send
+/// them too.
+pub const PROJECT_HEADER: &str = "x-recuerdos-project";
+pub const PROJECT_REMOTE_HEADER: &str = "x-recuerdos-project-remote";
+
+fn detected_project(headers: &HeaderMap) -> Option<DetectedProject> {
+    let read = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    read(PROJECT_HEADER).map(|name| DetectedProject {
+        name,
+        alias: read(PROJECT_REMOTE_HEADER),
+    })
+}
+
 pub async fn save_memory(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
     Actor(actor): Actor,
+    headers: HeaderMap,
     Json(request): Json<SaveMemoryRequest>,
 ) -> Result<impl IntoResponse> {
     let memories = state.memories.clone();
+    let save = request.into_structured(detected_project(&headers))?;
 
-    let memory = blocking(move || {
-        let new = request.into_new_memory(&memories.catalog.custom_ids(&context)?)?;
-        memories.saver.execute(&context, new, &actor)
+    let saved = blocking(move || {
+        let extras = memories.catalog.custom_ids(&context)?;
+        memories
+            .structured_saver
+            .execute(&context, save, &extras, &actor)
     })
     .await?;
 
-    Ok((StatusCode::CREATED, Json(MemoryResponse::from(&memory))))
+    Ok((StatusCode::CREATED, Json(SavedMemoryResponse::from(&saved))))
 }
 
 pub async fn search_memories(

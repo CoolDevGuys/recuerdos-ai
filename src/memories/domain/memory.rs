@@ -217,6 +217,13 @@ impl Memory {
         &self.structure
     }
 
+    /// Replaces the structure derived from the category with one the caller
+    /// stated (the structured save). The memory is otherwise unchanged.
+    pub fn with_structure(mut self, structure: MemoryStructure) -> Self {
+        self.structure = structure;
+        self
+    }
+
     pub fn tags(&self) -> &[String] {
         &self.tags
     }

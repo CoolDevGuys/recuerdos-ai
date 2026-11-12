@@ -111,52 +111,62 @@ healthy and refuses all work.
 
 ### `memory_save`
 
-Stores a durable fact, preference, or decision.
+Stores one memory with its structure: what it is, what it is about, who it is
+true for, and where it came from. Every field is explained in
+[memory-model.md](memory-model.md); the tool's own description carries the same
+guidance, so an agent reads it on every call.
 
 ```json
 {"content": "User forbids barrel files and index.ts re-exports",
- "category": "preference.coding", "tags": ["typescript"]}
+ "kind": "preference", "topic": "coding",
+ "applies_to": {"target": "me"}, "origin": "user_said",
+ "tags": ["typescript"]}
 ```
 
 ```
-Saved as [preference.coding] (id 019f7c5a-…): User forbids barrel files and index.ts re-exports
+Saved as your personal coding preference (applies to you everywhere). (id 019f7c5a-…): User forbids barrel files and index.ts re-exports
 It will be available in future sessions.
 ```
 
-`category` is optional; see the [taxonomy](api.md#categories). It is a
-hint rather than an instruction — with a provider configured, extraction
-may find several memories in one submission and they need not all share it.
+The reply says how it was filed, so the agent can repeat it and you can correct
+it on the spot. `applies_to` is what keeps one project's rule out of your
+preferences, so an agent should choose it from what you said, and ask when it is
+unclear. Left out, it defaults to the current project, else `general`, never
+`me`, and the reply asks the agent to confirm it.
 
-**What the tool actually does depends on `[understanding].provider`.**
-With one configured, `memory_save` runs the full pipeline synchronously
-(it uses `wait: true` on [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)),
-which means it can answer with more than one memory:
+**Inside a project.** `recuerdos-ai mcp` runs in the folder your harness works in
+and sends that folder's project (from its git remote) with every call, so "in this
+repo we never mock the database" is filed under it without the agent naming it.
+The first save to a project the daemon does not know is refused until you confirm
+it is new; the agent then saves again with `"new_project": true`.
+
+**When a rule refuses the save**, the tool answers with a result beginning
+`Not saved (code):` and says what to change: ask you before saving an inferred
+preference, use `convention` for a project's way of doing things, name the
+project, leave the secret out. An agent should follow it, usually by asking you,
+rather than rewording to get past it. The codes are listed in
+[memory-model.md](memory-model.md#when-a-save-is-refused).
+
+`memory_save` always stores as given. Raw text for the service to split and
+classify goes through [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)
+or `memory_distill`.
+
+### `memory_save_batch`
+
+Several memories in one call, each with its own structure, exactly as
+`memory_save` takes one. Items are saved one by one through the same rules, so a
+refused item does not stop the rest, and the reply reports each:
 
 ```
-Saved 2 memories:
+Saved 1 memory from 2 items.
 
-- [fact.project] The backend runs on Hetzner (id 019f7c61-…)
-- [preference.coding] User requires table-driven tests in Go (id 019f7c62-…)
+- Saved as a coding rule of quill. In this repo migrations are forward-only (id 019f…)
 
 They will be available in future sessions.
+
+1 item failed and was not saved:
+- item 1: not saved (needs_confirmation): This is about the user, and it was inferred. …
 ```
-
-…or with none:
-
-```
-Nothing new was stored — either this is already known, or there was nothing
-in it that stays true beyond this conversation. Do not tell the user it was
-saved.
-```
-
-That last one is why the tool does not simply return "saved". A model told
-"saved" after a no-op goes on to tell the user something untrue, and the
-user only finds out much later when the memory isn't there.
-
-It is also where reconciliation earns its keep: if what the agent saves
-contradicts something already stored, the old memory is superseded rather
-than kept alongside it. Without a provider the tool stores content
-verbatim and this section reduces to the single-memory case.
 
 ### `memory_recall`
 

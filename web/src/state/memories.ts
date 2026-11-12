@@ -10,6 +10,7 @@ import type {
   IngestResult,
   MapData,
   Memory,
+  MemoryStructure,
   RecallHit,
 } from "../api/types";
 import { fieldsOf, patchOf, type FormValues } from "../domain/memoryForm";
@@ -105,7 +106,8 @@ export function useMemoryActions(client: ApiClient, user: string) {
         }
       },
       latest: (id: string) => attempt(() => client.getMemory(id)),
-      create: (values: FormValues) => attempt(() => client.createMemory(fieldsOf(values))),
+      create: (values: FormValues, structure: MemoryStructure) =>
+        attempt(() => client.createMemory(fieldsOf(values), structure)),
       ingest: (values: FormValues, useCategory: boolean): Promise<Outcome<IngestResult>> => {
         const fields = fieldsOf(values);
         return attempt(() =>

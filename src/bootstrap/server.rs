@@ -319,7 +319,7 @@ async fn rate_limit(State(gate): State<Gate>, request: Request, next: Next) -> R
     let seconds = retry_after.as_secs().max(1);
     let body = Json(ApiErrorBody {
         error: ApiErrorDetail {
-            code: "rate_limited",
+            code: "rate_limited".to_string(),
             message: format!(
                 "too many requests: this caller is allowed a burst and then a steady rate;                  retry in {seconds}s"
             ),

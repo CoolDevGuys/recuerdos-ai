@@ -122,8 +122,14 @@ easier view on a small screen.
   is kept. You then choose:
   - **Load the latest**: discards your edit and shows the current version.
   - **Save mine anyway**: overwrites the current version with yours.
-- **Add memory** saves exactly what you write, instantly. Tick **Let the AI
-  classify it** to send it through the understanding pipeline instead:
+- **Add memory** saves exactly what you write, instantly, once you say **what it
+  is** (a preference, a rule, a fact…), **what it is about** and **who it applies
+  to**: you everywhere, one project, or in general. The choices a kind cannot take
+  are greyed out (a preference is always yours), and the category follows from what
+  you chose. A project name you type that is new becomes a new project. If the
+  daemon refuses the save, the form shows why and keeps what you typed. See
+  [memory-model.md](memory-model.md). Tick **Let the AI classify it** to send it
+  through the understanding pipeline instead:
   - The pipeline may split the text into several memories, or save nothing if
     you already have it. The UI tells you which happened.
   - On a daemon without a model, the text is stored as written, and the UI says

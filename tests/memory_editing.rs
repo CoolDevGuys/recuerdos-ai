@@ -35,7 +35,7 @@ impl Session {
             .http
             .post(self.url("/v1/memories:direct"))
             .bearer_auth(&self.key)
-            .json(&json!({"content": content}))
+            .json(&common::structured(json!({"content": content})))
             .send()
             .await
             .unwrap();
@@ -255,7 +255,9 @@ async fn categories_list_every_built_in_with_the_callers_counts() {
         .http
         .post(session.url("/v1/memories:direct"))
         .bearer_auth(&session.key)
-        .json(&json!({"content": "prefers pnpm", "category": "preference.coding"}))
+        .json(&common::structured(
+            json!({"content": "prefers pnpm", "category": "preference.coding"}),
+        ))
         .send()
         .await
         .unwrap();
@@ -290,10 +292,10 @@ async fn categories_list_every_built_in_with_the_callers_counts() {
     );
 }
 
-/// Structured memories, phase S0 (ai-specs/memory-structure-plan.md §3, §8):
-/// every memory the API returns carries its kind, topic, scope and origin,
-/// derived from its category until the save path takes them (S1), and
-/// re-derived when it is re-filed.
+/// Structured memories (ai-specs/memory-structure-plan.md §3, §8): a save
+/// states its kind, topic, scope and origin, the reply says how it was filed,
+/// and re-filing it under a category re-derives the structure (until edits can
+/// set it, S5).
 #[tokio::test]
 async fn every_memory_carries_its_structure() {
     let session = Session::spawn().await;
@@ -301,7 +303,13 @@ async fn every_memory_carries_its_structure() {
         .http
         .post(session.url("/v1/memories:direct"))
         .bearer_auth(&session.key)
-        .json(&json!({"content": "User prefers pnpm", "category": "preference.coding"}))
+        .json(&json!({
+            "content": "User prefers pnpm",
+            "kind": "preference",
+            "topic": "coding",
+            "applies_to": {"target": "me"},
+            "origin": "user_said"
+        }))
         .send()
         .await
         .unwrap();
@@ -312,7 +320,11 @@ async fn every_memory_carries_its_structure() {
     assert_eq!(saved["topic"], "coding");
     assert_eq!(saved["applies_to"], json!({"target": "me"}));
     assert_eq!(saved["origin"], "user_said");
-    assert_eq!(saved["needs_review"], true);
+    assert_eq!(saved["needs_review"], false, "stated, not derived");
+    assert_eq!(
+        saved["message"],
+        "Saved as your personal coding preference (applies to you everywhere)."
+    );
     assert!(saved.get("goal_status").is_none(), "only goals have one");
 
     let id = saved["id"].as_str().unwrap();

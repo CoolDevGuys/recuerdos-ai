@@ -177,7 +177,7 @@ async fn save_as(app: &TestApp, key: &str, content: &str) -> serde_json::Value {
     let response = reqwest::Client::new()
         .post(format!("{}/v1/memories:direct", app.base_url))
         .bearer_auth(key)
-        .json(&serde_json::json!({"content": content}))
+        .json(&common::structured(serde_json::json!({"content": content})))
         .send()
         .await
         .expect("save request");

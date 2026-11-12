@@ -38,7 +38,7 @@ describe("the categories manager", () => {
     expect(within(row("Decision")).getByText("built-in")).toBeInTheDocument();
   });
 
-  it("creates a category that can then be chosen for a new memory", async () => {
+  it("creates a category that can then be offered for a new memory", async () => {
     const { user } = await openCategories();
 
     await user.type(screen.getByLabelText("Id"), "Health.Sleep");
@@ -48,6 +48,9 @@ describe("the categories manager", () => {
     expect(await screen.findByRole("row", { name: /Sleep log/ })).toHaveTextContent("health.sleep");
     await user.click(screen.getByRole("link", { name: "List" }));
     await user.click(await screen.findByRole("button", { name: "+ Add memory" }));
+    // A memory saved as written takes its category from what it is; the AI
+    // is the one offered a category, as a hint.
+    await user.click(screen.getByLabelText(/Let the AI classify it/));
     expect(screen.getByRole("option", { name: "Sleep log" })).toBeInTheDocument();
   });
 

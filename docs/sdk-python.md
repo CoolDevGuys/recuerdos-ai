@@ -87,21 +87,41 @@ memories = ra.save_and_wait("User is vegetarian now")
 An empty list is a legitimate outcome — most text contains nothing that
 stays true beyond the conversation.
 
-### `save_direct(content, *, category, tags, confidence, expires_at, …) -> Memory`
+### `save_direct(content, *, kind, topic, origin, applies_to, subtopic, tags, valid_until, …) -> SavedMemory`
 
-Stores one memory verbatim. Synchronous, cheap, no model.
-
-It also cannot supersede a contradiction, because nothing read the
-content. Use it when you have already decided what the memory should say;
-prefer `save` for raw material.
+Stores one memory as given, with its structure. Synchronous, cheap, no model.
+Every field is explained in [memory-model.md](memory-model.md).
 
 ```python
-ra.save_direct(
+from recuerdos_ai import AppliesTo, RejectedError
+
+saved = ra.save_direct(
     "User forbids barrel files / index.ts re-exports",
-    category="preference.coding",
+    kind="preference",
+    topic="coding",
+    applies_to="me",
+    origin="user_said",
     tags=["typescript", "imports"],
 )
+print(saved.message)  # Saved as your personal coding preference (applies to you everywhere).
+
+ra.save_direct(
+    "Quill forbids mocking the database",
+    kind="rule",
+    topic="coding",
+    applies_to=AppliesTo(target="project", project_name="quill", new_project=True),
+    origin="user_said",
+)
 ```
+
+A memory rule that stops the save raises `RejectedError`, whose `code` says which
+(`needs_confirmation`, `kind_target_mismatch`, `secret`, …) and whose message says
+how to fix it. `Memory` carries the structure too: `kind`, `topic`, `applies_to`,
+`origin`, `goal_status` and `needs_review`.
+
+It cannot supersede a contradiction, because nothing read the content. Use it when
+you have already decided what the memory should say; prefer `save` for raw
+material.
 
 ### `distill_session(content, *, session_id, client, tags) -> Distillation`
 

@@ -17,7 +17,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "AppliesTo",
     "Memory",
+    "SavedMemory",
     "MatchDetail",
     "SearchHit",
     "SearchReport",
@@ -38,6 +40,20 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
 
 
+class AppliesTo(_Model):
+    """Who or what a memory is true for (``docs/memory-model.md``).
+
+    ``target`` is ``me`` (the user, everywhere), ``project`` (one project,
+    named by ``project_name``) or ``general`` (the user's world, not tied to
+    a project). ``new_project`` creates an unknown project, once the user has
+    confirmed it is a new one.
+    """
+
+    target: Literal["me", "project", "general"]
+    project_name: str | None = None
+    new_project: bool | None = None
+
+
 class Memory(_Model):
     """One atomic thing worth remembering."""
 
@@ -52,9 +68,29 @@ class Memory(_Model):
     #: Set when a later memory replaced this one. Superseded memories are
     #: retained and excluded from ordinary recall.
     superseded_by: str | None = None
+    #: The structure (``docs/memory-model.md``). Defaults keep the model
+    #: readable against a server older than structured memories.
+    kind: str | None = None
+    topic: str | None = None
+    applies_to: AppliesTo | None = None
+    origin: str | None = None
+    goal_status: str | None = None
+    #: True when the structure was derived from an old category and may be
+    #: wrong; the web UI lists these for review.
+    needs_review: bool = False
 
     def __str__(self) -> str:
         return f"[{self.category}] {self.content}"
+
+
+class SavedMemory(Memory):
+    """A memory just saved, with what the server says about how it filed it."""
+
+    #: The sentence to repeat to the user: "Saved as your personal coding
+    #: preference (applies to you everywhere)."
+    message: str = ""
+    #: ``applies_to_defaulted``, ``filed_from_document``, ``project_created``.
+    notes: list[str] = Field(default_factory=list)
 
 
 class MatchDetail(_Model):

@@ -115,6 +115,15 @@ pub fn render_saved(outcome: &SaveOutcome) -> String {
 
     if outcome.memories.len() == 1 {
         let memory = &outcome.memories[0];
+        // A structured save: the daemon says how it filed it, which is the
+        // part the user may want to correct.
+        if let Some(message) = &outcome.message {
+            return format!(
+                "{message} (id {}): {}\nIt will be available in future sessions.",
+                memory.id,
+                memory.content.replace('\n', " ")
+            );
+        }
         return format!(
             "Saved as [{}] (id {}): {}
 It will be available in future sessions.",
@@ -180,13 +189,20 @@ pub fn render_saved_batch(outcome: &BatchSaveOutcome) -> String {
 
     if saved > 0 {
         output.push('\n');
-        for memory in outcome.items.iter().flat_map(|item| &item.memories) {
-            output.push_str(&format!(
-                "\n- [{}] {} (id {})",
-                memory.category,
-                memory.content.replace('\n', " "),
-                memory.id
-            ));
+        for item in &outcome.items {
+            for memory in &item.memories {
+                // A structured save says how it was filed; that is what the
+                // user may want to correct.
+                let filed = item
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("[{}]", memory.category));
+                output.push_str(&format!(
+                    "\n- {filed} {} (id {})",
+                    memory.content.replace('\n', " "),
+                    memory.id
+                ));
+            }
         }
         output.push_str("\n\nThey will be available in future sessions.");
     }
@@ -376,6 +392,7 @@ mod tests {
             memories: vec![],
             understanding: true,
             status,
+            message: None,
         })
     }
 
@@ -438,17 +455,20 @@ mod tests {
                     memories: vec![memory("User prefers pnpm", None)],
                     error: None,
                     status: Some(SaveStatus::Stored),
+                    message: None,
                 },
                 // Stored nothing, but did not fail — already known.
                 BatchItemOutcome {
                     memories: vec![],
                     error: None,
                     status: Some(SaveStatus::AlreadyKnown),
+                    message: None,
                 },
                 BatchItemOutcome {
                     memories: vec![],
                     error: Some("provider down".to_string()),
                     status: None,
+                    message: None,
                 },
             ],
         };
@@ -482,11 +502,13 @@ mod tests {
                     memories: vec![],
                     error: None,
                     status: Some(SaveStatus::NothingDurable),
+                    message: None,
                 },
                 BatchItemOutcome {
                     memories: vec![],
                     error: None,
                     status: Some(SaveStatus::AlreadyKnown),
+                    message: None,
                 },
             ],
         };

@@ -237,27 +237,62 @@ Configuring a provider changes that with no client changes at all. See
 
 ### `POST /v1/memories:direct`
 
-Stores a memory exactly as given. Requires `write`.
+Stores a memory exactly as given, with its structure: what it is, what it is
+about, who it is true for, and where it came from. Requires `write`. Every field
+is explained, with examples, in [memory-model.md](memory-model.md).
 
 ```bash
 curl -X POST localhost:7070/v1/memories:direct \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
     "content": "User forbids barrel files / index.ts re-exports",
-    "category": "preference.coding",
+    "kind": "preference",
+    "topic": "coding",
+    "applies_to": {"target": "me"},
+    "origin": "user_said",
     "tags": ["typescript", "imports"]
   }'
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `content` | yes | 1–4000 characters |
-| `category` | no | Defaults to `fact.project`. See the taxonomy below |
+| `content` | yes | 1–4000 characters; never a secret |
+| `kind` | yes | `preference`, `rule`, `convention`, `decision`, `fact`, `experience`, `learning`, `procedure`, `reference`, `goal`, `plan` |
+| `topic` | yes | `coding`, `tech`, `work`, `family`, `people`, `health`, `lifestyle`, `home`, `finance`, `travel`, `food`, or one of yours |
+| `applies_to` | no | `{"target": "me" \| "project" \| "general", "project_name": …, "new_project": …}`. Defaults to the known project, else `general`; never `me` |
+| `origin` | yes | `user_said`, `user_confirmed`, `inferred`, `document` |
+| `subtopic` | no | A finer label within the topic |
 | `tags` | no | Lowercased and de-duplicated; max 32 |
-| `confidence` | no | `0.0`–`1.0`, default `1.0`; clamped, not rejected |
+| `valid_until` | for a plan | RFC 3339; in the future; not allowed on a goal |
+| `category` | no | The old category to also file it under; derived from kind and topic when left out |
 | `client`, `session_id` | no | Recorded as the memory's source |
-| `expires_at` | no | RFC 3339; must be in the future |
 
-Responds `201` with the stored memory.
+The old shape is refused: a body with only `category` gets `missing_field`, and
+`subcategory`, `confidence` and `expires_at` get `invalid_value` naming their
+replacement (`subtopic`, derived from `origin`, `valid_until`).
+
+Headers `X-Recuerdos-Project` (a project name) and `X-Recuerdos-Project-Remote`
+(a normalised git remote, `github.com/acme/quill`) say which project the caller is
+working in; the `recuerdos-ai mcp` shim sends them.
+
+Responds `201` with the memory, plus `message` (how it was filed, to repeat to
+the user) and `notes` (`applies_to_defaulted`, `filed_from_document`,
+`project_created`):
+
+```json
+{
+  "id": "019f7c5a-…",
+  "content": "User forbids barrel files / index.ts re-exports",
+  "kind": "preference", "topic": "coding",
+  "applies_to": {"target": "me"}, "origin": "user_said",
+  "message": "Saved as your personal coding preference (applies to you everywhere).",
+  "notes": []
+}
+```
+
+A rule that stops the save answers `422` with its code: `missing_field`,
+`invalid_value`, `unknown_topic`, `kind_target_mismatch`, `needs_confirmation`,
+`scope_contradiction`, `no_project`, `unknown_project` or `secret`. The message
+says how to fix it. See [memory-model.md](memory-model.md#when-a-save-is-refused).
 
 ### `POST /v1/memories/search`
 

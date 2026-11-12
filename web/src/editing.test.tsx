@@ -170,7 +170,10 @@ describe("adding a memory", () => {
     const { server, user, dialog } = await openAdd();
 
     await user.type(within(dialog).getByLabelText("Memory"), "Deploys run on Fridays");
-    await user.selectOptions(within(dialog).getByLabelText("Category"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Work");
+    await user.click(within(dialog).getByRole("radio", { name: /One project/ }));
+    await user.type(within(dialog).getByLabelText("Project"), "Quill");
     await user.type(within(dialog).getByLabelText(/Sub-label/), "release");
     await user.type(within(dialog).getByLabelText(/Tags/), "ops, deploys");
     await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
@@ -179,10 +182,49 @@ describe("adding a memory", () => {
     expect(await screen.findByText("Deploys run on Fridays")).toBeInTheDocument();
     expect(server.memoriesOf(ALEX_KEY).at(-1)).toMatchObject({
       content: "Deploys run on Fridays",
-      category: "decision",
       subcategory: "release",
       tags: ["ops", "deploys"],
     });
+    expect(server.calls.find((call) => call.method === "create")?.structure).toEqual({
+      kind: "decision",
+      topic: "work",
+      applies_to: { target: "project", project_name: "quill", new_project: true },
+      origin: "user_said",
+    });
+  });
+
+  it("asks what the memory is and who it is true for, and rules out what a kind cannot be", async () => {
+    const { server, user, dialog } = await openAdd();
+
+    await user.type(within(dialog).getByLabelText("Memory"), "Prefers pnpm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(within(dialog).getByText("Choose what sort of memory this is.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Choose who or what it is true for.")).toBeInTheDocument();
+    expect(server.calls).toHaveLength(0);
+
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Preference");
+    expect(within(dialog).getByRole("radio", { name: /One project/ })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: /General/ })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: /Me, everywhere/ })).toBeEnabled();
+  });
+
+  it("shows why the daemon refused a save, and keeps what was typed", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "scope_contradiction",
+      message: "This reads as being about one project (\"this repo\").",
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await user.type(within(dialog).getByLabelText("Memory"), "This repo uses pnpm");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Fact");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Coding");
+    await user.click(within(dialog).getByRole("radio", { name: /General/ }));
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("about one project");
+    expect(within(dialog).getByLabelText("Memory")).toHaveValue("This repo uses pnpm");
   });
 
   it("requires the text", async () => {

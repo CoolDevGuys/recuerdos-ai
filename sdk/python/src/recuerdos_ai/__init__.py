@@ -22,11 +22,13 @@ from .errors import (
     NotFoundError,
     PermissionError_,
     RecuerdosError,
+    RejectedError,
     ServerError,
     TimeoutError_,
     ValidationError,
 )
 from .models import (
+    AppliesTo,
     Distillation,
     Job,
     JobStatus,
@@ -37,6 +39,7 @@ from .models import (
     RerankShadow,
     RerankSkipped,
     RerankStatus,
+    SavedMemory,
     SearchHit,
     SearchReport,
 )
@@ -45,6 +48,7 @@ __version__ = "0.4.0"
 
 __all__ = [
     "DEFAULT_BASE_URL",
+    "AppliesTo",
     "AuthenticationError",
     "Client",
     "ConflictError",
@@ -57,11 +61,13 @@ __all__ = [
     "NotFoundError",
     "PermissionError_",
     "RecuerdosError",
+    "RejectedError",
     "RerankApplied",
     "RerankNotNeeded",
     "RerankSkipped",
     "RerankShadow",
     "RerankStatus",
+    "SavedMemory",
     "SearchHit",
     "SearchReport",
     "ServerError",

@@ -34,14 +34,19 @@ def main() -> int:
 
     # --- 1. Store something you already know is worth remembering ----
     #
-    # `save_direct` writes it verbatim. No model, no waiting — but also
-    # no chance to notice that it contradicts something already stored.
-    ra.save_direct(
+    # `save_direct` writes it verbatim, with what it is and who it is true
+    # for: a preference the user stated, about coding, true of them
+    # everywhere. No model, no waiting — but also no chance to notice that
+    # it contradicts something already stored.
+    saved = ra.save_direct(
         "User forbids barrel files / index.ts re-exports",
-        category="preference.coding",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         tags=["typescript", "imports"],
     )
-    print("stored a preference directly")
+    print(saved.message)
 
     # --- 2. Hand over raw text and let the service decide ------------
     #

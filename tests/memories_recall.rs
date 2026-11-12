@@ -34,7 +34,7 @@ impl Client {
             .http
             .post(format!("{}/v1/memories:direct", self.app.base_url))
             .bearer_auth(&self.key)
-            .json(&body)
+            .json(&common::structured(body.clone()))
             .send()
             .await
             .expect("save request");
@@ -421,11 +421,13 @@ async fn memories_export_as_markdown_and_json() {
 async fn invalid_requests_are_rejected_with_a_readable_error() {
     let client = Client::spawn().await;
 
+    // A save refused by a memory rule is a 422 with the rule's code
+    // (docs/memory-model.md), so a caller can branch on it.
     let cases = [
-        (json!({"content": ""}), "empty content"),
+        (json!({"content": ""}), "missing_field"),
         (
             json!({"content": "x", "category": "nonsense"}),
-            "bad category",
+            "invalid_value",
         ),
     ];
 
@@ -434,14 +436,15 @@ async fn invalid_requests_are_rejected_with_a_readable_error() {
             .http
             .post(format!("{}/v1/memories:direct", client.app.base_url))
             .bearer_auth(&client.key)
-            .json(&body)
+            .json(&common::structured(body.clone()))
             .send()
             .await
             .unwrap();
 
-        assert_eq!(response.status(), 400, "{description} should be rejected");
+        assert_eq!(response.status(), 422, "{description}: {body}");
         let error: Value = response.json().await.unwrap();
-        assert_eq!(error["error"]["code"], "validation_failed");
+        assert_eq!(error["error"]["code"], description, "{error}");
+        assert!(error["error"]["message"].is_string());
     }
 }
 
@@ -482,7 +485,9 @@ async fn a_read_only_key_cannot_write_and_a_write_only_key_cannot_read() {
     let write_with_read_key = http
         .post(format!("{}/v1/memories:direct", app.base_url))
         .bearer_auth(&reader)
-        .json(&json!({"content": "should not be stored"}))
+        .json(&common::structured(
+            json!({"content": "should not be stored"}),
+        ))
         .send()
         .await
         .unwrap();

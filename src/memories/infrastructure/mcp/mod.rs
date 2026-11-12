@@ -13,5 +13,6 @@ pub mod http_memory_toolbox;
 pub mod http_service;
 pub mod memory_mcp_server;
 pub mod memory_toolbox;
+pub mod project_detection;
 pub mod stdio_shim;
 pub mod tool_text;

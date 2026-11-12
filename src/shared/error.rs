@@ -45,6 +45,15 @@ pub enum RaError {
     #[error("rerank busy: no session free within {} ms", .0.as_millis())]
     RerankBusy(Duration),
 
+    /// A save or edit refused by one of the memory rules
+    /// (ai-specs/memory-structure-plan.md §4), with a stable machine code —
+    /// `kind_target_mismatch`, `needs_confirmation`, `secret`, … — and a
+    /// message that says why and how to fix it. Distinct from `Validation`
+    /// because a caller (an agent, mostly) acts on the code: ask the user,
+    /// pick another kind, name the project.
+    #[error("rejected ({code}): {message}")]
+    Rejected { code: String, message: String },
+
     #[error("internal error: {0}")]
     Internal(String),
 }

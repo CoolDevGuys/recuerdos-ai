@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from recuerdos_ai import Client, NotFoundError
+from recuerdos_ai import Client, NotFoundError, RejectedError
 
 pytestmark = pytest.mark.integration
 
@@ -24,19 +24,42 @@ def test_the_daemon_is_reachable(ra: Client) -> None:
 def test_save_direct_then_get_round_trips_every_field(ra: Client, tag: str) -> None:
     saved = ra.save_direct(
         "User forbids barrel files and index.ts re-exports",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag, "typescript"],
-        confidence=0.9,
         client="sdk-test",
     )
 
     assert saved.content == "User forbids barrel files and index.ts re-exports"
     assert saved.category == "preference.coding"
     assert tag in saved.tags
-    assert abs(saved.confidence - 0.9) < 1e-6
+    assert saved.kind == "preference"
+    assert saved.applies_to is not None and saved.applies_to.target == "me"
+    assert saved.message.startswith("Saved as your personal coding preference")
 
     fetched = ra.get(saved.id)
-    assert fetched == saved, "the model does not survive a round trip"
+    assert fetched.model_dump() == saved.model_dump(exclude={"message", "notes"}), (
+        "the model does not survive a round trip"
+    )
+
+
+def test_a_rule_refusal_carries_its_code(ra: Client, tag: str) -> None:
+    # An inferred preference is the user's to confirm: the server refuses
+    # it, and says so in a way a caller can branch on.
+    with pytest.raises(RejectedError) as refused:
+        ra.save_direct(
+            "Prefers small pull requests",
+            kind="preference",
+            topic="coding",
+            applies_to="me",
+            origin="inferred",
+            tags=[tag],
+        )
+    assert refused.value.code == "needs_confirmation"
+    assert refused.value.status == 422
 
 
 def test_the_core_loop_save_then_recall_by_meaning(ra: Client, tag: str) -> None:
@@ -44,6 +67,10 @@ def test_the_core_loop_save_then_recall_by_meaning(ra: Client, tag: str) -> None
     # find it with another.
     ra.save_direct(
         "User prefers pnpm and never uses npm or yarn",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -59,7 +86,11 @@ def test_recall_finds_an_exact_identifier(ra: Client, tag: str) -> None:
     # The keyword leg's reason for existing: a vector alone blurs
     # identifiers into their neighbourhood.
     ra.save_direct(
-        "Prefer useQuery over manual fetch effects in this codebase",
+        "Prefers useQuery over manual fetch effects",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -72,8 +103,24 @@ def test_recall_finds_an_exact_identifier(ra: Client, tag: str) -> None:
 
 
 def test_search_filters_narrow_rather_than_widen(ra: Client, tag: str) -> None:
-    ra.save_direct("A coding preference", category="preference.coding", tags=[tag])
-    ra.save_direct("A project fact", category="fact.project", tags=[tag])
+    ra.save_direct(
+        "A coding preference",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        category="preference.coding",
+        tags=[tag],
+    )
+    ra.save_direct(
+        "A project fact",
+        kind="fact",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="fact.project",
+        tags=[tag],
+    )
 
     everything = ra.search("a", tags=[tag], limit=50)
     only_facts = ra.search("a", tags=[tag], categories=["fact.project"], limit=50)
@@ -92,6 +139,10 @@ def test_search_report_agrees_with_the_server_about_floor_and_stage(
     # default, which a unit test has no way to find out.
     ra.save_direct(
         "User prefers pnpm over npm for JavaScript packages",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -123,7 +174,15 @@ def test_search_report_agrees_with_the_server_about_floor_and_stage(
 
 
 def test_a_memory_can_be_edited_and_forgotten(ra: Client, tag: str) -> None:
-    saved = ra.save_direct("original wording", category="reference", tags=[tag])
+    saved = ra.save_direct(
+        "original wording",
+        kind="reference",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="reference",
+        tags=[tag],
+    )
 
     edited = ra.update(saved.id, content="revised wording", tags=[tag, "edited"])
     assert edited.content == "revised wording"
@@ -180,6 +239,10 @@ def test_the_profile_is_markdown_and_mentions_a_stored_memory(
 ) -> None:
     ra.save_direct(
         "User writes commit messages in the imperative mood",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -191,7 +254,15 @@ def test_the_profile_is_markdown_and_mentions_a_stored_memory(
 
 
 def test_export_returns_both_formats(ra: Client, tag: str) -> None:
-    ra.save_direct("An exportable memory", category="reference", tags=[tag])
+    ra.save_direct(
+        "An exportable memory",
+        kind="reference",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="reference",
+        tags=[tag],
+    )
 
     markdown = ra.export()
     as_json = ra.export(format="json")

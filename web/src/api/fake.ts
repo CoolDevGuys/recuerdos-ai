@@ -13,6 +13,7 @@ import type {
   Memory,
   MemoryFields,
   MemoryPatch,
+  MemoryStructure,
   RecallHit,
 } from "./types";
 
@@ -71,7 +72,15 @@ export class FakeServer {
   /** Above this many memories the whole-store map is categories only, as the daemon's `[ui].map_detail_limit`. */
   mapDetailLimit = Number.POSITIVE_INFINITY;
   /** Requests seen, for assertions about what was (not) sent. */
-  readonly calls: { method: string; id?: string; version?: string | null; patch?: MemoryPatch }[] = [];
+  readonly calls: {
+    method: string;
+    id?: string;
+    version?: string | null;
+    patch?: MemoryPatch;
+    structure?: MemoryStructure;
+  }[] = [];
+  /** What the next structured save is refused with, the way the daemon's rules would. */
+  rejectNextSave: { code: string; message: string } | null = null;
 
   addAccount(key: string | null, identity: Identity, memories: Memory[] = []): this {
     // Seeded like the daemon's catalog: every custom category already on a memory.
@@ -244,9 +253,14 @@ class FakeClient implements ApiClient {
     return { memories: result, changed: result.length, reembedded: 0 };
   }
 
-  async createMemory(fields: MemoryFields): Promise<Memory> {
+  async createMemory(fields: MemoryFields, structure?: MemoryStructure): Promise<Memory> {
     const account = this.writable();
-    this.server.calls.push({ method: "create" });
+    const refusal = this.server.rejectNextSave;
+    if (refusal !== null) {
+      this.server.rejectNextSave = null;
+      throw new ApiError(422, refusal.code, refusal.message);
+    }
+    this.server.calls.push({ method: "create", ...(structure !== undefined && { structure }) });
     const now = this.server.tick();
     const memory: Memory = {
       id: this.server.nextId(),

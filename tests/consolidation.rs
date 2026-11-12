@@ -203,7 +203,9 @@ async fn five_phrasings_of_one_preference_become_one_memory() {
         instance
             .post(
                 "/v1/memories:direct",
-                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                common::structured(
+                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                ),
             )
             .await;
     }
@@ -244,7 +246,9 @@ async fn a_dry_run_reports_what_it_would_merge_and_changes_nothing() {
         instance
             .post(
                 "/v1/memories:direct",
-                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                common::structured(
+                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                ),
             )
             .await;
     }
@@ -286,7 +290,9 @@ async fn without_a_provider_consolidation_still_expires_and_decays_but_never_mer
         instance
             .post(
                 "/v1/memories:direct",
-                json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                common::structured(
+                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
+                ),
             )
             .await;
     }
@@ -484,7 +490,7 @@ async fn the_profile_read_serves_without_calling_the_model() {
     instance
         .post(
             "/v1/memories:direct",
-            json!({"content": "prefers pnpm", "category": "preference.coding"}),
+            common::structured(json!({"content": "prefers pnpm", "category": "preference.coding"})),
         )
         .await;
 
@@ -516,7 +522,9 @@ async fn without_a_provider_the_profile_falls_back_to_assembly() {
     instance
         .post(
             "/v1/memories:direct",
-            json!({"content": "User forbids barrel files", "category": "preference.coding"}),
+            common::structured(
+                json!({"content": "User forbids barrel files", "category": "preference.coding"}),
+            ),
         )
         .await;
 

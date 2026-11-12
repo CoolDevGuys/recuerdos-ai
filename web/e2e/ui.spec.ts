@@ -8,11 +8,15 @@ import { expect, test, type Page } from "@playwright/test";
 const KEY = process.env.RECUERDOS_KEY ?? "";
 const RUN = `r${Date.now().toString(36)}`;
 
+// The structured save shape (ai-specs/memory-structure-plan.md §3). The
+// category is still accepted alongside, so the map groups as before.
+const preference = { kind: "preference", topic: "coding", applies_to: { target: "me" }, origin: "user_said" };
+const general = (kind: string) => ({ kind, topic: "coding", applies_to: { target: "general" }, origin: "user_said" });
 const SEED = [
-  { content: `Unit tests are written with Vitest (${RUN})`, category: "preference.coding", subcategory: "testing", tags: ["testing"] },
-  { content: `Tests come before the code, test-driven development (${RUN})`, category: "preference.coding", subcategory: "testing", tags: ["testing"] },
-  { content: `The team deploys the backend on Hetzner with Docker (${RUN})`, category: "fact.project", tags: ["deploy"] },
-  { content: `We chose SQLite over Postgres for a single binary (${RUN})`, category: "decision", tags: ["database"] },
+  { content: `Unit tests are written with Vitest (${RUN})`, category: "preference.coding", subtopic: "testing", tags: ["testing"], ...preference },
+  { content: `Tests come before the code, test-driven development (${RUN})`, category: "preference.coding", subtopic: "testing", tags: ["testing"], ...preference },
+  { content: `The team deploys the backend on Hetzner with Docker (${RUN})`, category: "fact.project", tags: ["deploy"], ...general("fact") },
+  { content: `We chose SQLite over Postgres for a single binary (${RUN})`, category: "decision", tags: ["database"], ...general("decision") },
 ];
 
 test.beforeAll(async ({ request }) => {

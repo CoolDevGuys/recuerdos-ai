@@ -14,6 +14,7 @@ import type {
   Memory,
   MemoryFields,
   MemoryPatch,
+  MemoryStructure,
   RecallHit,
   Scope,
 } from "./types";
@@ -28,8 +29,8 @@ export interface ApiClient {
   listMemories(): Promise<Memory[]>;
   getMemory(id: string): Promise<Memory>;
   listCategories(): Promise<Category[]>;
-  /** Saves exactly these fields, no pipeline. */
-  createMemory(fields: MemoryFields): Promise<Memory>;
+  /** Saves exactly these fields and this structure, no pipeline. */
+  createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<Memory>;
   /** Runs the text through the understanding pipeline and waits for it. */
   ingest(request: IngestRequest): Promise<IngestResult>;
   /**
@@ -118,10 +119,18 @@ export class HttpApiClient implements ApiClient {
     return parseCategories(await this.request("/v1/categories"));
   }
 
-  async createMemory(fields: MemoryFields): Promise<Memory> {
+  async createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<Memory> {
+    // The structured save takes no category (it is derived from kind and
+    // topic) and calls the sub-label a subtopic.
     const body = await this.request("/v1/memories:direct", {
       method: "POST",
-      body: { ...fields, client: CLIENT_NAME },
+      body: {
+        content: fields.content,
+        ...(fields.subcategory !== null && { subtopic: fields.subcategory }),
+        tags: fields.tags,
+        ...structure,
+        client: CLIENT_NAME,
+      },
     });
     return parseMemory(body);
   }

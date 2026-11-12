@@ -45,18 +45,25 @@ memories = ra.save_and_wait("User is vegetarian now")
 
 ## When you already know what to remember
 
-`save_direct` stores one memory verbatim, with no model in the loop. It
-is cheap and synchronous — but nothing read the content, so it cannot
-supersede a contradiction. Prefer `save` unless you have already
-distilled the memory yourself.
+`save_direct` stores one memory as given, with what it is and who it is true
+for, and no model in the loop. It is cheap and synchronous — but nothing read
+the content, so it cannot supersede a contradiction. Prefer `save` unless you
+have already distilled the memory yourself.
 
 ```python
-ra.save_direct(
+saved = ra.save_direct(
     "User forbids barrel files / index.ts re-exports",
-    category="preference.coding",
+    kind="preference",
+    topic="coding",
+    applies_to="me",
+    origin="user_said",
     tags=["typescript", "imports"],
 )
+print(saved.message)
 ```
+
+The fields are explained in the repository's `docs/memory-model.md`. A memory
+rule that refuses the save raises `RejectedError` with its `code`.
 
 ## Session distillation
 

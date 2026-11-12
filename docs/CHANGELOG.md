@@ -5,6 +5,58 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S1: every save states what it is and who it is true for
+
+Phase S1 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md). **A
+breaking change to the save API**, shipping with the rest of the plan as `v0.6.0`.
+The field reference is the new [docs/memory-model.md](memory-model.md).
+
+- **`POST /v1/memories:direct`, `memory_save` and `memory_save_batch` take the
+  structured shape**: `content`, `kind`, `topic`, `applies_to`
+  (`{"target": "me" | "project" | "general", "project_name", "new_project"}`),
+  `origin`, plus optional `subtopic`, `tags`, `valid_until` and `category`. The old
+  shape is refused by name: `category` alone gets `missing_field`, and
+  `subcategory`, `confidence` and `expires_at` get `invalid_value` naming their
+  replacement. The reply carries `message` ("Saved as your personal coding
+  preference (applies to you everywhere).") and `notes`.
+- **The rules every entry point enforces** (`StructuredMemorySaver`), each refusal a
+  `422` with a code and a fix:
+  - a kind only applies where it can (a preference is yours; a convention is a
+    project's) — `kind_target_mismatch`;
+  - an inferred memory about you needs your confirmation — `needs_confirmation`;
+  - a memory read from a document is filed under its project, and a preference in
+    one becomes a convention;
+  - text tied to one project ("the codebase", "este proyecto") cannot apply to you
+    or in general — `scope_contradiction`;
+  - no credentials — `secret`;
+  - a project memory needs a known project, or one you confirm is new —
+    `no_project`, `unknown_project`;
+  - a plan needs `valid_until`; a goal takes none; unknown topics are refused.
+  - With no `applies_to`, the default is the current project, else `general`, never
+    `me`, and the reply asks for confirmation.
+- **The two text checks are tuned for precision**, on labelled sets in English and
+  Spanish: the scope check and the secret check each refuse none of the texts they
+  should keep, and miss none of their test cases.
+- **Projects.** A per-user registry (V11's `projects` and `project_aliases`).
+  `recuerdos-ai mcp` detects the project of the folder it runs in —
+  `RECUERDOS_AI_PROJECT`, else the git `origin` remote (`github.com/acme/quill` →
+  `quill`, the same for every clone and worktree), else the repository's folder
+  name; nothing outside a repository — and sends it as `X-Recuerdos-Project` /
+  `X-Recuerdos-Project-Remote`. A remote is remembered as an alias.
+- **MCP**: the save tools' descriptions carry the field guidance; a refusal is a tool
+  result beginning `Not saved (code):`, which an agent reads and acts on.
+- **Web UI**: **Add memory** asks what it is, what it is about and who it applies
+  to, greys out what a kind cannot take, and shows a refusal without losing the
+  text. The category is derived for a direct save; custom categories stay
+  available to the AI path and the editor.
+- **Python SDK**: `save_direct(content, *, kind, topic, origin, applies_to=…)`
+  returns a `SavedMemory` with `message`; `RejectedError` (422) carries the rule's
+  `code`; `Memory` gains the structure fields; `AppliesTo` is exported.
+- Unchanged in S1: the editor, bulk edits and category management still work on
+  categories (re-filing re-derives the structure), and raw text through
+  `POST /v1/memories` and session distillation still goes through the pipeline,
+  which learns the shape in S2.
+
 ### Structured memories, phase S0: every memory has a kind, a topic and a scope
 
 The first phase of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md):

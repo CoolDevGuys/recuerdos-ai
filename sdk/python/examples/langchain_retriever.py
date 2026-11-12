@@ -20,12 +20,24 @@ import uuid
 from recuerdos_ai import Client, RecuerdosError
 from recuerdos_ai.langchain import RecuerdosRetriever
 
+# What each memory is (kind), what it is about (topic), and who it is true
+# for (applies_to). See docs/memory-model.md.
 SEED = [
-    ("User prefers pnpm and never uses npm or yarn", "preference.coding"),
-    ("User forbids barrel files and index.ts re-exports", "preference.coding"),
-    ("SQLite was chosen over Postgres because of installer size", "decision"),
-    ("The backend runs on Hetzner, migrated from Fly.io on cost", "fact.project"),
-    ("User is vegetarian", "preference.personal"),
+    ("User prefers pnpm and never uses npm or yarn", "preference", "coding", "me"),
+    ("User forbids barrel files and index.ts re-exports", "preference", "coding", "me"),
+    (
+        "SQLite was chosen over Postgres because of installer size",
+        "decision",
+        "coding",
+        "general",
+    ),
+    (
+        "The backend runs on Hetzner, migrated from Fly.io on cost",
+        "fact",
+        "tech",
+        "general",
+    ),
+    ("User is vegetarian", "rule", "food", "me"),
 ]
 
 
@@ -51,8 +63,15 @@ def main() -> int:
     # Tagged per run so re-running this does not search a store the last
     # run polluted.
     run = f"lc-{uuid.uuid4().hex[:8]}"
-    for content, category in SEED:
-        ra.save_direct(content, category=category, tags=[run])
+    for content, kind, topic, target in SEED:
+        ra.save_direct(
+            content,
+            kind=kind,
+            topic=topic,
+            applies_to=target,
+            origin="user_said",
+            tags=[run],
+        )
     print(f"seeded {len(SEED)} memories (tag {run})")
 
     retriever = RecuerdosRetriever(client=ra, limit=2, tags=[run])

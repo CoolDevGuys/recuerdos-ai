@@ -13,6 +13,7 @@ from typing import Any
 __all__ = [
     "RecuerdosError",
     "ValidationError",
+    "RejectedError",
     "AuthenticationError",
     "PermissionError_",
     "NotFoundError",
@@ -51,6 +52,17 @@ class RecuerdosError(Exception):
 
 class ValidationError(RecuerdosError):
     """400 — the request was malformed. Retrying it unchanged will not help."""
+
+
+class RejectedError(RecuerdosError):
+    """422 — a memory rule refused the save (``docs/memory-model.md``).
+
+    ``code`` says which: ``missing_field``, ``invalid_value``,
+    ``kind_target_mismatch``, ``unknown_project``, ``no_project``,
+    ``needs_confirmation``, ``scope_contradiction``, ``secret`` or
+    ``unknown_topic``. The message says how to fix it — often, by asking the
+    user first.
+    """
 
 
 class AuthenticationError(RecuerdosError):
@@ -126,6 +138,7 @@ _BY_STATUS: dict[int, type[RecuerdosError]] = {
     403: PermissionError_,
     404: NotFoundError,
     409: ConflictError,
+    422: RejectedError,
 }
 
 

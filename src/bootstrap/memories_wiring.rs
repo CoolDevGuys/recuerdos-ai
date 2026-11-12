@@ -13,6 +13,7 @@ use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
+use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
 use crate::memories::domain::category_catalog::CategoryCatalog;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
@@ -27,6 +28,8 @@ use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
+use crate::memories::infrastructure::sqlite_project_registry::SqliteProjectRegistry;
+use crate::memories::infrastructure::sqlite_topic_catalog::SqliteTopicCatalog;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
 use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
 use crate::providers::infrastructure::chat::transport;
@@ -47,6 +50,10 @@ const TEXT_INDEX_DIR: &str = "text-index";
 
 pub struct Memories {
     pub saver: Arc<DirectMemorySaver>,
+    /// The save whose structure the caller states, with every memory rule
+    /// applied (ai-specs/memory-structure-plan.md §4): what `:direct` and
+    /// the MCP save tools use.
+    pub structured_saver: Arc<StructuredMemorySaver>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
     pub updater: Arc<MemoryUpdater>,
@@ -253,21 +260,30 @@ impl Memories {
             Arc::clone(&bulk_editor),
         ));
 
+        let saver = Arc::new(
+            DirectMemorySaver::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                Arc::clone(&text),
+                Arc::clone(&embedder),
+                Arc::clone(&clock),
+            )
+            .with_document_text(config.document_text()),
+        );
+        let structured_saver = Arc::new(StructuredMemorySaver::new(
+            Arc::clone(&saver),
+            Arc::new(SqliteProjectRegistry::new(Arc::clone(&database))),
+            Arc::new(SqliteTopicCatalog::new(Arc::clone(&database))),
+            Arc::clone(&clock),
+        ));
+
         Ok(Self {
             mapper,
             catalog,
             bulk_editor,
             category_curator,
-            saver: Arc::new(
-                DirectMemorySaver::new(
-                    Arc::clone(&repository),
-                    Arc::clone(&vectors),
-                    Arc::clone(&text),
-                    Arc::clone(&embedder),
-                    Arc::clone(&clock),
-                )
-                .with_document_text(config.document_text()),
-            ),
+            saver,
+            structured_saver,
             recaller: Arc::new(recaller),
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
             updater: Arc::new(

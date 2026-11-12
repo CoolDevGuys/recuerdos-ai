@@ -75,6 +75,17 @@ export interface MemoryFields {
   tags: string[];
 }
 
+/**
+ * What a new memory is, what it is about and who it is true for
+ * (ai-specs/memory-structure-plan.md §3). The daemon applies the rules.
+ */
+export interface MemoryStructure {
+  kind: string;
+  topic: string;
+  applies_to: { target: "me" | "project" | "general"; project_name?: string; new_project?: boolean };
+  origin: "user_said";
+}
+
 /** An edit: only the fields that changed. */
 export type MemoryPatch = Partial<MemoryFields>;
 

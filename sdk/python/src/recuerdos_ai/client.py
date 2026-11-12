@@ -25,7 +25,15 @@ from typing import Any
 import httpx
 
 from .errors import JobFailedError, RecuerdosError, TimeoutError_, from_response
-from .models import Distillation, Job, Memory, SearchHit, SearchReport
+from .models import (
+    AppliesTo,
+    Distillation,
+    Job,
+    Memory,
+    SavedMemory,
+    SearchHit,
+    SearchReport,
+)
 
 __all__ = ["Client"]
 
@@ -154,43 +162,74 @@ class Client:
         self,
         content: str,
         *,
-        category: str | None = None,
+        kind: str,
+        topic: str,
+        origin: str,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        subtopic: str | None = None,
         tags: list[str] | None = None,
-        confidence: float | None = None,
+        valid_until: datetime | None = None,
+        category: str | None = None,
         client: str | None = None,
         session_id: str | None = None,
-        expires_at: datetime | None = None,
-    ) -> Memory:
-        """Stores one memory exactly as given, with no pipeline.
+    ) -> SavedMemory:
+        """Stores one memory with its structure, with no pipeline.
 
-        Use this when you have already decided what the memory should
-        say. It is synchronous, cheap, and calls no model — but it also
-        cannot supersede a contradiction, because nothing read the
-        content. When in doubt, prefer :meth:`save`.
+        The structure is what lets recall tell the user's own preferences
+        from one project's rules (see ``docs/memory-model.md``). The server
+        applies the memory rules and raises :class:`RejectedError` — with a
+        ``code`` such as ``needs_confirmation`` or ``kind_target_mismatch``
+        and a message saying how to fix it — when one stops the save.
 
         Args:
-            content: 1–4000 characters.
-            category: Defaults to ``fact.project`` server-side.
+            content: The memory as one standalone sentence; 1–4000 characters.
+            kind: ``preference``, ``rule``, ``convention``, ``decision``,
+                ``fact``, ``experience``, ``learning``, ``procedure``,
+                ``reference``, ``goal`` or ``plan``.
+            topic: ``coding``, ``tech``, ``work``, ``family``, ``people``,
+                ``health``, ``lifestyle``, ``home``, ``finance``, ``travel``,
+                ``food``, or one of your own.
+            origin: ``user_said``, ``user_confirmed``, ``inferred`` or
+                ``document``.
+            applies_to: ``"me"``, ``"general"``, an :class:`AppliesTo`
+                (``AppliesTo(target="project", project_name="quill")``), or
+                ``None`` for the server's default (a known project, else
+                ``general`` — never ``me``).
+            subtopic: A finer label within the topic.
             tags: Lowercased and de-duplicated; at most 32.
-            confidence: ``0.0``–``1.0``. Clamped rather than rejected.
-            expires_at: Must be in the future. The nightly job retires
-                the memory once it passes.
+            valid_until: When it stops being true. Required for a plan.
+            category: The old category to also file it under; derived from
+                kind and topic when omitted.
+
+        Returns:
+            The memory, plus the server's ``message`` saying how it was filed.
         """
-        body: dict[str, Any] = {"content": content}
-        if category is not None:
-            body["category"] = category
+        body: dict[str, Any] = {
+            "content": content,
+            "kind": kind,
+            "topic": topic,
+            "origin": origin,
+        }
+        if isinstance(applies_to, str):
+            body["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body["applies_to"] = applies_to.model_dump(exclude_none=True)
+        elif applies_to is not None:
+            body["applies_to"] = applies_to
+        if subtopic is not None:
+            body["subtopic"] = subtopic
         if tags:
             body["tags"] = tags
-        if confidence is not None:
-            body["confidence"] = confidence
+        if valid_until is not None:
+            body["valid_until"] = valid_until.isoformat()
+        if category is not None:
+            body["category"] = category
         if client is not None:
             body["client"] = client
         if session_id is not None:
             body["session_id"] = session_id
-        if expires_at is not None:
-            body["expires_at"] = expires_at.isoformat()
 
-        return Memory.model_validate(
+        return SavedMemory.model_validate(
             self._request("POST", "/v1/memories:direct", json=body)
         )
 

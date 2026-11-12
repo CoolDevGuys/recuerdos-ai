@@ -25,7 +25,7 @@ pub struct ApiErrorBody {
 
 #[derive(Debug, Serialize)]
 pub struct ApiErrorDetail {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
 }
 
@@ -37,6 +37,12 @@ impl IntoResponse for RaError {
             RaError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             RaError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             RaError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            RaError::Rejected { code, message } => {
+                let body = Json(ApiErrorBody {
+                    error: ApiErrorDetail { code, message },
+                });
+                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+            }
             RaError::PreconditionFailed(message) => (
                 StatusCode::PRECONDITION_FAILED,
                 "precondition_failed",
@@ -74,7 +80,10 @@ impl IntoResponse for RaError {
         };
 
         let body = Json(ApiErrorBody {
-            error: ApiErrorDetail { code, message },
+            error: ApiErrorDetail {
+                code: code.to_string(),
+                message,
+            },
         });
 
         if status == StatusCode::UNAUTHORIZED {
@@ -132,6 +141,18 @@ mod tests {
                 "conflict",
             ),
         ];
+
+        let rejected = RaError::Rejected {
+            code: "kind_target_mismatch".into(),
+            message: "a preference cannot apply to project".into(),
+        };
+        let (status, body) = parts(rejected).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "kind_target_mismatch");
+        assert_eq!(
+            body["error"]["message"],
+            "a preference cannot apply to project"
+        );
 
         for (error, expected_status, expected_code) in cases {
             let message = error.to_string();

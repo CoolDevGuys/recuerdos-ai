@@ -190,6 +190,31 @@ fn custom_kind_and_topic(id: &str, tags: &[String]) -> (Kind, Topic) {
     (kind, topic)
 }
 
+/// The old category a structured memory is filed under, for what still reads
+/// categories (recall's category filter, the map, the enriched vector header)
+/// until topics replace them (plan phases S4–S5). Lossy by design: the
+/// structure is the record; this only keeps the old readers working.
+pub fn category_for(kind: Kind, topic: &Topic) -> Category {
+    let technical = matches!(topic, Topic::Coding | Topic::Tech);
+    match kind {
+        Kind::Preference | Kind::Rule | Kind::Convention => {
+            if technical {
+                Category::PreferenceCoding
+            } else {
+                Category::PreferencePersonal
+            }
+        }
+        Kind::Decision => Category::Decision,
+        Kind::Fact | Kind::Goal | Kind::Plan => match topic {
+            Topic::People | Topic::Family => Category::FactPerson,
+            _ => Category::FactProject,
+        },
+        Kind::Experience | Kind::Learning => Category::Experience,
+        Kind::Procedure => Category::Skill,
+        Kind::Reference => Category::Reference,
+    }
+}
+
 fn legacy_kind(word: &str) -> Option<Kind> {
     match word {
         "skill" => Some(Kind::Procedure),
@@ -304,6 +329,35 @@ mod tests {
             mapped(custom("decision"), &["travel"]),
             (Kind::Decision, Topic::Travel, Target::General, true)
         );
+    }
+
+    #[test]
+    fn a_structure_files_under_the_nearest_old_category() {
+        assert_eq!(
+            category_for(Kind::Preference, &Topic::Coding),
+            Category::PreferenceCoding
+        );
+        assert_eq!(
+            category_for(Kind::Rule, &Topic::Food),
+            Category::PreferencePersonal
+        );
+        assert_eq!(
+            category_for(Kind::Convention, &Topic::Coding),
+            Category::PreferenceCoding
+        );
+        assert_eq!(
+            category_for(Kind::Fact, &Topic::Family),
+            Category::FactPerson
+        );
+        assert_eq!(
+            category_for(Kind::Plan, &Topic::Health),
+            Category::FactProject
+        );
+        assert_eq!(
+            category_for(Kind::Learning, &Topic::Coding),
+            Category::Experience
+        );
+        assert_eq!(category_for(Kind::Procedure, &Topic::Tech), Category::Skill);
     }
 
     #[test]

@@ -6,7 +6,7 @@ not my standards. Is there a way to improve how memories are stored — a better
 classification — so that recall can tell them apart? I would like to define as much structure as
 possible when memories are saved, instead of relying on the harness to get it right.*
 
-Status: **S0 implemented** (2026-11-12, branch `feat/memory-structure`); S1–S5 to do. The shape,
+Status: **S0–S1 implemented** (2026-11-12, branch `feat/memory-structure`); S2–S5 to do. The shape,
 the rules and the examples in §3–§7 were settled with the owner in conversation on 2026-11-11/12
 (§1). §11 records how the last open questions were resolved; none remain. §12 records how S0 went.
 
@@ -417,4 +417,28 @@ and the legend and tooltips name the kind, so colour is never the only cue.
   an illegal kind × target pair, and 185 of the 222 active memories are flagged for review: 94 coding
   preferences, 65 project facts, the decisions, and the procedures, references and experiences no tag
   placed. The review queue (S5) will be long, and its **Suggest** pass is what keeps it usable.
+
+### S1 (2026-11-12)
+
+- **One use case applies every rule**: `StructuredMemorySaver`. REST `:direct` calls it; the MCP save
+  tools reach it through the shim's HTTP toolbox, so both transports refuse the same things with
+  the same codes. The checks run before anything is written, and a confirmed new project is only
+  created once the save is known to go through.
+- **`category` is still accepted alongside the structure**, and derived from kind and topic when
+  absent (`legacy_structure::category_for`). Refusing it outright would have left nothing able to
+  file a memory under a user's own category until S5 replaces categories with topics; E14 still
+  holds, since a category *alone* is refused.
+- **The web UI's new project is created by the save**: a project name the user types in **Add
+  memory** is one they mean, so the form sends `new_project: true`. An agent must ask first.
+- **`plan` is not offered in the web UI yet**: it needs a date field, which comes with the editor
+  in S5. The API and MCP take it.
+- **R7 and R9 are measured in `content_checks.rs`**: 22 project-bound and 29 neutral texts for R7,
+  16 secrets and 20 credential-adjacent non-secrets for R9, in English and Spanish. Both reach
+  100% precision and 100% recall on those sets (the bar was 95% precision). "El código" alone was
+  left out of the R7 list: "prefiere que el código tenga tests" is a personal preference.
+- **Project detection only inside a git repository**: a harness started in a home directory has no
+  project, rather than one named after the user.
+- **The pipeline's empty outcomes (`nothing_durable`, `already_known`) no longer come from the save
+  tools**, which now always store or refuse. They stay in the toolbox for S2, whose conflict check
+  reports `already_known` again.
 
