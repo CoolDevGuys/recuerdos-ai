@@ -5,6 +5,31 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S0: every memory has a kind, a topic and a scope
+
+The first phase of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md):
+the model and the migration, with no change to how memories are saved yet.
+
+- **Migration V11** adds `kind`, `topic`, `target` (`me` / `project` /
+  `general`), `project_id`, `origin`, `goal_status` and `needs_review` to
+  memories, and the `projects`, `project_aliases` and `topics` tables.
+  Nothing is dropped: `category` and `subcategory` stay.
+- **On first start, every existing memory gets a structure** derived from its
+  category (plan §8), in one transaction, without touching `updated_at`.
+  What the mapping cannot place is flagged `needs_review`: every coding
+  preference (it may be one project's convention), and every project fact and
+  decision (the project is not on record). On a copy of the field store, all
+  225 memories were mapped, none to an illegal pair, and 185 of the 222 active
+  ones were flagged.
+- **Every memory the API returns carries it**: `kind`, `topic`, `applies_to`
+  (`{"target": …, "project_name": …}`), `origin`, `goal_status` (goals only)
+  and `needs_review`, in saves, reads, search hits, edits and the JSON export.
+  Until the save path takes a structure (S1), a new memory's comes from its
+  category, and re-filing it re-derives it.
+- Domain: `Kind` (with the kinds each target allows), `Topic`, `AppliesTo`,
+  `Origin`, `GoalStatus` and `MemoryStructure`, which refuses an illegal
+  kind × target pair and a goal status on anything but a goal.
+
 ### Web UI: the memory list is paged
 
 - The List tab renders 50 memories a page instead of every row at once, which

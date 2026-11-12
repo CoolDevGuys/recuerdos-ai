@@ -354,6 +354,20 @@ impl RecallCore {
         // `reindex` with a clear message, not surface later as a raw
         // dimension-mismatch on the first recall.
         concrete_repository.verify_pin()?;
+        // Memories stored before V11 get their structure derived from their
+        // category, once (ai-specs/memory-structure-plan.md §8). Skipped by
+        // read-only openers — a command reading a store another process
+        // serves — which read unfilled rows through the same mapping anyway.
+        if !read_only_text {
+            let filled = concrete_repository.backfill_structure()?;
+            if filled > 0 {
+                tracing::info!(
+                    memories = filled,
+                    "gave memories saved before structured memories a kind, topic and scope; \
+                     the ones it could not place are flagged for review"
+                );
+            }
+        }
         let repository: Arc<dyn MemoryRepository> = Arc::new(concrete_repository);
         let vectors: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::open(
             Arc::clone(database),

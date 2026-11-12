@@ -113,6 +113,36 @@ say. Use `/v1/memories` for raw material: a sentence the user typed, a
 session summary, a paragraph that might contain three durable facts or
 none.
 
+### The structure every memory carries
+
+Every memory the API returns (saves, reads, search hits, edits, the JSON
+export) also says what sort of statement it is, what it is about, and who it
+is true for ([ai-specs/memory-structure-plan.md](../ai-specs/memory-structure-plan.md)):
+
+```json
+{
+  "kind": "preference",
+  "topic": "coding",
+  "applies_to": {"target": "me"},
+  "origin": "user_said",
+  "needs_review": true
+}
+```
+
+| Field | Values |
+|---|---|
+| `kind` | `preference`, `rule`, `convention`, `decision`, `fact`, `experience`, `learning`, `procedure`, `reference`, `goal`, `plan` |
+| `topic` | `coding`, `tech`, `work`, `family`, `people`, `health`, `lifestyle`, `home`, `finance`, `travel`, `food`, or one of your own |
+| `applies_to.target` | `me` (you, everywhere), `project` (one project, named by `applies_to.project_name`), `general` (your world, not tied to a project) |
+| `origin` | `user_said`, `user_confirmed`, `inferred`, `document` |
+| `goal_status` | goals only: `active`, `achieved`, `abandoned` |
+| `needs_review` | `true` when the structure was derived from an old category and may be wrong |
+
+For now the structure is **derived from the category**, by the mapping in the
+plan's §8: every memory saved before this release was given one on the
+daemon's first start, and a new memory gets one from the category it is saved
+with. Saves that state the structure directly arrive in a later release.
+
 ### `POST /v1/memories` — ingest raw content
 
 Submits content for understanding. Requires `write`.
@@ -539,7 +569,9 @@ Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
 
 JSON items carry `id`, `content`, `category`, `subcategory` (or `null`),
-`tags`, `confidence`, `created_at`, `updated_at` and `superseded_by`.
+`tags`, `confidence`, `created_at`, `updated_at`, `superseded_by`, and the
+structure: `kind`, `topic`, `applies_to`, `origin`, `goal_status` (or `null`)
+and `needs_review`.
 
 ### `POST /v1/sessions/distill`
 

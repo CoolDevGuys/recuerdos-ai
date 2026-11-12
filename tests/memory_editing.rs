@@ -289,3 +289,40 @@ async fn categories_list_every_built_in_with_the_callers_counts() {
         1
     );
 }
+
+/// Structured memories, phase S0 (ai-specs/memory-structure-plan.md §3, §8):
+/// every memory the API returns carries its kind, topic, scope and origin,
+/// derived from its category until the save path takes them (S1), and
+/// re-derived when it is re-filed.
+#[tokio::test]
+async fn every_memory_carries_its_structure() {
+    let session = Session::spawn().await;
+    let response = session
+        .http
+        .post(session.url("/v1/memories:direct"))
+        .bearer_auth(&session.key)
+        .json(&json!({"content": "User prefers pnpm", "category": "preference.coding"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved: Value = response.json().await.unwrap();
+
+    assert_eq!(saved["kind"], "preference");
+    assert_eq!(saved["topic"], "coding");
+    assert_eq!(saved["applies_to"], json!({"target": "me"}));
+    assert_eq!(saved["origin"], "user_said");
+    assert_eq!(saved["needs_review"], true);
+    assert!(saved.get("goal_status").is_none(), "only goals have one");
+
+    let id = saved["id"].as_str().unwrap();
+    let response = session
+        .patch(id, None, json!({"category": "skill", "tags": ["docker"]}))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let refiled: Value = response.json().await.unwrap();
+
+    assert_eq!(refiled["kind"], "procedure");
+    assert_eq!(refiled["topic"], "tech", "from the docker tag");
+    assert_eq!(refiled["applies_to"], json!({"target": "general"}));
+}

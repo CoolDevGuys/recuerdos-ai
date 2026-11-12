@@ -5,6 +5,7 @@
 //! are where that promise is written down.
 
 use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
+use crate::memories::domain::applies_to::AppliesTo;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::recall_ranker::ScoredMemory;
@@ -113,6 +114,38 @@ pub struct MemoryResponse {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// What sort of statement it is (ai-specs/memory-structure-plan.md §3).
+    pub kind: String,
+    /// What it is about.
+    pub topic: String,
+    /// Who or what it is true for.
+    pub applies_to: AppliesToResponse,
+    /// Where it came from: `user_said`, `user_confirmed`, `inferred` or
+    /// `document`.
+    pub origin: String,
+    /// For goals only: `active`, `achieved` or `abandoned`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_status: Option<String>,
+    /// The structure was derived from an old category and may be wrong.
+    pub needs_review: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppliesToResponse {
+    /// `me`, `project` or `general`.
+    pub target: String,
+    /// The project's name, when `target` is `project`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+impl From<&AppliesTo> for AppliesToResponse {
+    fn from(applies_to: &AppliesTo) -> Self {
+        Self {
+            target: applies_to.target().as_str().to_string(),
+            project_name: applies_to.project().map(|project| project.name.clone()),
+        }
+    }
 }
 
 impl From<&Memory> for MemoryResponse {
@@ -128,6 +161,15 @@ impl From<&Memory> for MemoryResponse {
             updated_at: memory.updated_at(),
             expires_at: memory.expires_at(),
             superseded_by: memory.superseded_by().map(|id| id.to_string()),
+            kind: memory.structure().kind().as_str().to_string(),
+            topic: memory.structure().topic().as_str().to_string(),
+            applies_to: memory.structure().applies_to().into(),
+            origin: memory.structure().origin().as_str().to_string(),
+            goal_status: memory
+                .structure()
+                .goal_status()
+                .map(|status| status.as_str().to_string()),
+            needs_review: memory.structure().needs_review(),
         }
     }
 }
@@ -552,6 +594,15 @@ mod tests {
                 updated_at: Utc::now(),
                 expires_at: None,
                 superseded_by: None,
+                kind: "decision".to_string(),
+                topic: "work".to_string(),
+                applies_to: AppliesToResponse {
+                    target: "general".to_string(),
+                    project_name: None,
+                },
+                origin: "user_said".to_string(),
+                goal_status: None,
+                needs_review: true,
             },
             score: 0.5,
             matched: MatchResponse {

@@ -58,6 +58,7 @@ define_uuid_id!(UserId);
 define_uuid_id!(ApiKeyId);
 define_uuid_id!(MemoryId);
 define_uuid_id!(JobId);
+define_uuid_id!(ProjectId);
 
 #[cfg(test)]
 mod tests {

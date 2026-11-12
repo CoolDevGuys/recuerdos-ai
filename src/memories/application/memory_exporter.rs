@@ -79,6 +79,13 @@ fn render_json(memories: &[Memory]) -> String {
     let items: Vec<serde_json::Value> = memories
         .iter()
         .map(|memory| {
+            let structure = memory.structure();
+            let mut applies_to = serde_json::json!({
+                "target": structure.applies_to().target().as_str(),
+            });
+            if let Some(project) = structure.applies_to().project() {
+                applies_to["project_name"] = serde_json::json!(project.name);
+            }
             serde_json::json!({
                 "id": memory.id().to_string(),
                 "content": memory.content(),
@@ -89,6 +96,14 @@ fn render_json(memories: &[Memory]) -> String {
                 "created_at": memory.created_at().to_rfc3339(),
                 "updated_at": memory.updated_at().to_rfc3339(),
                 "superseded_by": memory.superseded_by().map(|id| id.to_string()),
+                // The structure (ai-specs/memory-structure-plan.md §3): a
+                // backup without it would lose what the user stated.
+                "kind": structure.kind().as_str(),
+                "topic": structure.topic().as_str(),
+                "applies_to": applies_to,
+                "origin": structure.origin().as_str(),
+                "goal_status": structure.goal_status().map(|status| status.as_str()),
+                "needs_review": structure.needs_review(),
             })
         })
         .collect();
@@ -187,6 +202,26 @@ mod tests {
         };
         assert_eq!(by_content("Tests use Vitest")["subcategory"], "testing");
         assert!(by_content("User prefers pnpm")["subcategory"].is_null());
+    }
+
+    #[test]
+    fn json_export_carries_the_structure() {
+        let fixture = Fixture::new();
+        fixture.save(&fixture.alex, "User prefers pnpm");
+
+        let json = fixture
+            .exporter()
+            .execute(&fixture.alex, ExportFormat::Json, false)
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let item = &parsed["memories"][0];
+        assert!(item["kind"].is_string(), "{item}");
+        assert!(item["topic"].is_string(), "{item}");
+        assert!(item["applies_to"]["target"].is_string(), "{item}");
+        assert_eq!(item["origin"], "user_said");
+        assert!(item["needs_review"].is_boolean(), "{item}");
+        assert!(item["goal_status"].is_null(), "not a goal");
     }
 
     #[test]

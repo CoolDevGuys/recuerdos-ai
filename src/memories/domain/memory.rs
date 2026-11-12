@@ -6,6 +6,8 @@
 //! unrelated facts wastes four of them on every recall.
 
 use super::category::Category;
+use super::legacy_structure::legacy_structure;
+use super::memory_structure::MemoryStructure;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::{MemoryId, UserId};
 use chrono::{DateTime, Utc};
@@ -50,6 +52,13 @@ pub struct Memory {
     /// (`preference.coding / testing`, `fact.person / family`).
     /// Free-form, open-ended, never required.
     subcategory: Option<String>,
+    /// What sort of statement this is, what it is about, who it is true for
+    /// and where it came from (ai-specs/memory-structure-plan.md §3).
+    ///
+    /// Until the save path takes a structure (plan phase S1), it is derived
+    /// from the category through [`legacy_structure`], the same mapping the
+    /// V11 backfill applied to every stored memory.
+    structure: MemoryStructure,
     tags: Vec<String>,
     entities: Vec<Entity>,
     confidence: f32,
@@ -113,13 +122,17 @@ impl Memory {
             ));
         }
 
+        let tags = normalize_tags(new.tags)?;
+        let structure = legacy_structure(&new.category, &tags);
+
         Ok(Self {
             id: MemoryId::new(),
             user_id,
             content: content.to_string(),
             category: new.category,
             subcategory: normalize_subcategory(new.subcategory)?,
-            tags: normalize_tags(new.tags)?,
+            structure,
+            tags,
             entities: new.entities,
             confidence: clamp_confidence(new.confidence),
             source: new.source,
@@ -142,6 +155,7 @@ impl Memory {
         content: String,
         category: Category,
         subcategory: Option<String>,
+        structure: MemoryStructure,
         tags: Vec<String>,
         entities: Vec<Entity>,
         confidence: f32,
@@ -160,6 +174,7 @@ impl Memory {
             content,
             category,
             subcategory,
+            structure,
             tags,
             entities,
             confidence,
@@ -196,6 +211,10 @@ impl Memory {
 
     pub fn subcategory(&self) -> Option<&str> {
         self.subcategory.as_deref()
+    }
+
+    pub fn structure(&self) -> &MemoryStructure {
+        &self.structure
     }
 
     pub fn tags(&self) -> &[String] {
@@ -272,14 +291,19 @@ impl Memory {
             }
             self.content = content.to_string();
         }
-        if let Some(category) = edit.category {
-            self.category = category;
-        }
         if let Some(subcategory) = edit.subcategory {
             self.subcategory = normalize_subcategory(subcategory)?;
         }
         if let Some(tags) = edit.tags {
             self.tags = normalize_tags(tags)?;
+        }
+        if let Some(category) = edit.category {
+            // Re-filing re-derives the structure: until edits can set it
+            // directly (plan phase S5), the category is the only way a user
+            // states it, so the old derivation must not outlive the category
+            // it came from.
+            self.structure = legacy_structure(&category, &self.tags);
+            self.category = category;
         }
         if let Some(expires_at) = edit.expires_at {
             self.expires_at = expires_at;
@@ -443,6 +467,44 @@ mod tests {
         assert_eq!(memory.last_accessed_at(), None);
         assert!(!memory.is_superseded());
         assert!(memory.is_active_at(now()));
+    }
+
+    #[test]
+    fn a_new_memory_is_given_the_structure_its_category_maps_to() {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::kind::Kind;
+
+        let memory = create("User prefers pnpm");
+
+        assert_eq!(memory.structure().kind(), Kind::Preference);
+        assert_eq!(memory.structure().applies_to(), &AppliesTo::Me);
+        assert!(
+            memory.structure().needs_review(),
+            "a coding preference may be one project's convention"
+        );
+    }
+
+    #[test]
+    fn re_filing_a_memory_re_derives_its_structure() {
+        use crate::memories::domain::kind::Kind;
+        use crate::memories::domain::topic::Topic;
+
+        let mut new = new_memory("Restart the NAS from the web panel");
+        new.tags = vec!["nas".to_string()];
+        let memory = Memory::create(UserId::new(), new, now()).unwrap();
+
+        let edited = memory
+            .edit(
+                MemoryEdit {
+                    category: Some(Category::Skill),
+                    ..MemoryEdit::default()
+                },
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(edited.structure().kind(), Kind::Procedure);
+        assert_eq!(edited.structure().topic(), &Topic::Tech, "from the nas tag");
     }
 
     #[test]
