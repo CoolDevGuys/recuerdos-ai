@@ -5,6 +5,43 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S5: the web UI speaks structure
+
+Phase S5 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), the last
+of `v0.6.0`. Explained for users in [web-ui.md](web-ui.md).
+
+- **The editor** edits what a memory is, what it is about, who it applies to and when it
+  ends, with help text for each; the category is no longer shown there. `plan` and an
+  end date are offered (a plan needs one, a goal takes none).
+- **Goals**: **Mark achieved**, **Abandon it**, **Reopen it** from the editor. A closed
+  goal leaves the current list and shows under **Closed goals**.
+- **The list** shows each memory's structure ("Convention · Coding · quill") and filters
+  by topic, kind, who it applies to, and status (current, needs review, closed goals,
+  expired, everything).
+- **Needs review** tab: the memories filed by a guess, with the tab counting them; bulk
+  filing, and **Suggest** (with a model) whose proposals are accepted one by one or all
+  at once. Nothing changes without a click.
+- **Projects** tab: rename, merge, and open a project's memories.
+- **Topics** tab: add your own topic, relabel any.
+- **Bulk edit** sets kind, topic and who memories apply to, or marks them reviewed, all
+  or nothing under the save rules.
+- **The map groups by topic and colours by kind** (D13), with a kind key. The eleven
+  kind colours were found by search and keep ΔE ≥ 18 between every pair under normal
+  vision and simulated protanopia, deuteranopia and tritanopia, with 3:1 contrast on
+  both canvases; the plan's fallback (shared hues) was not needed. Topic groups are
+  neutral, so colour means one thing.
+- **REST**: `GET /v1/topics`, `POST /v1/topics`, `PATCH /v1/topics/{id}`;
+  `POST /v1/memories:bulk` takes `set.kind`, `set.topic`, `set.applies_to` and
+  `set.reviewed`; `POST /v1/memories:suggest` (needs a model, `422 no_model` without);
+  `/v1/ping` reports `understanding`.
+- **Breaking: `GET /v1/map` groups by topic**: `topics`, `topic_edges`, `topic` and
+  `?topic=` replace `categories`, `category_edges`, `category` and `?category=`;
+  `detail` is `"topics"` above the detail limit.
+- **Python SDK**: `topics()`, `create_topic()`, `relabel_topic()`, `bulk_edit()`,
+  `suggest()`, and the `Topic`, `Suggestion` and `BulkResult` models.
+- **Playwright** covers the review queue, renaming a project, closing a goal and a
+  conflict shown to the user (10 of 10 against a real daemon).
+
 ### Structured memories, phase S4: recall and the profile know which project you are in
 
 Phase S4 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of

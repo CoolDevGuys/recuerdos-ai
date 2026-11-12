@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { FakeServer } from "./api/fake";
@@ -107,18 +107,20 @@ describe("the memory list", () => {
     expect(screen.getByText("1 of 3 memories")).toBeInTheDocument();
   });
 
-  it("filters by category, offering only categories present", async () => {
+  it("filters by topic, offering only topics present", async () => {
     renderApp();
     const user = await signIn(ALEX_KEY);
     await screen.findByText("The user prefers pnpm");
 
-    const select = screen.getByLabelText("Category");
-    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "All categories (3)",
-      "Coding preference (2)",
-      "Project fact (1)",
-    ]);
-    await user.selectOptions(select, "fact.project");
+    const select = screen.getByLabelText("Topic");
+    await waitFor(() =>
+      expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual([
+        "All topics",
+        "Coding (2)",
+        "Work (1)",
+      ]),
+    );
+    await user.selectOptions(select, "work");
 
     expect(within(screen.getByRole("list")).getAllByRole("listitem")).toHaveLength(1);
     expect(screen.getByText("Frontend uses Next.js")).toBeInTheDocument();

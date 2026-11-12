@@ -2,13 +2,17 @@ import { useId, useMemo, useRef, useState } from "react";
 import type { Memory } from "../api/types";
 import {
   NO_FILTER,
-  categoryCounts,
-  categoryLabel,
+  countBy,
   filterMemories,
+  isClosedGoal,
+  isExpired,
+  scopeOf,
   sortMemories,
   type MemoryFilter,
   type SortKey,
+  type Status,
 } from "../domain/memories";
+import { describeStructure, kindOf, topicLabelOf } from "../domain/structureForm";
 import { secondaryButton } from "./styles";
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
@@ -21,9 +25,18 @@ const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 export const PAGE_SIZE = 50;
 
 /** A filterable list of memories (plan §5.4, "List view"); a row opens it. */
+const STATUSES: { id: Status; label: string }[] = [
+  { id: "current", label: "Current" },
+  { id: "review", label: "Needs review" },
+  { id: "closed", label: "Closed goals" },
+  { id: "expired", label: "Expired" },
+  { id: "all", label: "Everything" },
+];
+
 export function MemoryList({
   memories,
-  labelOf = categoryLabel,
+  topicLabel = topicLabelOf,
+  initialFilter,
   highlighted = null,
   canWrite = false,
   onOpen,
@@ -33,7 +46,10 @@ export function MemoryList({
   pageSize = PAGE_SIZE,
 }: {
   memories: readonly Memory[];
-  labelOf?: (id: string) => string;
+  /** A topic's words: the user's label (`GET /v1/topics`). */
+  topicLabel?: (id: string) => string;
+  /** Where the list opens: a project's memories, the review queue… */
+  initialFilter?: Partial<MemoryFilter>;
   /** A memory just saved or restored, marked so the eye finds it. */
   highlighted?: string | null;
   canWrite?: boolean;
@@ -46,16 +62,20 @@ export function MemoryList({
   pageSize?: number;
 }) {
   const searchId = useId();
-  const categoryId = useId();
+  const filterId = useId();
   const sortId = useId();
-  const [filter, setFilter] = useState<MemoryFilter>(NO_FILTER);
+  const [filter, setFilter] = useState<MemoryFilter>(() => ({ ...NO_FILTER, ...initialFilter }));
   const [sort, setSort] = useState<SortKey>("updated");
   const [selecting, setSelecting] = useState(false);
   const [page, setPage] = useState(0);
   const listTop = useRef<HTMLParagraphElement>(null);
   const canSelect = canWrite && onSelect !== undefined && selected !== undefined;
 
-  const categories = useMemo(() => categoryCounts(memories), [memories]);
+  const topics = useMemo(() => countBy(memories, (m) => m.topic), [memories]);
+  const kinds = useMemo(() => countBy(memories, (m) => m.kind), [memories]);
+  const scopes = useMemo(() => countBy(memories, scopeOf), [memories]);
+  const scopeLabel = (scope: string) =>
+    scope === "me" ? "You (everywhere)" : scope === "general" ? "General" : `Project ${scope.slice("project:".length)}`;
   const visible = useMemo(
     () => sortMemories(filterMemories(memories, filter), sort),
     [memories, filter, sort],
@@ -122,8 +142,8 @@ export function MemoryList({
           )}
         </div>
       )}
-      <div className="grid gap-3 sm:grid-cols-[1fr_14rem_10rem]">
-        <div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_10rem_10rem_10rem_10rem_9rem]">
+        <div className="sm:col-span-2 lg:col-span-1">
           <label htmlFor={searchId} className={labelClass}>
             Filter
           </label>
@@ -137,19 +157,72 @@ export function MemoryList({
           />
         </div>
         <div>
-          <label htmlFor={categoryId} className={labelClass}>
-            Category
+          <label htmlFor={`${filterId}-topic`} className={labelClass}>
+            Topic
           </label>
           <select
-            id={categoryId}
-            value={filter.category ?? ""}
-            onChange={(event) => changeFilter({ ...filter, category: event.target.value === "" ? null : event.target.value })}
+            id={`${filterId}-topic`}
+            value={filter.topic ?? ""}
+            onChange={(event) => changeFilter({ ...filter, topic: event.target.value === "" ? null : event.target.value })}
             className={fieldClass}
           >
-            <option value="">All categories ({memories.length})</option>
-            {categories.map((category) => (
-              <option key={category.id} value={category.id}>
-                {labelOf(category.id)} ({category.count})
+            <option value="">All topics</option>
+            {topics.map((topic) => (
+              <option key={topic.id} value={topic.id}>
+                {topicLabel(topic.id)} ({topic.count})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor={`${filterId}-kind`} className={labelClass}>
+            Kind
+          </label>
+          <select
+            id={`${filterId}-kind`}
+            value={filter.kind ?? ""}
+            onChange={(event) => changeFilter({ ...filter, kind: event.target.value === "" ? null : event.target.value })}
+            className={fieldClass}
+          >
+            <option value="">All kinds</option>
+            {kinds.map((kind) => (
+              <option key={kind.id} value={kind.id}>
+                {kindOf(kind.id)?.label ?? kind.id} ({kind.count})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor={`${filterId}-scope`} className={labelClass}>
+            Applies to
+          </label>
+          <select
+            id={`${filterId}-scope`}
+            value={filter.scope ?? ""}
+            onChange={(event) => changeFilter({ ...filter, scope: event.target.value === "" ? null : event.target.value })}
+            className={fieldClass}
+          >
+            <option value="">Anyone or anything</option>
+            {scopes.map((scope) => (
+              <option key={scope.id} value={scope.id}>
+                {scopeLabel(scope.id)} ({scope.count})
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor={`${filterId}-status`} className={labelClass}>
+            Show
+          </label>
+          <select
+            id={`${filterId}-status`}
+            value={filter.status}
+            onChange={(event) => changeFilter({ ...filter, status: event.target.value as Status })}
+            className={fieldClass}
+          >
+            {STATUSES.map((status) => (
+              <option key={status.id} value={status.id}>
+                {status.label}
               </option>
             ))}
           </select>
@@ -164,7 +237,7 @@ export function MemoryList({
             }} className={fieldClass}>
             <option value="updated">Recently updated</option>
             <option value="created">Recently created</option>
-            <option value="category">Category</option>
+            <option value="topic">Topic</option>
           </select>
         </div>
       </div>
@@ -218,7 +291,7 @@ export function MemoryList({
                   <span className="min-w-0">
                     <span className="block text-sm text-slate-900 dark:text-slate-100">{memory.content}</span>
                     <span className="mt-1 block text-xs text-slate-600 dark:text-slate-400">
-                      {labelOf(memory.category)}
+                      {describeStructure(memory, topicLabel)}
                       {memory.subcategory !== null && ` · ${memory.subcategory}`}
                       {memory.tags.length > 0 && ` · ${memory.tags.map((tag) => `#${tag}`).join(" ")}`}
                     </span>
@@ -237,9 +310,10 @@ export function MemoryList({
               </p>
               <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
                 <span className="font-medium text-slate-700 dark:text-slate-300">
-                  {labelOf(memory.category)}
+                  {describeStructure(memory, topicLabel)}
                   {memory.subcategory !== null && ` · ${memory.subcategory}`}
                 </span>
+                <StatusBadges memory={memory} />
                 {memory.tags.length > 0 && (
                   <span>
                     <span className="sr-only">Tags: </span>
@@ -276,5 +350,28 @@ export function MemoryList({
         </nav>
       )}
     </section>
+  );
+}
+
+/** What makes a memory more than current: a guess to review, a closed goal, an end that passed. */
+function StatusBadges({ memory }: { memory: Memory }) {
+  const badge = "rounded px-1.5 py-0.5 text-[11px] font-medium";
+  return (
+    <>
+      {memory.needs_review && (
+        <span className={`${badge} bg-amber-100 text-amber-900 dark:bg-amber-900/50 dark:text-amber-100`}>Needs review</span>
+      )}
+      {memory.kind === "goal" && memory.goal_status === "active" && (
+        <span className={`${badge} bg-indigo-100 text-indigo-900 dark:bg-indigo-900/50 dark:text-indigo-100`}>Open goal</span>
+      )}
+      {isClosedGoal(memory) && (
+        <span className={`${badge} bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100`}>
+          Goal {memory.goal_status}
+        </span>
+      )}
+      {isExpired(memory) && (
+        <span className={`${badge} bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-100`}>Expired</span>
+      )}
+    </>
   );
 }

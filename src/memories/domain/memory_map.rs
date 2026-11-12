@@ -24,8 +24,8 @@
 //! similarity rescaled above the baseline, `0..=1`. So an edge means "more
 //! alike than two unrelated memories are", whatever the model.
 
-use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::Memory;
+use crate::memories::domain::topic::Topic;
 use crate::shared::ids::MemoryId;
 use std::collections::{BTreeMap, HashMap};
 
@@ -115,9 +115,10 @@ pub fn mutual_knn(
     edges
 }
 
-/// One category present in the map, with its sub-labels.
+/// One topic present in the map, with its subtopics (the map groups by
+/// topic: ai-specs/memory-structure-plan.md D13).
 #[derive(Debug, Clone, PartialEq)]
-pub struct CategorySummary {
+pub struct TopicSummary {
     pub id: String,
     pub label: String,
     pub built_in: bool,
@@ -126,25 +127,25 @@ pub struct CategorySummary {
     pub subcategories: Vec<(String, usize)>,
 }
 
-/// The categories the memories actually use, largest first (ties by id).
-pub fn category_summary(memories: &[Memory]) -> Vec<CategorySummary> {
-    let mut by_category: BTreeMap<String, (Category, usize, BTreeMap<String, usize>)> =
+/// The topics the memories actually use, largest first (ties by id).
+pub fn topic_summary(memories: &[Memory]) -> Vec<TopicSummary> {
+    let mut by_category: BTreeMap<String, (Topic, usize, BTreeMap<String, usize>)> =
         BTreeMap::new();
     for memory in memories {
         let entry = by_category
-            .entry(memory.category().as_str().to_string())
-            .or_insert_with(|| (memory.category().clone(), 0, BTreeMap::new()));
+            .entry(memory.structure().topic().as_str().to_string())
+            .or_insert_with(|| (memory.structure().topic().clone(), 0, BTreeMap::new()));
         entry.1 += 1;
         if let Some(sub) = memory.subcategory() {
             *entry.2.entry(sub.to_string()).or_default() += 1;
         }
     }
 
-    let mut summary: Vec<CategorySummary> = by_category
+    let mut summary: Vec<TopicSummary> = by_category
         .into_iter()
-        .map(|(id, (category, count, subs))| CategorySummary {
-            label: category.label(),
-            built_in: !matches!(category, Category::Custom(_)),
+        .map(|(id, (topic, count, subs))| TopicSummary {
+            label: topic.default_label(),
+            built_in: topic.is_built_in(),
             id,
             count,
             subcategories: subs.into_iter().collect(),
@@ -158,20 +159,22 @@ pub fn category_summary(memories: &[Memory]) -> Vec<CategorySummary> {
 /// similarity edges crossing between them, normalised by `√(|A|·|B|)` so a
 /// big category is not related to everything merely by being big.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CategoryEdge {
+pub struct TopicEdge {
     pub source: String,
     pub target: String,
     pub weight: f32,
 }
 
-pub fn category_edges(memories: &[Memory], edges: &[SimilarityEdge]) -> Vec<CategoryEdge> {
+pub fn topic_edges(memories: &[Memory], edges: &[SimilarityEdge]) -> Vec<TopicEdge> {
     let category_of: HashMap<MemoryId, &str> = memories
         .iter()
-        .map(|m| (m.id(), m.category().as_str()))
+        .map(|m| (m.id(), m.structure().topic().as_str()))
         .collect();
     let mut sizes: HashMap<&str, usize> = HashMap::new();
     for memory in memories {
-        *sizes.entry(memory.category().as_str()).or_default() += 1;
+        *sizes
+            .entry(memory.structure().topic().as_str())
+            .or_default() += 1;
     }
 
     let mut sums: BTreeMap<(&str, &str), f32> = BTreeMap::new();
@@ -190,7 +193,7 @@ pub fn category_edges(memories: &[Memory], edges: &[SimilarityEdge]) -> Vec<Cate
     sums.into_iter()
         .map(|((a, b), sum)| {
             let norm = ((sizes[a] * sizes[b]) as f32).sqrt().max(1.0);
-            CategoryEdge {
+            TopicEdge {
                 source: a.to_string(),
                 target: b.to_string(),
                 weight: sum / norm,
@@ -208,12 +211,12 @@ pub fn category_edges(memories: &[Memory], edges: &[SimilarityEdge]) -> Vec<Cate
 /// like a memory link. Means sit closer together than single memories do,
 /// so these weights run high; they rank and size links, nothing more.
 /// Memories without a vector are left out of their category's mean.
-pub fn centroid_category_edges(
+pub fn centroid_topic_edges(
     memories: &[Memory],
     vectors: &HashMap<MemoryId, Vec<f32>>,
     neighbours: usize,
     baseline: f32,
-) -> Vec<CategoryEdge> {
+) -> Vec<TopicEdge> {
     let mut sums: BTreeMap<&str, Vec<f32>> = BTreeMap::new();
     for memory in memories {
         let Some(vector) = vectors.get(&memory.id()) else {
@@ -224,7 +227,7 @@ pub fn centroid_category_edges(
             continue;
         }
         let sum = sums
-            .entry(memory.category().as_str())
+            .entry(memory.structure().topic().as_str())
             .or_insert_with(|| vec![0.0; vector.len()]);
         if sum.len() != vector.len() {
             continue;
@@ -258,7 +261,7 @@ pub fn centroid_category_edges(
         }
     }
     kept.into_iter()
-        .map(|((source, target), weight)| CategoryEdge {
+        .map(|((source, target), weight)| TopicEdge {
             source: source.to_string(),
             target: target.to_string(),
             weight,
@@ -269,6 +272,7 @@ pub fn centroid_category_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memories::domain::category::Category;
     use crate::memories::domain::memory::{MemorySource, NewMemory};
     use crate::shared::ids::UserId;
     use chrono::Utc;
@@ -375,13 +379,17 @@ mod tests {
         assert!(mutual_knn(&[(ids[0], vec![1.0]), (ids[1], vec![1.0])], 0, 0.0, 0.0).is_empty());
     }
 
-    fn memory(category: Category, subcategory: Option<&str>) -> Memory {
+    /// A memory about `topic`, with `subtopic` as its sub-label.
+    fn memory(topic: Topic, subtopic: Option<&str>) -> Memory {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::kind::Kind;
+        use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
         Memory::create(
             UserId::new(),
             NewMemory {
                 content: "x".to_string(),
-                category,
-                subcategory: subcategory.map(str::to_string),
+                category: Category::Reference,
+                subcategory: subtopic.map(str::to_string),
                 tags: vec![],
                 entities: vec![],
                 confidence: 1.0,
@@ -391,35 +399,45 @@ mod tests {
             Utc::now(),
         )
         .unwrap()
+        .with_structure(
+            MemoryStructure::new(
+                Kind::Fact,
+                topic,
+                AppliesTo::General,
+                Origin::UserSaid,
+                None,
+            )
+            .unwrap(),
+        )
     }
 
     #[test]
-    fn the_summary_counts_categories_and_their_sub_labels() {
+    fn the_summary_counts_topics_and_their_subtopics() {
         let memories = vec![
-            memory(Category::PreferenceCoding, Some("testing")),
-            memory(Category::PreferenceCoding, Some("testing")),
-            memory(Category::PreferenceCoding, None),
-            memory(Category::Custom("health.sleep".to_string()), None),
+            memory(Topic::Coding, Some("testing")),
+            memory(Topic::Coding, Some("testing")),
+            memory(Topic::Coding, None),
+            memory(Topic::Custom("home-lab".to_string()), None),
         ];
 
-        let summary = category_summary(&memories);
+        let summary = topic_summary(&memories);
 
         assert_eq!(summary.len(), 2);
-        assert_eq!(summary[0].id, "preference.coding");
-        assert_eq!(summary[0].label, "Coding preference");
+        assert_eq!(summary[0].id, "coding");
+        assert_eq!(summary[0].label, "Coding");
         assert_eq!(summary[0].count, 3);
         assert_eq!(summary[0].subcategories, vec![("testing".to_string(), 2)]);
         assert!(summary[0].built_in);
-        assert_eq!(summary[1].label, "Health sleep");
+        assert_eq!(summary[1].label, "Home lab");
         assert!(!summary[1].built_in);
     }
 
     #[test]
-    fn category_edges_sum_cross_links_normalised_by_size() {
+    fn topic_edges_sum_cross_links_normalised_by_size() {
         let memories = vec![
-            memory(Category::PreferenceCoding, None),
-            memory(Category::PreferenceCoding, None),
-            memory(Category::Decision, None),
+            memory(Topic::Coding, None),
+            memory(Topic::Coding, None),
+            memory(Topic::Work, None),
         ];
         let edge = |a: usize, b: usize, weight: f32| SimilarityEdge {
             source: memories[a].id(),
@@ -428,25 +446,25 @@ mod tests {
         };
         let edges = vec![edge(0, 1, 0.9), edge(0, 2, 0.4), edge(1, 2, 0.4)];
 
-        let categories = category_edges(&memories, &edges);
+        let categories = topic_edges(&memories, &edges);
 
         assert_eq!(
             categories.len(),
             1,
             "the within-category edge is not a category edge"
         );
-        assert_eq!(categories[0].source, "decision");
-        assert_eq!(categories[0].target, "preference.coding");
+        assert_eq!(categories[0].source, "coding");
+        assert_eq!(categories[0].target, "work");
         assert!((categories[0].weight - 0.8 / 2f32.sqrt()).abs() < 1e-5);
     }
 
     #[test]
     fn centroid_links_join_each_category_to_its_closest() {
         let memories = vec![
-            memory(Category::PreferenceCoding, None),
-            memory(Category::PreferenceCoding, None),
-            memory(Category::Skill, None),
-            memory(Category::Decision, None),
+            memory(Topic::Coding, None),
+            memory(Topic::Coding, None),
+            memory(Topic::Tech, None),
+            memory(Topic::Work, None),
         ];
         let vectors: HashMap<MemoryId, Vec<f32>> = [
             (memories[0].id(), vec![1.0, 0.0, 0.0]),
@@ -458,36 +476,33 @@ mod tests {
         .into_iter()
         .collect();
 
-        let edges = centroid_category_edges(&memories, &vectors, 1, 0.0);
+        let edges = centroid_topic_edges(&memories, &vectors, 1, 0.0);
 
         let pairs: Vec<(&str, &str)> = edges
             .iter()
             .map(|e| (e.source.as_str(), e.target.as_str()))
             .collect();
-        assert!(pairs.contains(&("preference.coding", "skill")), "{pairs:?}");
+        assert!(pairs.contains(&("coding", "tech")), "{pairs:?}");
         let coding_skill = edges
             .iter()
-            .find(|e| e.source == "preference.coding" && e.target == "skill")
+            .find(|e| e.source == "coding" && e.target == "tech")
             .unwrap();
         assert!(coding_skill.weight > 0.9, "{}", coding_skill.weight);
         // Decision's closest is still linked: every category keeps one.
         assert!(
             edges
                 .iter()
-                .any(|e| e.source == "decision" || e.target == "decision")
+                .any(|e| e.source == "work" || e.target == "work")
         );
         assert!(edges.iter().all(|e| e.source < e.target));
     }
 
     #[test]
     fn centroid_links_skip_memories_without_vectors() {
-        let memories = vec![
-            memory(Category::PreferenceCoding, None),
-            memory(Category::Skill, None),
-        ];
+        let memories = vec![memory(Topic::Coding, None), memory(Topic::Tech, None)];
         let vectors: HashMap<MemoryId, Vec<f32>> =
             [(memories[0].id(), vec![1.0, 0.0])].into_iter().collect();
 
-        assert!(centroid_category_edges(&memories, &vectors, 3, 0.0).is_empty());
+        assert!(centroid_topic_edges(&memories, &vectors, 3, 0.0).is_empty());
     }
 }

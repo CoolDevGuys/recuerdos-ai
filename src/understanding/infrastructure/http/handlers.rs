@@ -2,7 +2,8 @@
 
 use super::dto::{
     AcceptedResponse, BatchAcceptedResponse, BatchIngestRequest, BatchIngestedResponse,
-    BatchItemResult, IngestRequest, IngestedResponse, JobResponse, status_name,
+    BatchItemResult, IngestRequest, IngestedResponse, JobResponse, SuggestRequest, SuggestResponse,
+    SuggestionResponse, status_name,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -265,4 +266,32 @@ pub async fn get_job(
         .ok_or_else(|| RaError::NotFound(format!("job {id} not found")))?;
 
     Ok(Json(JobResponse::from(&record)))
+}
+
+/// `POST /v1/memories:suggest`: what each memory in `ids` may really be,
+/// for the user to accept or change in the review queue (memory-structure-plan.md
+/// §8). Writes nothing. Needs a model: without one, `422 no_model`.
+pub async fn suggest_structures(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+    Json(request): Json<SuggestRequest>,
+) -> Result<Json<SuggestResponse>> {
+    let Some(suggester) = state.understanding.suggester.clone() else {
+        return Err(RaError::rejected(
+            "no_model",
+            "Suggestions need a language model: set [understanding].provider.",
+        ));
+    };
+    let ids = request
+        .ids
+        .iter()
+        .map(|raw| {
+            MemoryId::from_str(raw.trim())
+                .map_err(|_| RaError::Validation(format!("{raw:?} is not a memory id")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let suggestions = suggester.execute(&context, &ids).await?;
+    Ok(Json(SuggestResponse {
+        suggestions: suggestions.iter().map(SuggestionResponse::from).collect(),
+    }))
 }

@@ -16,9 +16,16 @@ import type {
   MemoryFields,
   MemoryPatch,
   MemoryStructure,
+  Project,
+  ProjectChange,
   RecallHit,
   SavedMemory,
   Scope,
+  Suggestion,
+  Target,
+  Topic,
+  AppliesTo,
+  GoalStatus,
 } from "./types";
 
 /**
@@ -58,6 +65,17 @@ export interface ApiClient {
   deleteCategory(id: string, moveTo: string | null): Promise<CategoryChange>;
   /** Applies one edit to many memories, all or nothing. */
   bulkEdit(ids: string[], edit: BulkEdit): Promise<BulkResult>;
+  /** Every topic, with how many memories each holds. */
+  listTopics(): Promise<Topic[]>;
+  createTopic(id: string, label: string | null): Promise<Topic>;
+  /** `null` goes back to the default wording. */
+  relabelTopic(id: string, label: string | null): Promise<Topic>;
+  listProjects(): Promise<Project[]>;
+  renameProject(name: string, newName: string): Promise<ProjectChange>;
+  /** Folds project `name` into `into`. */
+  mergeProject(name: string, into: string): Promise<ProjectChange>;
+  /** What each memory may really be; needs a model (`Identity.understanding`). */
+  suggest(ids: string[]): Promise<Suggestion[]>;
 }
 
 /** A failed request, carrying the daemon's own error code and message. */
@@ -178,7 +196,7 @@ export class HttpApiClient implements ApiClient {
   }
 
   async getMap(category: string | null = null): Promise<MapData> {
-    const query = category === null ? "" : `?category=${encodeURIComponent(category)}`;
+    const query = category === null ? "" : `?topic=${encodeURIComponent(category)}`;
     return parseMap(await this.request(`/v1/map${query}`));
   }
 
@@ -214,10 +232,69 @@ export class HttpApiClient implements ApiClient {
     return parseCategoryChange(body);
   }
 
+  async listTopics(): Promise<Topic[]> {
+    const body = await this.request("/v1/topics");
+    if (!isObject(body) || !Array.isArray(body.topics)) throw malformed("topic list");
+    return body.topics.map(parseTopic);
+  }
+
+  async createTopic(id: string, label: string | null): Promise<Topic> {
+    return parseTopic(await this.request("/v1/topics", { method: "POST", body: { id, ...(label !== null && { label }) } }));
+  }
+
+  async relabelTopic(id: string, label: string | null): Promise<Topic> {
+    return parseTopic(await this.request(`/v1/topics/${encodeURIComponent(id)}`, { method: "PATCH", body: { label } }));
+  }
+
+  async listProjects(): Promise<Project[]> {
+    const body = await this.request("/v1/projects");
+    if (!isObject(body) || !Array.isArray(body.projects)) throw malformed("project list");
+    return body.projects.map(parseProject);
+  }
+
+  async renameProject(name: string, newName: string): Promise<ProjectChange> {
+    return parseProjectChange(
+      await this.request(`/v1/projects/${encodeURIComponent(name)}`, { method: "PATCH", body: { name: newName } }),
+    );
+  }
+
+  async mergeProject(name: string, into: string): Promise<ProjectChange> {
+    return parseProjectChange(
+      await this.request(`/v1/projects/${encodeURIComponent(name)}/merge`, { method: "POST", body: { into } }),
+    );
+  }
+
+  async suggest(ids: string[]): Promise<Suggestion[]> {
+    const body = await this.request("/v1/memories:suggest", { method: "POST", body: { ids } });
+    if (!isObject(body) || !Array.isArray(body.suggestions)) throw malformed("suggestions");
+    return body.suggestions.flatMap((item: unknown) =>
+      isObject(item) && typeof item.id === "string" && typeof item.kind === "string" && typeof item.topic === "string"
+        ? [
+            {
+              id: item.id,
+              kind: item.kind,
+              topic: item.topic,
+              applies_to: parseAppliesTo(item.applies_to),
+              reason: typeof item.reason === "string" ? item.reason : "",
+            },
+          ]
+        : [],
+    );
+  }
+
   async bulkEdit(ids: string[], edit: BulkEdit): Promise<BulkResult> {
     const set: Record<string, unknown> = {};
     if (edit.category !== undefined) set.category = edit.category;
     if (edit.subcategory !== undefined) set.subcategory = edit.subcategory;
+    if (edit.kind !== undefined) set.kind = edit.kind;
+    if (edit.topic !== undefined) set.topic = edit.topic;
+    if (edit.appliesTo !== undefined) {
+      set.applies_to = {
+        target: edit.appliesTo.target,
+        ...(edit.appliesTo.project_name !== null && { project_name: edit.appliesTo.project_name }),
+      };
+    }
+    if (edit.reviewed === true) set.reviewed = true;
     const body = await this.request("/v1/memories:bulk", {
       method: "POST",
       body: { ids, set, add_tags: edit.addTags ?? [], remove_tags: edit.removeTags ?? [] },
@@ -297,6 +374,49 @@ export function parseIdentity(body: unknown): Identity {
   return {
     user: body.user,
     scopes: body.scopes.filter((s): s is Scope => SCOPES.includes(s as Scope)),
+    understanding: body.understanding === true,
+  };
+}
+
+const TARGETS: readonly Target[] = ["me", "project", "general"];
+const GOAL_STATUSES: readonly GoalStatus[] = ["active", "achieved", "abandoned"];
+
+export function parseAppliesTo(value: unknown): AppliesTo {
+  if (!isObject(value)) return { target: "general", project_name: null };
+  const target = TARGETS.includes(value.target as Target) ? (value.target as Target) : "general";
+  return {
+    target,
+    project_name: target === "project" && typeof value.project_name === "string" ? value.project_name : null,
+  };
+}
+
+export function parseTopic(item: unknown): Topic {
+  if (!isObject(item) || typeof item.id !== "string" || typeof item.label !== "string") throw malformed("topic");
+  return {
+    id: item.id,
+    label: item.label,
+    default_label: typeof item.default_label === "string" ? item.default_label : item.label,
+    built_in: item.built_in === true,
+    count: typeof item.count === "number" ? item.count : 0,
+  };
+}
+
+export function parseProject(item: unknown): Project {
+  if (!isObject(item) || typeof item.id !== "string" || typeof item.name !== "string") throw malformed("project");
+  return {
+    id: item.id,
+    name: item.name,
+    aliases: Array.isArray(item.aliases) ? item.aliases.filter((a): a is string => typeof a === "string") : [],
+    memories: typeof item.memories === "number" ? item.memories : 0,
+  };
+}
+
+function parseProjectChange(body: unknown): ProjectChange {
+  if (!isObject(body)) throw malformed("project change");
+  return {
+    project: parseProject(body.project),
+    message: typeof body.message === "string" ? body.message : "",
+    moved: typeof body.moved === "number" ? body.moved : 0,
   };
 }
 
@@ -326,6 +446,18 @@ export function parseMemory(item: unknown): Memory {
     created_at: item.created_at,
     updated_at: item.updated_at,
     superseded_by: typeof item.superseded_by === "string" ? item.superseded_by : null,
+    kind: typeof item.kind === "string" ? item.kind : "fact",
+    topic: typeof item.topic === "string" ? item.topic : "work",
+    applies_to: parseAppliesTo(item.applies_to),
+    origin: typeof item.origin === "string" ? item.origin : "user_said",
+    goal_status: GOAL_STATUSES.includes(item.goal_status as GoalStatus) ? (item.goal_status as GoalStatus) : null,
+    needs_review: item.needs_review === true,
+    valid_until:
+      typeof item.valid_until === "string"
+        ? item.valid_until
+        : typeof item.expires_at === "string"
+          ? item.expires_at
+          : null,
   };
 }
 
@@ -404,35 +536,39 @@ function parseMapEdge(item: unknown): MapEdge | null {
   return null; // an edge kind this UI does not know yet
 }
 
+/**
+ * The map groups by topic (plan D13): the wire's `topics`, `topic_edges` and
+ * `topic` become the map code's groups, which it calls categories.
+ */
 export function parseMap(body: unknown): MapData {
-  if (!isObject(body) || !Array.isArray(body.nodes) || !Array.isArray(body.edges) || !Array.isArray(body.categories)) {
+  if (!isObject(body) || !Array.isArray(body.nodes) || !Array.isArray(body.edges) || !Array.isArray(body.topics)) {
     throw malformed("map");
   }
   return {
     generation: typeof body.generation === "string" ? body.generation : "",
     minWeight: typeof body.min_weight === "number" ? body.min_weight : 0,
     edgesOmitted: body.edges_omitted === true,
-    detail: body.detail === "categories" ? "categories" : "memories",
+    detail: body.detail === "topics" ? "categories" : "memories",
     total: typeof body.total === "number" ? body.total : body.nodes.length,
-    category: typeof body.category === "string" ? body.category : null,
+    category: typeof body.topic === "string" ? body.topic : null,
     nodes: body.nodes.map(parseMemory),
     edges: body.edges.map(parseMapEdge).filter((e): e is MapEdge => e !== null),
-    categories: body.categories.map((c) => {
-      if (!isObject(c) || typeof c.id !== "string" || typeof c.label !== "string") throw malformed("map category");
+    categories: body.topics.map((c) => {
+      if (!isObject(c) || typeof c.id !== "string" || typeof c.label !== "string") throw malformed("map topic");
       return {
         id: c.id,
         label: c.label,
         built_in: c.built_in === true,
         count: typeof c.count === "number" ? c.count : 0,
-        subcategories: Array.isArray(c.subcategories)
-          ? c.subcategories.flatMap((s) =>
+        subcategories: Array.isArray(c.subtopics)
+          ? c.subtopics.flatMap((s) =>
               isObject(s) && typeof s.name === "string" ? [{ name: s.name, count: typeof s.count === "number" ? s.count : 0 }] : [],
             )
           : [],
       };
     }),
-    categoryEdges: Array.isArray(body.category_edges)
-      ? body.category_edges.flatMap((e) =>
+    categoryEdges: Array.isArray(body.topic_edges)
+      ? body.topic_edges.flatMap((e) =>
           isObject(e) && typeof e.source === "string" && typeof e.target === "string" && typeof e.weight === "number"
             ? [{ source: e.source, target: e.target, weight: e.weight }]
             : [],

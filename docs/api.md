@@ -92,8 +92,11 @@ curl -H "Authorization: Bearer $KEY" localhost:7070/v1/ping
 ```
 
 ```json
-{"user": "alex", "scopes": ["read", "write"]}
+{"user": "alex", "scopes": ["read", "write"], "understanding": false}
 ```
+
+`understanding` says whether a language model is configured, so a client offers
+only what works (the web UI's review queue shows **Suggest** only with one).
 
 ## Request ids
 
@@ -532,17 +535,21 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
   "edges_omitted": false,
   "detail": "memories",
   "total": 222,
-  "category": null,
-  "nodes": [{"id": "…", "content": "…", "category": "preference.coding", …}],
+  "topic": null,
+  "nodes": [{"id": "…", "content": "…", "kind": "preference", "topic": "coding", …}],
   "edges": [
     {"kind": "similar", "source": "…", "target": "…", "weight": 0.62},
     {"kind": "relation", "source": "…", "target": "…", "predicate": "deploys_on", "entity": "Hetzner"}
   ],
-  "categories": [{"id": "preference.coding", "label": "Coding preference", "built_in": true,
-                  "count": 72, "subcategories": [{"name": "testing", "count": 9}]}],
-  "category_edges": [{"source": "decision", "target": "fact.project", "weight": 0.41}]
+  "topics": [{"id": "coding", "label": "Coding", "built_in": true,
+              "count": 72, "subtopics": [{"name": "testing", "count": 9}]}],
+  "topic_edges": [{"source": "coding", "target": "work", "weight": 0.41}]
 }
 ```
+
+The map groups memories **by topic** ([memory-structure-plan.md](../ai-specs/memory-structure-plan.md)
+D13); the web UI colours each memory by its kind. A topic's `label` is yours when
+you relabelled it (`PATCH /v1/topics/{id}`).
 
 - **`nodes`**: your active memories, plus superseded ones with
   `?include_superseded=true`.
@@ -554,24 +561,23 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
     of at least `min_weight` are returned.
 - **`relation` edges** come from the entity graph, and only when `[graph].enabled`
   is on. One memory stated a relation about an entity the other mentions.
-- **`category_edges`** add up the similarity between categories, scaled by
-  their sizes.
+- **`topic_edges`** add up the similarity between topics, scaled by their sizes.
 - **`generation`** changes whenever your memories do. The similarity links are
   cached until it changes.
 - **Above 3 000 memories** the pairwise comparison is skipped and
   `edges_omitted` is `true`.
-- **`?category=<id>`** limits the map to one category's memories, with the
-  similarity links among them. A category nobody uses gives an empty map,
-  not an error. `category` in the answer echoes it.
+- **`?topic=<id>`** limits the map to one topic's memories, with the similarity
+  links among them. A topic nobody uses gives an empty map, not an error.
+  `topic` in the answer echoes it.
 - **Above the detail limit** (`[ui].map_detail_limit`, 5 000 by default), a
-  whole-store map comes back as `"detail": "categories"`:
+  whole-store map comes back as `"detail": "topics"`:
   - `nodes` and `edges` are empty;
-  - `categories` carries every category with its count;
-  - `category_edges` link each category to its 3 most similar, by comparing the
-    categories' mean vectors.
+  - `topics` carries every topic with its count;
+  - `topic_edges` link each topic to its 3 most similar, by comparing the topics'
+    mean vectors.
 
-  Ask with `?category=` for each category's memories. A category map is
-  always `"detail": "memories"`, whatever its size.
+  Ask with `?topic=` for each topic's memories. A topic map is always
+  `"detail": "memories"`, whatever its size.
 - **`total`** is how many memories are in scope, whether or not `nodes`
   carries them.
 
@@ -581,12 +587,22 @@ Requires `write`. One edit applied to many memories:
 
 ```json
 {"ids": ["…", "…"],
- "set": {"category": "skill", "subcategory": null},
+ "set": {"kind": "reference", "topic": "tech", "applies_to": {"target": "general"},
+         "subcategory": null},
  "add_tags": ["rust"], "remove_tags": ["misc"]}
 ```
 
 - **`set`** fields are optional. `subcategory: null` clears the sub-label;
   leaving it out leaves it alone. `category` must be one of yours.
+- **`kind`, `topic` and `applies_to`** file every memory under the same structure,
+  as the review queue does ([memory-model.md](memory-model.md#memories-saved-before-structured-memories)).
+  Each memory must be able to take it under the save rules — a kind its target
+  allows, no project-bound wording ("this repo") filed as yours or general — or
+  nothing changes: `422 invalid_value` names the memories that cannot. A project
+  must already exist (`422 unknown_project`). The memories' origin becomes
+  `user_confirmed`, and they leave the review queue.
+- **`reviewed: true`** confirms each memory's structure as it is: it leaves the
+  review queue. A structure the rules refuse cannot be confirmed.
 - **All or nothing.** Every id must be one of your active memories, or
   nothing changes and the answer is `404` naming the ones that were not.
   Unchanged memories are left alone.
@@ -599,6 +615,50 @@ Requires `write`. One edit applied to many memories:
   (`bulk edit of 2 memories: category → skill; +tags rust`).
 
 Answers `{"memories": [...], "changed": 2, "reembedded": 2}`.
+
+### `POST /v1/memories:suggest`
+
+Requires `read`. `{"ids": ["…", …]}`, at most 25: what each memory may really be,
+for the review queue. One model call; nothing is written.
+
+```json
+{"suggestions": [
+  {"id": "…", "kind": "reference", "topic": "tech",
+   "applies_to": {"target": "general"}, "reason": "a path on the home NAS"}
+]}
+```
+
+A suggestion is kept only when the rules allow it (a kind its target allows, a
+topic and project you have); a memory the model could not place is missing from
+the answer. Without a model: `422 no_model`.
+
+## Topics
+
+What memories are about (memory-model.md, `topic`). The built-ins are fixed; you
+add your own.
+
+### `GET /v1/topics`
+
+Requires `read`. Built-ins in their order, then yours:
+
+```json
+{"topics": [{"id": "coding", "label": "Software", "default_label": "Coding",
+             "built_in": true, "count": 72}]}
+```
+
+`count` is your active memories about it.
+
+### `POST /v1/topics`
+
+Requires `write`. `{"id": "homelab", "label": "Home lab"}` (label optional). The id
+starts with a letter and uses `a–z 0–9 - _`, up to 32 characters. `409` when you have
+it or it is a built-in's. Answers `201` and the topic; saves can use it at once.
+
+### `PATCH /v1/topics/{id}`
+
+Requires `write`. `{"label": "Software"}`; `null` or blank goes back to the default
+wording. Any topic, built-ins included. Display only: memories store the id. To move
+memories between topics, bulk-edit them (`set.topic`).
 
 ## Categories you can change
 

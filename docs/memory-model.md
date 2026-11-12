@@ -307,5 +307,8 @@ Every memory stored before this release was given a structure on the daemon's fi
 start, derived from its category. What could not be placed is marked
 `needs_review: true`: every coding preference, since it may really be one project's
 convention, and every project fact and decision, since the project was not on record.
-A review screen in the web UI is planned; until then the field is visible in the API
-and the JSON export.
+The web UI's **Needs review** tab lists them: file several at once, open one to correct
+it, or confirm a guess that was right. With a language model, **Suggest** proposes
+what each one is, for you to accept or change; nothing is rewritten without your
+click. Over the API it is `POST /v1/memories:bulk` (`set.kind`, `topic`,
+`applies_to`, `reviewed`) and `POST /v1/memories:suggest`.

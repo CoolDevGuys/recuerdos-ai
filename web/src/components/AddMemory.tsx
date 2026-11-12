@@ -29,8 +29,12 @@ export function AddMemory({
   categories,
   actions,
   onAdded,
+  topics,
+  projects = [],
 }: {
   categories: readonly Category[];
+  topics?: readonly { id: string; label: string }[];
+  projects?: readonly string[];
   actions: MemoryActions;
   onAdded: (added: Added) => void;
 }) {
@@ -124,6 +128,8 @@ export function AddMemory({
           errors={structureErrors}
           readOnly={pending}
           onChange={changeStructure}
+          {...(topics !== undefined && { topics })}
+          projects={projects}
         />
       )}
 

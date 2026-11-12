@@ -12,11 +12,17 @@ export function StructureFieldset({
   errors,
   readOnly,
   onChange,
+  topics = TOPICS,
+  projects = [],
 }: {
   values: StructureValues;
   errors: StructureErrors;
   readOnly: boolean;
   onChange: (field: keyof StructureValues, value: string) => void;
+  /** The topics to offer: the built-ins and the user's own (`GET /v1/topics`). */
+  topics?: readonly { id: string; label: string }[];
+  /** Known project names, suggested as the project is typed. */
+  projects?: readonly string[];
 }) {
   const id = useId();
   const kind = kindOf(values.kind);
@@ -65,7 +71,7 @@ export function StructureFieldset({
             className={styles.field}
           >
             <option value="">Choose…</option>
-            {TOPICS.map((option) => (
+            {topics.map((option) => (
               <option key={option.id} value={option.id}>
                 {option.label}
               </option>
@@ -112,6 +118,7 @@ export function StructureFieldset({
           <input
             id={`${id}-project`}
             type="text"
+            list={projects.length > 0 ? `${id}-projects` : undefined}
             value={values.project}
             readOnly={readOnly}
             onChange={(event) => onChange("project", event.target.value)}
@@ -119,10 +126,43 @@ export function StructureFieldset({
             aria-describedby={describedBy("project", `${id}-project-hint`)}
             className={styles.field}
           />
+          {projects.length > 0 && (
+            <datalist id={`${id}-projects`}>
+              {projects.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </datalist>
+          )}
           <p id={`${id}-project-hint`} className={styles.hint}>
             Lowercase, like “quill”. A name it does not know yet becomes a new project.
           </p>
           <FieldError id={`${id}-project-error`} message={errors.project} />
+        </div>
+      )}
+
+      {values.kind !== "goal" && (
+        <div>
+          <label htmlFor={`${id}-until`} className={styles.label}>
+            Ends {values.kind === "plan" ? "" : "(optional)"}
+          </label>
+          <input
+            id={`${id}-until`}
+            type="date"
+            value={values.validUntil}
+            readOnly={readOnly}
+            onChange={(event) => onChange("validUntil", event.target.value)}
+            aria-invalid={errors.validUntil !== undefined}
+            aria-describedby={describedBy("validUntil", `${id}-until-hint`)}
+            className={styles.field}
+          />
+          <p id={`${id}-until-hint`} className={styles.hint}>
+            {values.kind === "plan"
+              ? "The day it is over. After it, the memory leaves recall."
+              : "When it stops being true, if it does. After it, the memory leaves recall."}
+          </p>
+          <FieldError id={`${id}-validUntil-error`} message={errors.validUntil} />
         </div>
       )}
     </div>

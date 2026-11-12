@@ -1,10 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import type { ApiClient } from "../../api/client";
-import type { Category, Memory, RecallHit } from "../../api/types";
+import type { Memory, RecallHit } from "../../api/types";
 import { memoriesCount } from "../../domain/categories";
 import type { ViewState } from "../../domain/map/appearance";
 import { seedOf, type MapModel } from "../../domain/map/layout";
-import { categoryStyle, glyphImage } from "../../domain/map/palette";
+import { KIND_STYLES, categoryStyle, glyphImage } from "../../domain/map/palette";
+import { kindOf } from "../../domain/structureForm";
 import { LEVELS, type Level } from "../../domain/map/zoom";
 import { readLayoutSeed, writeLayoutSeed } from "../../map/layoutCache";
 import { useLayoutRunner, useRendererLoader } from "../../map/rendererContext";
@@ -13,7 +14,7 @@ import { useMap, type MemoryActions } from "../../state/memories";
 import { BulkEditor } from "../BulkEditor";
 import { RecallPanel } from "./RecallPanel";
 
-const LEVEL_NAMES: Record<Level, string> = { categories: "Categories", clusters: "Clusters", memories: "Memories" };
+const LEVEL_NAMES: Record<Level, string> = { categories: "Topics", clusters: "Clusters", memories: "Memories" };
 
 /**
  * The mental map (plan §5): categories when zoomed out, dissolving into
@@ -34,7 +35,8 @@ export default function MapView({
   actions,
   labelOf,
   onOpenMemory,
-  categories = [],
+  topics,
+  projects = [],
   canWrite = false,
 }: {
   client: ApiClient;
@@ -43,7 +45,8 @@ export default function MapView({
   labelOf: (id: string) => string;
   onOpenMemory: (memory: Memory) => void;
   /** For the bulk editor a lasso opens. */
-  categories?: readonly Category[];
+  topics?: readonly { id: string; label: string }[];
+  projects?: readonly string[];
   canWrite?: boolean;
 }) {
   const sliderId = useId();
@@ -223,7 +226,7 @@ export default function MapView({
   if (model === null || model.scope !== scope) {
     return (
       <p role="status" className="text-sm text-slate-600 dark:text-slate-400">
-        Laying out {map.data.detail === "categories" ? "your categories" : memoriesCount(map.data.total)}…
+        Laying out {map.data.detail === "categories" ? "your topics" : memoriesCount(map.data.total)}…
       </p>
     );
   }
@@ -231,9 +234,9 @@ export default function MapView({
     if (scope !== null) {
       return (
         <div className="space-y-2">
-          <p className="text-sm text-slate-600 dark:text-slate-400">This category has no memories any more.</p>
+          <p className="text-sm text-slate-600 dark:text-slate-400">This topic has no memories any more.</p>
           <button type="button" onClick={() => openCategory(null)} className="text-sm font-medium text-indigo-700 underline dark:text-indigo-300">
-            Back to all categories
+            Back to all topics
           </button>
         </div>
       );
@@ -256,7 +259,7 @@ export default function MapView({
         {scope !== null && (
           <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <button type="button" onClick={() => openCategory(null)} className="text-sm font-medium text-indigo-700 hover:underline dark:text-indigo-300">
-              <span aria-hidden="true">← </span>All categories
+              <span aria-hidden="true">← </span>All topics
             </button>
             <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
               {scopeLabel} <span className="font-normal text-slate-600 dark:text-slate-400">· {memoriesCount(model.total)}</span>
@@ -265,7 +268,7 @@ export default function MapView({
         )}
         {aggregate && (
           <p className="mb-2 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-950 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">
-            You have {memoriesCount(model.total)}, more than the map draws at once. It shows your categories; open one to see
+            You have {memoriesCount(model.total)}, more than the map draws at once. It shows your topics; open one to see
             its memories.
           </p>
         )}
@@ -323,8 +326,8 @@ export default function MapView({
           onKeyDown={onMapKey}
           aria-label={
             aggregate
-              ? `Map of ${model.total} memories in ${model.categories.length} categories, showing categories only. The categories list beside it opens each one.`
-              : `Map of ${model.memories.length} memories in ${model.categories.length} categories, showing ${LEVEL_NAMES[level].toLowerCase()}. The list view has the same memories as text.`
+              ? `Map of ${model.total} memories in ${model.categories.length} topics, showing topics only. The topics list beside it opens each one.`
+              : `Map of ${model.memories.length} memories in ${model.categories.length} topics, coloured by kind, showing ${LEVEL_NAMES[level].toLowerCase()}. The list view has the same memories as text.`
           }
           aria-describedby={`${sliderId}-keys`}
           className="relative h-[62vh] min-h-80 w-full overflow-hidden rounded-lg border border-slate-200 bg-white outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2 dark:border-slate-800 dark:bg-slate-950 dark:focus-visible:ring-offset-slate-950"
@@ -336,7 +339,7 @@ export default function MapView({
         )}
         {aggregate ? (
           <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
-            {model.categories.length} categories · {memoriesCount(model.total)}. Click a category, or pick it from the list,
+            {model.categories.length} topics · {memoriesCount(model.total)}. Click a topic, or pick it from the list,
             to open its map.
           </p>
         ) : (
@@ -344,7 +347,7 @@ export default function MapView({
             {memoriesCount(model.memories.length)} · {similarCount} similarity links
             {relationCount > 0 && ` · ${relationCount} stated relations`}
             {map.data.edgesOmitted && " · too many memories to compare, links omitted"}. Scroll or pinch to zoom; click a
-            category to open it, a memory to edit it.
+            topic to open it, a memory to edit it.
             {canWrite && " To select memories for a bulk edit, turn on Lasso select (or hold Shift) and draw around them."}
           </p>
         )}
@@ -372,7 +375,8 @@ export default function MapView({
             </p>
             <BulkEditor
               selected={selected}
-              categories={categories}
+              {...(topics !== undefined && { topics })}
+              projects={projects}
               actions={actions}
               onDone={clearSelection}
               onClear={clearSelection}
@@ -389,9 +393,11 @@ export default function MapView({
           }}
         />
 
+        {!aggregate && <KindKey memories={model.memories.map((m) => m.memory.kind)} />}
+
         <section aria-labelledby={`${sliderId}-legend`}>
           <h2 id={`${sliderId}-legend`} className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            Categories
+            Topics
           </h2>
           <ul className="mt-2 space-y-1">
             {model.categories.map((category) => {
@@ -477,5 +483,37 @@ export default function MapView({
         )}
       </aside>
     </div>
+  );
+}
+
+/**
+ * What the colours mean (plan D13: colour by kind): each kind present, with
+ * its colour, glyph and count. Colour is never the only cue — the glyph and
+ * the words are here too.
+ */
+function KindKey({ memories }: { memories: readonly string[] }) {
+  const counts = new Map<string, number>();
+  for (const kind of memories) counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  const present = Object.entries(KIND_STYLES).filter(([kind]) => counts.has(kind));
+  if (present.length === 0) return null;
+  return (
+    <section aria-label="Colours: what each memory is">
+      <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Kinds</h2>
+      <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+        {present.map(([kind, style]) => (
+          <li key={kind} className="flex items-center gap-2 text-sm text-slate-800 dark:text-slate-200">
+            <span
+              aria-hidden="true"
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
+              style={{ backgroundColor: style.color }}
+            >
+              <img src={glyphImage(style.glyph, kind)} alt="" className="h-3.5 w-3.5" />
+            </span>
+            <span className="flex-1">{kindOf(kind)?.label ?? kind}</span>
+            <span className="text-xs text-slate-500">{counts.get(kind)}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

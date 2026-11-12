@@ -264,3 +264,51 @@ mod tests {
         assert_eq!(encoded["status"], "succeeded");
     }
 }
+
+/// `POST /v1/memories:suggest`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestResponse {
+    /// One per memory the model could place; one it could not is missing.
+    pub suggestions: Vec<SuggestionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestionResponse {
+    pub id: String,
+    pub kind: String,
+    pub topic: String,
+    pub applies_to: SuggestedAppliesTo,
+    pub reason: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestedAppliesTo {
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+impl From<&crate::understanding::application::structure_suggester::StructureSuggestion>
+    for SuggestionResponse
+{
+    fn from(
+        suggestion: &crate::understanding::application::structure_suggester::StructureSuggestion,
+    ) -> Self {
+        Self {
+            id: suggestion.id.to_string(),
+            kind: suggestion.kind.as_str().to_string(),
+            topic: suggestion.topic.clone(),
+            applies_to: SuggestedAppliesTo {
+                target: suggestion.target.as_str().to_string(),
+                project_name: suggestion.project.clone(),
+            },
+            reason: suggestion.reason.clone(),
+        }
+    }
+}

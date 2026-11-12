@@ -17,7 +17,13 @@ import type {
   MemoryStructure,
   RecallHit,
   SavedMemory,
+  Project,
+  ProjectChange,
+  Suggestion,
+  Topic,
+  AppliesTo,
 } from "./types";
+import { KINDS, TOPICS } from "../domain/structureForm";
 
 interface Account {
   identity: Identity;
@@ -27,6 +33,21 @@ interface Account {
   custom: Map<string, string | null>;
   /** Built-ins the user relabelled. */
   relabelled: Map<string, string>;
+  /** The user's own topics, id → label (null = default wording). */
+  topics: Map<string, string | null>;
+  /** Built-in topics the user relabelled. */
+  topicLabels: Map<string, string>;
+  projects: Project[];
+}
+
+const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const TOPIC_ID = /^[a-z][a-z0-9_-]{0,31}$/;
+
+function topicDefaultLabel(id: string): string {
+  const builtIn = TOPICS.find((t) => t.id === id);
+  if (builtIn !== undefined) return builtIn.label.replace(/ \(.*\)$/, "");
+  const words = id.replace(/[-_]/g, " ");
+  return words[0]!.toUpperCase() + words.slice(1);
 }
 
 const CUSTOM_ID = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -73,6 +94,8 @@ export class FakeServer {
   mapEdges: MapEdge[] = [];
   /** Above this many memories the whole-store map is categories only, as the daemon's `[ui].map_detail_limit`. */
   mapDetailLimit = Number.POSITIVE_INFINITY;
+  /** What `suggest` proposes, by memory id. */
+  suggestions = new Map<string, Omit<Suggestion, "id">>();
   /** Requests seen, for assertions about what was (not) sent. */
   readonly calls: {
     method: string;
@@ -88,7 +111,24 @@ export class FakeServer {
     // Seeded like the daemon's catalog: every custom category already on a memory.
     const custom = new Map<string, string | null>();
     for (const m of memories) if (!isBuiltIn(m.category)) custom.set(m.category, null);
-    this.accounts.set(key, { identity, memories: memories.map(copy), forgotten: [], custom, relabelled: new Map() });
+    // And its projects: every project a memory names.
+    const projects: Project[] = [];
+    for (const m of memories) {
+      const name = m.applies_to.project_name;
+      if (name !== null && !projects.some((p) => p.name === name)) {
+        projects.push({ id: `proj_${name}`, name, aliases: [], memories: 0 });
+      }
+    }
+    this.accounts.set(key, {
+      identity: { ...identity, understanding: this.understanding },
+      memories: memories.map(copy),
+      forgotten: [],
+      custom,
+      relabelled: new Map(),
+      topics: new Map(),
+      topicLabels: new Map(),
+      projects,
+    });
     return this;
   }
 
@@ -147,7 +187,106 @@ class FakeClient implements ApiClient {
 
   async ping(): Promise<Identity> {
     this.server.takeFailure();
-    return this.server.account(this.key).identity;
+    return { ...this.server.account(this.key).identity, understanding: this.server.understanding };
+  }
+
+  async listTopics(): Promise<Topic[]> {
+    return topicsOf(this.readable());
+  }
+
+  async createTopic(id: string, label: string | null): Promise<Topic> {
+    const account = this.writable();
+    this.server.calls.push({ method: "createTopic", id });
+    const normalised = id.trim().toLowerCase();
+    if (TOPICS.some((t) => t.id === normalised) || account.topics.has(normalised)) {
+      throw new ApiError(409, "conflict", `you already have the topic ${normalised}`);
+    }
+    if (!TOPIC_ID.test(normalised)) throw new ApiError(400, "validation_failed", `topic id ${id} is not valid`);
+    account.topics.set(normalised, blankToNull(label));
+    return topicsOf(account).find((t) => t.id === normalised)!;
+  }
+
+  async relabelTopic(id: string, label: string | null): Promise<Topic> {
+    const account = this.writable();
+    this.server.calls.push({ method: "relabelTopic", id });
+    const value = blankToNull(label);
+    if (TOPICS.some((t) => t.id === id)) {
+      if (value === null) account.topicLabels.delete(id);
+      else account.topicLabels.set(id, value);
+    } else if (account.topics.has(id)) {
+      account.topics.set(id, value);
+    } else {
+      throw new ApiError(422, "unknown_topic", `You have no topic "${id}".`);
+    }
+    return topicsOf(account).find((t) => t.id === id)!;
+  }
+
+  async listProjects(): Promise<Project[]> {
+    return projectsOf(this.readable());
+  }
+
+  async renameProject(name: string, newName: string): Promise<ProjectChange> {
+    const account = this.writable();
+    this.server.calls.push({ method: "renameProject", id: name });
+    const project = this.project(account, name);
+    const next = newName.trim().toLowerCase();
+    if (!PROJECT_NAME.test(next)) {
+      throw new ApiError(422, "invalid_value", `project name "${newName}" must be lowercase a-z, 0-9, '.', '_' or '-'`);
+    }
+    if (account.projects.some((p) => p.name === next && p.id !== project.id)) {
+      throw new ApiError(409, "conflict", `Another project is already called ${next}; merge them instead.`);
+    }
+    const previous = project.name;
+    if (next !== previous) project.aliases = [...new Set([...project.aliases, previous])].sort();
+    project.name = next;
+    for (const m of account.memories) {
+      if (m.applies_to.project_name === previous) m.applies_to = { target: "project", project_name: next };
+    }
+    const view = projectsOf(account).find((p) => p.id === project.id)!;
+    return { project: view, message: `Renamed ${previous} to ${next}.`, moved: 0 };
+  }
+
+  async mergeProject(name: string, into: string): Promise<ProjectChange> {
+    const account = this.writable();
+    this.server.calls.push({ method: "mergeProject", id: name });
+    const from = this.project(account, name);
+    const to = this.project(account, into);
+    if (from.id === to.id) throw new ApiError(422, "invalid_value", `${from.name} cannot be merged into itself.`);
+    let moved = 0;
+    const now = this.server.tick();
+    for (const m of account.memories) {
+      if (m.applies_to.project_name === from.name) {
+        m.applies_to = { target: "project", project_name: to.name };
+        m.updated_at = now;
+        moved += 1;
+      }
+    }
+    to.aliases = [...new Set([...to.aliases, ...from.aliases, from.name])].sort();
+    account.projects = account.projects.filter((p) => p.id !== from.id);
+    const view = projectsOf(account).find((p) => p.id === to.id)!;
+    return { project: view, message: `Merged ${from.name} into ${to.name}: ${moved} moved.`, moved };
+  }
+
+  async suggest(ids: string[]): Promise<Suggestion[]> {
+    const account = this.readable();
+    this.server.calls.push({ method: "suggest" });
+    if (!this.server.understanding) {
+      throw new ApiError(422, "no_model", "Suggestions need a language model: set [understanding].provider.");
+    }
+    for (const id of ids) this.find(account, id);
+    return ids.flatMap((id) => {
+      const suggestion = this.server.suggestions.get(id);
+      return suggestion === undefined ? [] : [{ id, ...suggestion }];
+    });
+  }
+
+  private project(account: Account, name: string): Project {
+    const wanted = name.trim().toLowerCase();
+    const project = account.projects.find((p) => p.name === wanted || p.id === wanted || p.aliases.includes(wanted));
+    if (project === undefined) {
+      throw new ApiError(422, "unknown_project", `Unknown project "${name}"; known: ${account.projects.map((p) => p.name).join(", ") || "none yet"}.`);
+    }
+    return project;
   }
 
   async listMemories(): Promise<Memory[]> {
@@ -239,6 +378,23 @@ class FakeClient implements ApiClient {
       throw new ApiError(404, "not_found", `these memories were not found: ${missing.join(", ")}`);
     }
     if (edit.category !== undefined) this.requireKnown(account, edit.category, 400);
+    if (edit.appliesTo?.target === "project") this.project(account, edit.appliesTo.project_name ?? "");
+    const structural = edit.kind !== undefined || edit.topic !== undefined || edit.appliesTo !== undefined;
+    if (structural) {
+      // Like the daemon: every memory must be able to take it, or none does.
+      const kindFor = (m: Memory) => edit.kind ?? m.kind;
+      const targetFor = (m: Memory) => edit.appliesTo?.target ?? m.applies_to.target;
+      const refused = unique
+        .map((id) => this.find(account, id))
+        .filter((m) => !(KINDS.find((k) => k.id === kindFor(m))?.targets.includes(targetFor(m)) ?? true));
+      if (refused.length > 0) {
+        throw new ApiError(
+          422,
+          "invalid_value",
+          `Nothing was changed: ${refused.length} of the ${unique.length} memories cannot take that.`,
+        );
+      }
+    }
     const removed = new Set((edit.removeTags ?? []).map((t) => t.trim().toLowerCase()));
     const added = (edit.addTags ?? []).map((t) => t.trim().toLowerCase()).filter((t) => t !== "");
     const now = this.server.tick();
@@ -249,6 +405,11 @@ class FakeClient implements ApiClient {
       if (removed.size > 0 || added.length > 0) {
         memory.tags = [...new Set([...memory.tags.filter((t) => !removed.has(t)), ...added])];
       }
+      if (edit.kind !== undefined) memory.kind = edit.kind;
+      if (edit.topic !== undefined) memory.topic = edit.topic;
+      if (edit.appliesTo !== undefined) memory.applies_to = { ...edit.appliesTo };
+      if (structural) memory.origin = "user_confirmed";
+      if (structural || edit.reviewed === true) memory.needs_review = false;
       memory.updated_at = now;
       return copy(memory);
     });
@@ -271,6 +432,13 @@ class FakeClient implements ApiClient {
       return { memory: copy(same), status: "already_known", message: `Already known: "${same.content}".` };
     }
     const now = this.server.tick();
+    const appliesTo: AppliesTo = {
+      target: structure?.applies_to.target ?? "general",
+      project_name: structure?.applies_to.project_name ?? null,
+    };
+    if (appliesTo.project_name !== null && !account.projects.some((p) => p.name === appliesTo.project_name)) {
+      account.projects.push({ id: `proj_${appliesTo.project_name}`, name: appliesTo.project_name, aliases: [], memories: 0 });
+    }
     const memory: Memory = {
       id: this.server.nextId(),
       ...fields,
@@ -279,6 +447,13 @@ class FakeClient implements ApiClient {
       created_at: now,
       updated_at: now,
       superseded_by: null,
+      kind: structure?.kind ?? "fact",
+      topic: structure?.topic ?? "work",
+      applies_to: appliesTo,
+      origin: structure?.origin ?? "user_said",
+      goal_status: structure?.kind === "goal" ? "active" : null,
+      needs_review: structure === undefined,
+      valid_until: null,
     };
     // A replaced memory leaves the list (it stays in the daemon's history).
     if (structure?.replaces !== undefined) {
@@ -314,7 +489,25 @@ class FakeClient implements ApiClient {
     if (patch.content !== undefined && patch.content.trim() === "") {
       throw new ApiError(400, "validation_failed", "memory content is empty");
     }
-    Object.assign(memory, patch, { updated_at: this.server.tick() });
+    if (patch.goal_status !== undefined && patch.goal_status !== "active" && patch.origin === undefined) {
+      throw new ApiError(422, "missing_field", "Closing a goal needs origin: who said it was reached.");
+    }
+    const { applies_to: appliesTo, goal_status: goalStatus, valid_until: validUntil, origin, kind, topic, ...fields } = patch;
+    Object.assign(memory, fields);
+    if (kind !== undefined) memory.kind = kind;
+    if (topic !== undefined) memory.topic = topic;
+    if (appliesTo !== undefined) {
+      memory.applies_to = { target: appliesTo.target, project_name: appliesTo.project_name ?? null };
+      const name = appliesTo.project_name;
+      if (name !== undefined && !account.projects.some((p) => p.name === name)) {
+        account.projects.push({ id: `proj_${name}`, name, aliases: [], memories: 0 });
+      }
+    }
+    if (goalStatus !== undefined) memory.goal_status = goalStatus;
+    if (validUntil !== undefined) memory.valid_until = validUntil;
+    if (origin !== undefined && (kind !== undefined || topic !== undefined || appliesTo !== undefined)) memory.origin = origin;
+    if (kind !== undefined || topic !== undefined || appliesTo !== undefined) memory.needs_review = false;
+    memory.updated_at = this.server.tick();
     return copy(memory);
   }
 
@@ -340,18 +533,19 @@ class FakeClient implements ApiClient {
     const account = this.readable();
     const generation = String(this.server.calls.length);
     this.server.calls.push({ method: "map", ...(category !== null && { id: category }) });
-    const inScope = account.memories.filter((m) => category === null || m.category === category);
+    // Grouped by topic, as the daemon's map (plan D13).
+    const inScope = account.memories.filter((m) => category === null || m.topic === category);
     const aggregate = category === null && inScope.length > this.server.mapDetailLimit;
     const nodes = aggregate ? [] : inScope;
     const present = new Set(nodes.map((m) => m.id));
     const categories = new Map<string, { count: number; subs: Map<string, number> }>();
     for (const m of inScope) {
-      const entry = categories.get(m.category) ?? { count: 0, subs: new Map<string, number>() };
+      const entry = categories.get(m.topic) ?? { count: 0, subs: new Map<string, number>() };
       entry.count += 1;
       if (m.subcategory !== null) entry.subs.set(m.subcategory, (entry.subs.get(m.subcategory) ?? 0) + 1);
-      categories.set(m.category, entry);
+      categories.set(m.topic, entry);
     }
-    const label = (id: string) => account.relabelled.get(id) ?? account.custom.get(id) ?? defaultLabel(id);
+    const label = (id: string) => topicsOf(account).find((t) => t.id === id)?.label ?? topicDefaultLabel(id);
     return {
       generation,
       minWeight: 0.15,
@@ -364,7 +558,7 @@ class FakeClient implements ApiClient {
       categories: [...categories].map(([id, entry]) => ({
         id,
         label: label(id),
-        built_in: BUILT_IN.some(([b]) => b === id),
+        built_in: TOPICS.some((t) => t.id === id),
         count: entry.count,
         subcategories: [...entry.subs].map(([name, count]) => ({ name, count })),
       })),
@@ -465,7 +659,30 @@ function categoriesOf(account: Account): Category[] {
 }
 
 function copy(memory: Memory): Memory {
-  return { ...memory, tags: [...memory.tags] };
+  return { ...memory, tags: [...memory.tags], applies_to: { ...memory.applies_to } };
+}
+
+/** Built-ins in order, then the user's own; counts of active memories. */
+function topicsOf(account: Account): Topic[] {
+  const counts = new Map<string, number>();
+  for (const m of account.memories) counts.set(m.topic, (counts.get(m.topic) ?? 0) + 1);
+  const entry = (id: string, label: string | null | undefined, builtIn: boolean): Topic => ({
+    id,
+    label: label ?? topicDefaultLabel(id),
+    default_label: topicDefaultLabel(id),
+    built_in: builtIn,
+    count: counts.get(id) ?? 0,
+  });
+  return [
+    ...TOPICS.map((t) => entry(t.id, account.topicLabels.get(t.id), true)),
+    ...[...account.topics].sort(([a], [b]) => a.localeCompare(b)).map(([id, label]) => entry(id, label, false)),
+  ];
+}
+
+function projectsOf(account: Account): Project[] {
+  return account.projects
+    .map((p) => ({ ...p, aliases: [...p.aliases], memories: account.memories.filter((m) => m.applies_to.project_name === p.name).length }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** A memory with sensible defaults, for building fixtures. */
@@ -478,6 +695,13 @@ export function memory(overrides: Partial<Memory> & Pick<Memory, "id" | "content
     created_at: "2026-08-11T10:00:00Z",
     updated_at: "2026-08-11T10:00:00Z",
     superseded_by: null,
+    kind: "preference",
+    topic: "coding",
+    applies_to: { target: "me", project_name: null },
+    origin: "user_said",
+    goal_status: null,
+    needs_review: false,
+    valid_until: null,
     ...overrides,
   };
 }

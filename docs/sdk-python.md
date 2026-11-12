@@ -304,6 +304,25 @@ ra.rename_project("quill", "quill-app")
 ra.merge_project("me-quill", into="quill-app")
 ```
 
+## Topics and the review queue
+
+### `topics() -> list[Topic]` · `create_topic(id, *, label) -> Topic` · `relabel_topic(id, label) -> Topic`
+
+The built-in topics and the user's own, with `count`. A new topic can be used at
+once; a label is display only (`None` resets it).
+
+### `bulk_edit(memory_ids, *, kind, topic, applies_to, reviewed, add_tags, remove_tags) -> BulkResult`
+
+One edit to many memories, all or nothing, under the save rules: a memory that
+cannot take the structure raises `RejectedError` (`invalid_value`) and nothing
+changes. `reviewed=True` confirms each memory's structure as it is.
+
+### `suggest(memory_ids) -> list[Suggestion]`
+
+What each memory (up to 25) may really be, from the model: `kind`, `topic`,
+`applies_to` and a `reason`. Writes nothing. Without a model, `RejectedError`
+with code `no_model`.
+
 ## Jobs
 
 ### `job(job_id) -> Job` · `wait_for_job(job, *, timeout=60, raise_on_failure=True) -> Job`

@@ -16,7 +16,7 @@ import {
 } from "../domain/map/appearance";
 import { convexHull, lassoed, type Point } from "../domain/map/geometry";
 import type { GroupNode, MapModel } from "../domain/map/layout";
-import { categoryStyle, glyphImage, withAlpha } from "../domain/map/palette";
+import { categoryStyle, glyphImage, kindStyle, withAlpha } from "../domain/map/palette";
 import { LEVEL_RATIO, levelAt, quantize, zoomMix, type Level, type ZoomMix } from "../domain/map/zoom";
 import type { MapRenderer, RendererCallbacks, RendererFactory } from "./renderer";
 
@@ -289,8 +289,17 @@ class SigmaMapRenderer implements MapRenderer {
   // --- graph
 
   private populate(): void {
-    const add = (id: string, kind: NodeKind, category: string, label: string, position: Point, size: number) => {
-      const style = categoryStyle(category);
+    const add = (
+      id: string,
+      kind: NodeKind,
+      category: string,
+      label: string,
+      position: Point,
+      size: number,
+      memoryKind?: string,
+    ) => {
+      // A memory wears its kind; a topic group is neutral (plan D13).
+      const style = memoryKind === undefined ? categoryStyle(category) : kindStyle(memoryKind);
       this.graph.addNode(id, {
         kind,
         category,
@@ -307,7 +316,7 @@ class SigmaMapRenderer implements MapRenderer {
     for (const c of this.model.clusters) {
       if (!this.graph.hasNode(c.id)) add(c.id, "cluster", c.category, c.label, c.position, 6);
     }
-    for (const m of this.model.memories) add(m.id, "memory", m.category, m.memory.content, m.position, 4);
+    for (const m of this.model.memories) add(m.id, "memory", m.category, m.memory.content, m.position, 4, m.memory.kind);
 
     this.model.edges.forEach((edge, index) => {
       this.graph.addDirectedEdgeWithKey(`e${index}`, edge.source, edge.target, { index, group: "memory" });

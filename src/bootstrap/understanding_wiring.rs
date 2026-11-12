@@ -22,6 +22,7 @@ use crate::understanding::application::intent_first_ingestor::IntentFirstIngesto
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
 use crate::understanding::application::model_conflict_judge::ModelConflictJudge;
+use crate::understanding::application::structure_suggester::StructureSuggester;
 use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
 use crate::understanding::domain::chat_model::ChatModel;
 use crate::understanding::domain::ingest_job::JobQueue;
@@ -148,6 +149,9 @@ pub struct Understanding {
     pub model: Option<Arc<dyn ChatModel>>,
     /// Each user's categories, read per call (V10).
     pub taxonomy: Arc<dyn TaxonomySource>,
+    /// Proposes structures for the review queue (`POST /v1/memories:suggest`);
+    /// `None` without a model.
+    pub suggester: Option<Arc<StructureSuggester>>,
 }
 
 impl Understanding {
@@ -212,6 +216,15 @@ impl Understanding {
             );
         }
 
+        let suggester = model.as_ref().map(|model| {
+            Arc::new(StructureSuggester::new(
+                Arc::clone(model),
+                Arc::clone(&memories.repository),
+                Arc::clone(&memories.projects),
+                Arc::clone(&memories.topics),
+            ))
+        });
+
         Ok(Self {
             queue: Arc::new(SqliteJobQueue::new(database)),
             pipeline,
@@ -219,6 +232,7 @@ impl Understanding {
             wake: Arc::new(Notify::new()),
             model,
             taxonomy,
+            suggester,
         })
     }
 }

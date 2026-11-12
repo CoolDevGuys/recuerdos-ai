@@ -9,11 +9,15 @@ import { LoginScreen } from "./components/LoginScreen";
 import { MemoryEditor } from "./components/MemoryEditor";
 import { MemoryList } from "./components/MemoryList";
 import { Panel } from "./components/Panel";
+import { ProjectsView } from "./components/ProjectsView";
+import { ReviewQueue } from "./components/ReviewQueue";
+import { TopicsView } from "./components/TopicsView";
 import { Toasts } from "./components/Toasts";
 import type { Access } from "./domain/access";
 import { fileable } from "./domain/categories";
-import { categoryLabel } from "./domain/memories";
-import { useCategories, useMemories, useMemoryActions } from "./state/memories";
+import type { MemoryFilter } from "./domain/memories";
+import { topicLabelOf } from "./domain/structureForm";
+import { useCategories, useMemories, useMemoryActions, useProjects, useTopics } from "./state/memories";
 import { describeSignInError, useSession } from "./state/session";
 import { useView, VIEW_PATHS, type View } from "./state/route";
 import { useToasts } from "./state/toasts";
@@ -56,7 +60,12 @@ export function App() {
       <Header user={session.identity.user} access={session.access} keyless={session.keyless} onSignOut={signOut} />
       <main className="mx-auto max-w-6xl px-4 py-6">
         {session.access.canRead ? (
-          <Memories client={session.client} user={session.identity.user} access={session.access} />
+          <Memories
+            client={session.client}
+            user={session.identity.user}
+            access={session.access}
+            understanding={session.identity.understanding === true}
+          />
         ) : (
           <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">
             This key cannot read memories (it has no read scope). Sign in with a key issued with{" "}
@@ -71,9 +80,24 @@ export function App() {
 
 type Open = { kind: "none" } | { kind: "edit"; memory: Memory } | { kind: "add" };
 
-function Memories({ client, user, access }: { client: ApiClient; user: string; access: Access }) {
+function Memories({
+  client,
+  user,
+  access,
+  understanding,
+}: {
+  client: ApiClient;
+  user: string;
+  access: Access;
+  /** A model is configured: the review queue offers Suggest. */
+  understanding: boolean;
+}) {
   const memories = useMemories(client, user);
   const categories = useCategories(client, user);
+  const topics = useTopics(client, user);
+  const projects = useProjects(client, user);
+  // Where the list opens when another tab sends the user to it.
+  const [listPreset, setListPreset] = useState<{ key: number; filter: Partial<MemoryFilter> }>({ key: 0, filter: {} });
   const actions = useMemoryActions(client, user);
   const { show } = useToasts();
   const [open, setOpen] = useState<Open>({ kind: "none" });
@@ -94,10 +118,16 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
   const clearSelection = useCallback(() => setSelected(new Set()), []);
 
   const close = useCallback(() => setOpen({ kind: "none" }), []);
-  const labelOf = useMemo(() => {
-    const labels = new Map((categories.data ?? []).map((c) => [c.id, c.label]));
-    return (id: string) => labels.get(id) ?? categoryLabel(id);
-  }, [categories.data]);
+  const topicList = useMemo(() => (topics.data ?? []).map((t) => ({ id: t.id, label: t.label })), [topics.data]);
+  const topicLabel = useMemo(() => {
+    const labels = new Map(topicList.map((t) => [t.id, t.label]));
+    return (id: string) => labels.get(id) ?? topicLabelOf(id);
+  }, [topicList]);
+  const projectNames = useMemo(() => (projects.data ?? []).map((p) => p.name), [projects.data]);
+  const showInList = (filter: Partial<MemoryFilter>) => {
+    setListPreset((current) => ({ key: current.key + 1, filter }));
+    setView("list");
+  };
 
   const undoForget = async (memory: Memory) => {
     const outcome = await actions.restore(memory.id);
@@ -156,14 +186,15 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
 
   return (
     <>
-      <ViewTabs view={view} onChange={setView} />
+      <ViewTabs view={view} onChange={setView} reviewCount={memories.data.filter((m) => m.needs_review).length} />
       {view === "list" && (
         <>
           {selected.size > 0 && (
             <div className="mb-4">
               <BulkEditor
                 selected={[...selected]}
-                categories={categoryList}
+                topics={topicList}
+                projects={projectNames}
                 actions={actions}
                 onDone={clearSelection}
                 onClear={clearSelection}
@@ -171,8 +202,10 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
             </div>
           )}
           <MemoryList
+            key={listPreset.key}
+            initialFilter={listPreset.filter}
             memories={memories.data}
-            labelOf={labelOf}
+            topicLabel={topicLabel}
             highlighted={highlighted}
             canWrite={access.canWrite}
             onOpen={openMemory}
@@ -188,12 +221,42 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
             client={client}
             user={user}
             actions={actions}
-            labelOf={labelOf}
+            labelOf={topicLabel}
             onOpenMemory={openMemory}
-            categories={categoryList}
+            topics={topicList}
+            projects={projectNames}
             canWrite={access.canWrite}
           />
         </Suspense>
+      )}
+      {view === "review" && (
+        <ReviewQueue
+          memories={memories.data}
+          topics={topicList}
+          projects={projectNames}
+          canWrite={access.canWrite}
+          canSuggest={understanding}
+          actions={actions}
+          onOpen={openMemory}
+        />
+      )}
+      {view === "projects" && (
+        <ProjectsView
+          client={client}
+          user={user}
+          canWrite={access.canWrite}
+          actions={actions}
+          onShowMemories={(name) => showInList({ scope: `project:${name}` })}
+        />
+      )}
+      {view === "topics" && (
+        <TopicsView
+          client={client}
+          user={user}
+          canWrite={access.canWrite}
+          actions={actions}
+          onShowMemories={(topic) => showInList({ topic })}
+        />
       )}
       {view === "categories" && <CategoriesView client={client} user={user} access={access} actions={actions} />}
       {open.kind === "edit" && (
@@ -205,41 +268,58 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
             actions={actions}
             onSaved={onSaved}
             onForgotten={onForgotten}
+            topics={topicList}
+            projects={projectNames}
           />
         </Panel>
       )}
       {open.kind === "add" && (
         <Panel title="Add a memory" onClose={close}>
-          <AddMemory categories={fileable(categoryList)} actions={actions} onAdded={onAdded} />
+          <AddMemory
+            categories={fileable(categoryList)}
+            topics={topicList}
+            projects={projectNames}
+            actions={actions}
+            onAdded={onAdded}
+          />
         </Panel>
       )}
     </>
   );
 }
 
-function ViewTabs({ view, onChange }: { view: View; onChange: (view: View) => void }) {
-  const tab = (value: View, label: string) => (
+function ViewTabs({ view, onChange, reviewCount }: { view: View; onChange: (view: View) => void; reviewCount: number }) {
+  const tab = (value: View, label: string, badge?: number) => (
     <a
       href={VIEW_PATHS[value]}
       aria-current={view === value ? "page" : undefined}
+      aria-label={badge !== undefined && badge > 0 ? `${label}, ${badge} to review` : undefined}
       onClick={(event) => {
         event.preventDefault();
         onChange(value);
       }}
       className={
-        "border-b-2 px-3 py-2 text-sm font-medium " +
+        "shrink-0 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium " +
         (view === value
           ? "border-indigo-600 text-indigo-700 dark:text-indigo-300"
           : "border-transparent text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100")
       }
     >
       {label}
+      {badge !== undefined && badge > 0 && (
+        <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900 dark:bg-amber-900/60 dark:text-amber-100">
+          {badge}
+        </span>
+      )}
     </a>
   );
   return (
-    <nav aria-label="Views" className="mb-5 flex gap-2 border-b border-slate-200 dark:border-slate-800">
+    <nav aria-label="Views" className="mb-5 flex gap-1 overflow-x-auto border-b border-slate-200 dark:border-slate-800">
       {tab("list", "List")}
+      {tab("review", "Needs review", reviewCount)}
       {tab("map", "Map")}
+      {tab("projects", "Projects")}
+      {tab("topics", "Topics")}
       {tab("categories", "Categories")}
     </nav>
   );

@@ -83,6 +83,11 @@ fn api_router(state: AppState) -> Router {
             "/v1/memories:bulk",
             post(memories_http::handlers::bulk_edit_memories),
         )
+        // A model call over up to 25 memories: the review queue's Suggest.
+        .route(
+            "/v1/memories:suggest",
+            post(understanding_http::handlers::suggest_structures),
+        )
         .route(
             "/v1/categories",
             get(memories_http::handlers::list_categories)
@@ -126,6 +131,15 @@ fn api_router(state: AppState) -> Router {
         // Projects (memory-structure-plan.md §6). A rename is one row and a
         // merge re-files without re-embedding, so the short timeout holds.
         .route("/v1/projects", get(memories_http::handlers::list_projects))
+        // Topics (memory-structure-plan.md §3.3): a label is display only.
+        .route(
+            "/v1/topics",
+            get(memories_http::handlers::list_topics).post(memories_http::handlers::create_topic),
+        )
+        .route(
+            "/v1/topics/{id}",
+            patch(memories_http::handlers::relabel_topic),
+        )
         .route(
             "/v1/projects/{project}",
             get(memories_http::handlers::get_project)
@@ -177,10 +191,13 @@ async fn healthz() -> Json<Value> {
 
 /// Temporary: proves authentication end-to-end until Phase 2 gives the
 /// API real authenticated routes, at which point this is removed.
-async fn ping(Authenticated(context): Authenticated) -> Json<Value> {
+async fn ping(State(state): State<AppState>, Authenticated(context): Authenticated) -> Json<Value> {
     Json(json!({
         "user": context.handle(),
         "scopes": context.scopes().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        // What this daemon can do, so a client offers only what works:
+        // the web UI shows Suggest only with a model.
+        "understanding": state.understanding.enabled,
     }))
 }
 

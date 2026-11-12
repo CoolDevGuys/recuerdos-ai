@@ -1,7 +1,7 @@
 import type { MapEdge } from "../../api/types";
 import { lerpPoint, type Point } from "./geometry";
 import type { GroupNode, MapModel, MemoryNode } from "./layout";
-import { categoryStyle, withAlpha } from "./palette";
+import { categoryStyle, kindStyle, withAlpha } from "./palette";
 import type { ZoomMix } from "./zoom";
 
 /**
@@ -98,7 +98,8 @@ export function memoryPosition(node: MemoryNode, model: MapModel, mix: ZoomMix):
 }
 
 export function memoryLook(node: MemoryNode, model: MapModel, mix: ZoomMix, view: ViewState): Look {
-  const { color } = categoryStyle(node.category);
+  // Colour by kind (plan D13); the group it sits in is its topic.
+  const { color } = kindStyle(node.memory.kind);
   // A highlighted memory shows at any zoom, in its true place, so a search
   // over the whole map shows where its answers sit among the categories.
   if (view.highlighted?.has(node.id) === true && !view.hiddenCategories.has(node.category)) {

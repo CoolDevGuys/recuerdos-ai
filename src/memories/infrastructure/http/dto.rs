@@ -10,6 +10,7 @@ use crate::memories::application::structured_memory_saver::{
     AppliesToInput, DetectedProject, SaveNote, SaveResult, StructuredSave,
 };
 use crate::memories::application::structured_memory_updater::{StructuredEdit, UpdatedMemory};
+use crate::memories::application::topic_curator::TopicView;
 use crate::memories::domain::applies_to::AppliesTo;
 use crate::memories::domain::memory::{Memory, MemorySource};
 use crate::memories::domain::recall_ranker::ScoredMemory;
@@ -600,9 +601,27 @@ pub struct BulkRequest {
 pub struct BulkSet {
     #[serde(default)]
     pub category: Option<String>,
+    /// A new kind for every memory.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// `{"target": "project", "project_name": "quill"}`: a known project only.
+    #[serde(default)]
+    pub applies_to: Option<BulkAppliesTo>,
+    /// Confirms each memory's structure as it is (the review queue).
+    #[serde(default)]
+    pub reviewed: bool,
     /// `null` clears the sub-label; omitting it leaves it alone.
     #[serde(default, with = "serde_with_double_option")]
     pub subcategory: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkAppliesTo {
+    pub target: String,
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -628,18 +647,19 @@ pub struct MapResponse {
     pub min_weight: f32,
     /// True when the store is too large for similarity edges.
     pub edges_omitted: bool,
-    /// `memories` when `nodes` holds every memory in scope; `categories`
-    /// when the store is above the detail limit and only the category
-    /// summary is sent.
+    /// `memories` when `nodes` holds every memory in scope; `topics` when
+    /// the store is above the detail limit and only the topic summary is
+    /// sent.
     pub detail: &'static str,
     /// Memories in scope, whether or not `nodes` carries them.
     pub total: usize,
-    /// The category this map is limited to, if any.
-    pub category: Option<String>,
+    /// The topic this map is limited to, if any.
+    pub topic: Option<String>,
     pub nodes: Vec<MemoryResponse>,
     pub edges: Vec<MapEdge>,
-    pub categories: Vec<MapCategory>,
-    pub category_edges: Vec<MapCategoryEdge>,
+    /// The topics the memories are grouped by (D13), largest first.
+    pub topics: Vec<MapTopic>,
+    pub topic_edges: Vec<MapTopicEdge>,
 }
 
 #[derive(Debug, Serialize)]
@@ -662,22 +682,22 @@ pub enum MapEdge {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapCategory {
+pub struct MapTopic {
     pub id: String,
     pub label: String,
     pub built_in: bool,
     pub count: usize,
-    pub subcategories: Vec<MapSubcategory>,
+    pub subtopics: Vec<MapSubtopic>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapSubcategory {
+pub struct MapSubtopic {
     pub name: String,
     pub count: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapCategoryEdge {
+pub struct MapTopicEdge {
     pub source: String,
     pub target: String,
     pub weight: f32,
@@ -695,6 +715,51 @@ mod serde_with_double_option {
     {
         Option::<T>::deserialize(deserializer).map(Some)
     }
+}
+
+/// One topic in `GET /v1/topics` and the answers to adding or relabelling
+/// one (ai-specs/memory-structure-plan.md §3.3).
+#[derive(Debug, Serialize)]
+pub struct TopicResponse {
+    pub id: String,
+    /// What to show: the user's label, else the default wording.
+    pub label: String,
+    pub default_label: String,
+    pub built_in: bool,
+    /// Active memories about it.
+    pub count: usize,
+}
+
+impl From<&TopicView> for TopicResponse {
+    fn from(view: &TopicView) -> Self {
+        Self {
+            id: view.entry.topic.as_str().to_string(),
+            label: view.entry.label(),
+            default_label: view.entry.topic.default_label(),
+            built_in: view.entry.topic.is_built_in(),
+            count: view.count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopicsResponse {
+    pub topics: Vec<TopicResponse>,
+}
+
+/// `POST /v1/topics`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTopicRequest {
+    pub id: String,
+    pub label: Option<String>,
+}
+
+/// `PATCH /v1/topics/{id}`: `null` or blank resets the label.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelabelTopicRequest {
+    pub label: Option<String>,
 }
 
 /// One project in `GET /v1/projects` and the answers to renaming and

@@ -6,7 +6,7 @@ not my standards. Is there a way to improve how memories are stored — a better
 classification — so that recall can tell them apart? I would like to define as much structure as
 possible when memories are saved, instead of relying on the harness to get it right.*
 
-Status: **S0–S4 implemented** (2026-11-12, branch `feat/memory-structure`); S5 to do. The shape,
+Status: **S0–S5 implemented** (2026-11-12, branch `feat/memory-structure`); all phases done; `v0.6.0` is ready to release. The shape,
 the rules and the examples in §3–§7 were settled with the owner in conversation on 2026-11-11/12
 (§1). §11 records how the last open questions were resolved; none remain. §12 records how each
 phase went.
@@ -556,4 +556,36 @@ and the legend and tooltips name the kind, so colour is never the only cue.
   top five either way); the integration test, with its control, is the check for E16.
 - **Left for S5**: the §9 suggestion of a `me` rule from three projects' identical
   conventions, with the review queue.
+
+### S5 (2026-11-13)
+
+- **The map groups by topic on the server**: `memory_map`'s summary and links key on
+  the topic, and `/v1/map` speaks `topics` / `?topic=` (breaking, within `v0.6.0`). The
+  web map code still calls a group a "category" internally (`layout.ts`'s `groupOf`
+  is the one place that decides it is the topic): renaming ~400 identifiers would have
+  been a large diff with no behaviour in it.
+- **Colour by kind**: a palette search (maximin over a 16-step RGB grid, constrained to
+  3:1 contrast on white and slate-950) found eleven colours at ΔE ≥ 18.9 under all four
+  simulated visions. The §11 risk did not materialise; the test holds them to 14. Topic
+  groups are neutral grey with their initial, so colour never means two things.
+- **Bulk structure edits** (`StructureChange` on `MemoryBulkEditor`) are checked for
+  every memory before anything is written: the kind × target table, R7's phrase list,
+  `MemoryStructure::new`. `reviewed: true` re-validates the current structure too, so
+  a guess the rules would refuse (a "this repo" memory filed as general) cannot be
+  confirmed, only corrected. Origin becomes `user_confirmed` when the structure is
+  restated. A bulk edit files only under an existing project; creating one stays a
+  save's job.
+- **Suggest** is `understanding::StructureSuggester`: one call for up to 25 memories,
+  shown by number, with the user's topics and projects listed; an answer is kept only
+  when it fits the rules (an unknown project becomes general). It writes nothing; the
+  queue accepts through the bulk edit, one request per distinct structure.
+- **Topics got their write path**: `TopicCatalog::{entries, create, relabel}` over the
+  V11 table (built-ins get a row only when relabelled) and `TopicCurator`. Renaming or
+  merging a topic is a bulk edit of its memories, so it has no endpoint of its own.
+- **The editor hides the category**: the structure is what the user edits, and the
+  category follows; the Categories tab stays for filtering by the old labels.
+- **`/v1/ping` reports `understanding`**, so the UI offers Suggest only when it works.
+- **Left open**: the §9 suggestion of a `me` rule from three projects' identical
+  conventions; the extractor set still needs a run against a real model; the SDK version
+  bump.
 

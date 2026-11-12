@@ -38,7 +38,7 @@ describe("HttpApiClient", () => {
   it("drops scopes it does not know", async () => {
     const client = new HttpApiClient("k", respond(200, { user: "alex", scopes: ["read", "future"] }));
 
-    expect(await client.ping()).toEqual({ user: "alex", scopes: ["read"] });
+    expect(await client.ping()).toEqual({ user: "alex", scopes: ["read"], understanding: false });
   });
 
   it("surfaces the server's error code and message", async () => {

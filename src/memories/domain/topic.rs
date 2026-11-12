@@ -71,6 +71,31 @@ impl Topic {
         }
     }
 
+    /// The wording a topic is shown with until the user relabels it.
+    pub fn default_label(&self) -> String {
+        match self {
+            Topic::Coding => "Coding".to_string(),
+            Topic::Tech => "Tech".to_string(),
+            Topic::Work => "Work".to_string(),
+            Topic::Family => "Family".to_string(),
+            Topic::People => "People".to_string(),
+            Topic::Health => "Health".to_string(),
+            Topic::Lifestyle => "Lifestyle".to_string(),
+            Topic::Home => "Home".to_string(),
+            Topic::Finance => "Finance".to_string(),
+            Topic::Travel => "Travel".to_string(),
+            Topic::Food => "Food".to_string(),
+            Topic::Custom(id) => {
+                let words = id.replace(['-', '_'], " ");
+                let mut chars = words.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => "Topic".to_string(),
+                }
+            }
+        }
+    }
+
     pub fn is_built_in(&self) -> bool {
         !matches!(self, Topic::Custom(_))
     }
@@ -120,6 +145,12 @@ impl fmt::Display for Topic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_custom_topic_is_labelled_from_its_id() {
+        assert_eq!(Topic::Custom("home-lab".into()).default_label(), "Home lab");
+        assert_eq!(Topic::Coding.default_label(), "Coding");
+    }
 
     #[test]
     fn built_ins_round_trip() {

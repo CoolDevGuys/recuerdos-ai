@@ -16,6 +16,7 @@ use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::application::project_curator::ProjectCurator;
 use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
 use crate::memories::application::structured_memory_updater::StructuredMemoryUpdater;
+use crate::memories::application::topic_curator::TopicCurator;
 use crate::memories::domain::category_catalog::CategoryCatalog;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
@@ -27,6 +28,7 @@ use crate::memories::domain::recall_ranker::{
 };
 use crate::memories::domain::reranker::{RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
+use crate::memories::domain::topic_catalog::TopicCatalog;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
@@ -66,6 +68,10 @@ pub struct Memories {
     /// Listing, renaming and merging projects (plan §6): `/v1/projects`
     /// and the MCP project tools.
     pub project_curator: Arc<ProjectCurator>,
+    /// Listing, adding and relabelling topics: `/v1/topics`.
+    pub topic_curator: Arc<TopicCurator>,
+    /// Each user's topics, for the review queue's suggestions.
+    pub topics: Arc<dyn TopicCatalog>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
     pub forgetter: Arc<MemoryForgetter>,
@@ -294,12 +300,19 @@ impl Memories {
         let recaller = Arc::new(recaller);
         let projects: Arc<dyn ProjectRegistry> =
             Arc::new(SqliteProjectRegistry::new(Arc::clone(&database)));
+        let topics: Arc<dyn TopicCatalog> =
+            Arc::new(SqliteTopicCatalog::new(Arc::clone(&database)));
         let structured_saver = Arc::new(StructuredMemorySaver::new(
             Arc::clone(&saver),
             Arc::clone(&repository),
             Arc::clone(&recaller),
             Arc::clone(&projects),
-            Arc::new(SqliteTopicCatalog::new(Arc::clone(&database))),
+            Arc::clone(&topics),
+            Arc::clone(&clock),
+        ));
+        let topic_curator = Arc::new(TopicCurator::new(
+            Arc::clone(&topics),
+            Arc::clone(&repository),
             Arc::clone(&clock),
         ));
 
@@ -327,6 +340,8 @@ impl Memories {
             structured_updater,
             projects,
             project_curator,
+            topic_curator,
+            topics,
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),

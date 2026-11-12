@@ -5,11 +5,13 @@ The daemon serves a browser UI at **`/ui`** on its API port, at
 compiled into the binary. It reads and writes memories through the same `/v1` API
 as every other client, under the same API-key scopes.
 
-> **Status:** complete: phases P0–P4 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md).
-> You can sign in, browse, filter, correct, add and forget memories, explore
-> them as a zoomable mental map with a recall preview, manage your categories,
-> and edit many memories at once from the list or with a lasso on the map.
-> It works from the keyboard, in light and dark mode, and at phone width.
+> **Status:** complete: phases P0–P4 of [ai-specs/web-ui-plan.md](../ai-specs/web-ui-plan.md),
+> and S5 of [ai-specs/memory-structure-plan.md](../ai-specs/memory-structure-plan.md).
+> You can sign in, browse, filter, correct, add and forget memories, say what each
+> one is and who it is for, review the ones filed by a guess, close goals, rename and
+> merge projects, add and relabel topics, explore your memories as a zoomable mental
+> map with a recall preview, and edit many at once from the list or with a lasso on
+> the map. It works from the keyboard, in light and dark mode, and at phone width.
 
 ![The list of memories](images/web-ui-list.png)
 
@@ -18,12 +20,17 @@ The screenshots on this page show a demo store of made-up memories
 
 ## The mental map
 
-**Map** (`/ui/map`) draws your memories as a graph you zoom through.
+**Map** (`/ui/map`) draws your memories as a graph you zoom through. Memories are
+**grouped by topic and coloured by kind**: a preference, a rule and a convention
+each have their own colour and glyph, and the **Kinds** key beside the map says
+which is which. Topic groups are grey, so colour always means a kind. The eleven
+kind colours stay apart for every common kind of colour blindness, and a glyph and
+the words carry the meaning too.
 
-- **Zoomed out:** one disc per category, sized by how many memories it holds,
-  with lines between categories whose memories resemble each other.
-- **Zooming in:** each category dissolves into its *clusters*:
-  - its sub-labels, when most of its memories have one;
+- **Zoomed out:** one disc per topic, sized by how many memories it holds,
+  with lines between topics whose memories resemble each other.
+- **Zooming in:** each topic dissolves into its *clusters*:
+  - its subtopics, when most of its memories have one;
   - otherwise groups of similar memories, named after the tag they share most.
 - **Zoomed in:** clusters dissolve into the individual memories:
   - solid lines join memories with similar meaning, thicker when more similar;
@@ -33,8 +40,8 @@ The screenshots on this page show a demo store of made-up memories
 
 ![Zooming in: categories split into named clusters](images/web-ui-map-clusters.png)
 
-Use the scroll wheel or a pinch to zoom, or **Categories / Clusters /
-Memories** to jump to a level. Clicking a category or cluster opens it.
+Use the scroll wheel or a pinch to zoom, or **Topics / Clusters / Memories** to
+jump to a level. Clicking a topic or cluster opens it.
 Clicking a memory opens it in the editor.
 
 **From the keyboard**, Tab to the map, then:
@@ -111,20 +118,31 @@ easier view on a small screen.
 ## Managing memories
 
 - **The list shows 50 memories a page**, with **Previous** and **Next** below
-  it. The filter, category and sort apply to every memory, not just the page,
-  and changing one goes back to page 1. A memory you just saved or restored
-  opens on its own page.
+  it. Each row says what the memory is, what it is about and who it is for
+  ("Convention · Coding · quill"). Filter by words, **topic**, **kind**, **applies
+  to** (you, general, or one project) and **show**:
+  - **Current** (the default): what recall still uses;
+  - **Needs review**: filed by a guess;
+  - **Closed goals** and **Expired**: kept in your history, out of recall;
+  - **Everything**.
+
+  The filters and sort apply to every memory, not just the page, and changing one
+  goes back to page 1. A memory you just saved or restored opens on its own page.
 - **Open a memory** from the list to see it in full. With a `write` key you can
-  correct its text, category, sub-label and tags. Only the fields you
-  changed are sent.
+  correct its text, sub-label and tags, and what it is, what it is about, who it
+  applies to and when it ends. Only what you changed is sent. A memory filed by a
+  guess says so, with **It is right as it is** to confirm it.
+- **Close a goal** from its editor: **Mark achieved** or **Abandon it**. A closed
+  goal leaves recall and the profile and shows under **Closed goals**; **Reopen
+  it** brings it back. Only you close a goal: an agent has to ask you first.
 - **Edits never overwrite silently.** If an agent, consolidation or another tab
   changed the memory after you opened it, saving is refused (`412`) and your text
   is kept. You then choose:
   - **Load the latest**: discards your edit and shows the current version.
   - **Save mine anyway**: overwrites the current version with yours.
 - **Add memory** saves exactly what you write, instantly, once you say **what it
-  is** (a preference, a rule, a fact…), **what it is about** and **who it applies
-  to**: you everywhere, one project, or in general. The choices a kind cannot take
+  is** (a preference, a rule, a fact, a dated plan…), **what it is about** (one of
+  the topics, yours included) and **who it applies to**: you everywhere, one project, or in general. The choices a kind cannot take
   are greyed out (a preference is always yours), and the category follows from what
   you chose. A project name you type that is new becomes a new project. If the
   daemon refuses the save, the form shows why and keeps what you typed. When it
@@ -151,15 +169,53 @@ easier view on a small screen.
   Drawing around a category or cluster disc takes all its memories. The
   selection lights up where it sits on the map.
 
-The selection opens one editor. Move everything to a category, set or clear
-the sub-label, add tags, remove tags, then **Apply**. It is all or nothing: if
-one memory changed underneath you (forgotten by an agent, say), nothing is
-changed and the message says which.
+The selection opens one editor. Say what they all are, what they are about and who
+they apply to, set or clear the sub-label, add or remove tags, or **Mark as
+reviewed**, then **Apply**. It is all or nothing: if one memory changed underneath
+you (forgotten by an agent, say), or one cannot take the change (a preference
+cannot belong to a project; "this repo" cannot be yours), nothing is changed and
+the message says which.
+
+## Needs review
+
+**Needs review** (`/ui/review`) lists the memories saved before memories had a
+structure, whose kind, topic and scope were guessed from their old category. The
+tab shows how many are left.
+
+- **Select** some and file them with the same editor as the list, or open one to
+  edit it.
+- **Suggest** (with a language model configured) asks the model what the first 25
+  — or the ones you selected — really are. Each suggestion shows under its memory
+  with a reason; **Accept** it, or **Accept all**. Nothing changes until you do,
+  and a suggestion the rules would refuse is never offered.
+
+## Projects
+
+**Projects** (`/ui/projects`) lists your projects with how many memories each holds
+and what else finds it (git remotes, folder names, former names).
+
+- **Rename…**: its memories follow, and the old name keeps finding it.
+- **Merge into…**: every memory moves to the other project, and this one's name and
+  remotes find that project from then on.
+- **Show its memories** opens the list filtered to the project.
+
+## Topics
+
+**Topics** (`/ui/topics`) lists the built-in topics and your own, with how many
+memories each holds.
+
+- **Add** a topic of your own, like `homelab`: it can be used at once, by you and by
+  your agents.
+- **Relabel** any topic. Only the words shown change; memories keep the topic.
+- **Show** opens the list filtered to the topic. To move memories to another topic,
+  select them in the list and bulk-edit them.
 
 ## Categories
 
 **Categories** (`/ui/categories`) lists every category with how many memories
-it holds.
+it holds. Categories are the labels memories carried before they said what they are
+and who they are for; recall can still filter by them, and the review queue shows
+each memory's old one.
 
 - **New category:** an id like `health.sleep` and an optional label. It can
   be used at once, by you in the editor and by your agents in `memory_save`.

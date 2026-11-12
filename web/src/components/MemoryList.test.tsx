@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { memory } from "../api/fake";
 import type { Memory } from "../api/types";
 import { MemoryList, PAGE_SIZE } from "./MemoryList";
 
@@ -8,17 +9,14 @@ import { MemoryList, PAGE_SIZE } from "./MemoryList";
 function memories(count: number): Memory[] {
   return Array.from({ length: count }, (_, i) => {
     const at = new Date(Date.UTC(2026, 0, 1) - i * 60_000).toISOString();
-    return {
+    return memory({
       id: `m${i}`,
       content: `Memory number ${i}`,
       category: i % 2 === 0 ? "preference.coding" : "decision",
-      subcategory: null,
-      tags: [],
-      confidence: 1,
+      topic: i % 2 === 0 ? "coding" : "work",
       created_at: at,
       updated_at: at,
-      superseded_by: null,
-    };
+    });
   });
 }
 
@@ -58,7 +56,7 @@ describe("MemoryList paging", () => {
     render(<MemoryList memories={memories(120)} />);
     await user.click(screen.getByRole("button", { name: "Next →" }));
 
-    await user.selectOptions(screen.getByLabelText("Category"), "decision");
+    await user.selectOptions(screen.getByLabelText("Topic"), "work");
 
     expect(screen.getByRole("status")).toHaveTextContent("60 of 120 memories · showing 1–50");
     expect(screen.getByRole("navigation", { name: "Pages" })).toHaveTextContent("Page 1 of 2");
@@ -97,7 +95,7 @@ describe("MemoryList paging", () => {
     render(<MemoryList memories={memories(120)} canWrite selected={new Set()} onSelect={onSelect} />);
 
     await user.click(screen.getByRole("button", { name: "Select" }));
-    await user.selectOptions(screen.getByLabelText("Category"), "decision");
+    await user.selectOptions(screen.getByLabelText("Topic"), "work");
     await user.click(screen.getByRole("checkbox", { name: "Select all 60 matching" }));
 
     const [ids, on] = onSelect.mock.lastCall ?? [[], false];

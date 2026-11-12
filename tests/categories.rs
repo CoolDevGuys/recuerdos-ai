@@ -184,12 +184,6 @@ async fn relabelling_a_built_in_is_display_only() {
     assert_eq!(body["category"]["default_label"], "Coding preference");
     assert_eq!(body["moved"], 0);
     assert_eq!(session.category_of(&id).await, "preference.coding");
-    let (_, map) = session.send(Method::GET, "/v1/map", None).await;
-    let coding = find(map["categories"].as_array().unwrap(), "preference.coding").unwrap();
-    assert_eq!(
-        coding["label"], "How I code",
-        "the map shows the user's words"
-    );
 
     // A built-in's id never changes.
     let (status, _) = session

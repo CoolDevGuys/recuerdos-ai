@@ -15,6 +15,7 @@ pub mod project_curator;
 pub mod structured_memory_saver;
 pub mod structured_memory_updater;
 pub mod text_index_rebuilder;
+pub mod topic_curator;
 
 #[cfg(test)]
 pub mod fake_embedder;

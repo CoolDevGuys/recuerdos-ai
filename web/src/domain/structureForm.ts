@@ -1,4 +1,4 @@
-import type { MemoryStructure } from "../api/types";
+import type { Memory, MemoryStructure, StructurePatch } from "../api/types";
 
 // Mirrors src/memories/domain/kind.rs and topic.rs, so the form can offer only
 // what the daemon will accept and explain it before the round trip. The daemon
@@ -26,7 +26,8 @@ export const KINDS: readonly KindOption[] = [
   { id: "learning", label: "Learning", hint: "The lesson drawn from something that happened.", targets: ANY },
   { id: "procedure", label: "Procedure", hint: "Steps to follow again.", targets: ANY },
   { id: "reference", label: "Reference", hint: "A pointer: a URL, a path, a ticket.", targets: ANY },
-  { id: "goal", label: "Goal", hint: "Something you are working towards.", targets: ["me", "project"] },
+  { id: "goal", label: "Goal", hint: "Something you are working towards. It stays open until you close it.", targets: ["me", "project"] },
+  { id: "plan", label: "Plan", hint: "A dated thing ahead. It needs an end date, and leaves recall after it.", targets: ["project", "general"] },
 ];
 
 export const TOPICS: readonly { id: string; label: string }[] = [
@@ -54,12 +55,14 @@ export interface StructureValues {
   topic: string;
   target: Target | "";
   project: string;
+  /** `YYYY-MM-DD`, or "" for none. Required for a plan, not allowed on a goal. */
+  validUntil: string;
 }
 
 export type StructureErrors = Partial<Record<keyof StructureValues, string>>;
 
 export function emptyStructure(): StructureValues {
-  return { kind: "", topic: "", target: "", project: "" };
+  return { kind: "", topic: "", target: "", project: "", validUntil: "" };
 }
 
 export function kindOf(id: string): KindOption | undefined {
@@ -81,6 +84,10 @@ export function validateStructure(values: StructureValues): StructureErrors {
     }
   }
   if (values.target === "project" && values.project.trim() === "") errors.project = "Name the project.";
+  if (values.kind === "plan" && values.validUntil === "") errors.validUntil = "A plan needs the date it is over.";
+  if (values.kind === "goal" && values.validUntil !== "") {
+    errors.validUntil = "A goal has no end date: it stays open until you close it.";
+  }
   return errors;
 }
 
@@ -99,5 +106,69 @@ export function structureOf(values: StructureValues): MemoryStructure {
         ? { target, project_name: values.project.trim().toLowerCase(), new_project: true }
         : { target },
     origin: "user_said",
+    ...(values.validUntil !== "" && { valid_until: endOfDay(values.validUntil) }),
   };
+}
+
+/** A date as the end of that day, UTC: "through the 14th" (as the MCP tools read it). */
+export function endOfDay(date: string): string {
+  return `${date}T23:59:59Z`;
+}
+
+/** A stored end as the date input shows it. */
+export function dateOf(validUntil: string | null): string {
+  return validUntil === null ? "" : validUntil.slice(0, 10);
+}
+
+/** What a stored memory is, as the form edits it. */
+export function structureValuesOf(memory: Memory): StructureValues {
+  return {
+    kind: memory.kind,
+    topic: memory.topic,
+    target: memory.applies_to.target,
+    project: memory.applies_to.project_name ?? "",
+    validUntil: dateOf(memory.valid_until),
+  };
+}
+
+/** Only what changed between `memory` and `values`, as a PATCH; `null` when nothing did. */
+export function structurePatchOf(memory: Memory, values: StructureValues): StructurePatch | null {
+  const patch: StructurePatch = {};
+  if (values.kind !== memory.kind) patch.kind = values.kind;
+  if (values.topic !== memory.topic) patch.topic = values.topic;
+  const project = values.project.trim().toLowerCase();
+  if (
+    values.target !== "" &&
+    (values.target !== memory.applies_to.target ||
+      (values.target === "project" && project !== memory.applies_to.project_name))
+  ) {
+    patch.applies_to =
+      values.target === "project" ? { target: "project", project_name: project, new_project: true } : { target: values.target };
+  }
+  if (values.validUntil !== dateOf(memory.valid_until)) {
+    patch.valid_until = values.validUntil === "" ? null : endOfDay(values.validUntil);
+  }
+  if (Object.keys(patch).length === 0) return null;
+  // The user is the one restating it, here.
+  return { ...patch, origin: "user_said" };
+}
+
+/** A memory's structure in words: "Convention · Coding · quill". */
+export function describeStructure(memory: Memory, topicLabel: (id: string) => string = topicLabelOf): string {
+  const kind = kindOf(memory.kind)?.label ?? memory.kind;
+  const scope =
+    memory.applies_to.target === "project"
+      ? (memory.applies_to.project_name ?? "a project")
+      : memory.applies_to.target === "me"
+        ? "you"
+        : "general";
+  return `${kind} · ${topicLabel(memory.topic)} · ${scope}`;
+}
+
+/** A built-in topic's default label; a user's own topic, from its id. */
+export function topicLabelOf(id: string): string {
+  const builtIn = TOPICS.find((t) => t.id === id);
+  if (builtIn !== undefined) return builtIn.label.replace(/ \(.*\)$/, "");
+  const words = id.replace(/[-_]/g, " ");
+  return words === "" ? "Topic" : words[0]!.toUpperCase() + words.slice(1);
 }

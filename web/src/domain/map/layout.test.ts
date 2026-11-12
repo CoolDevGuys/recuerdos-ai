@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { memory } from "../../api/fake";
+import { memory as storedMemory } from "../../api/fake";
+
+/**
+ * The map groups by topic (plan D13); these tests name their groups with
+ * category-like ids, so each fixture's topic is its category.
+ */
+const memory: typeof storedMemory = (overrides) => {
+  const base = storedMemory(overrides);
+  return { ...base, topic: base.category };
+};
 import type { MapData } from "../../api/types";
 import { layoutMap, seedOf } from "./layout";
 
@@ -175,7 +184,7 @@ describe("warm starts from a previous layout", () => {
   it("releases a memory that moved to another category", () => {
     const before = layoutMap(data(), { iterations: 50 });
     const moved = data();
-    moved.nodes[2] = { ...moved.nodes[2]!, category: "decision" };
+    moved.nodes[2] = { ...moved.nodes[2]!, category: "decision", topic: "decision" };
     moved.categories[0]!.count = 2;
     moved.categories[1]!.count = 2;
 

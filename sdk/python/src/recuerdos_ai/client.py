@@ -28,6 +28,7 @@ import httpx
 from .errors import JobFailedError, RecuerdosError, TimeoutError_, from_response
 from .models import (
     AppliesTo,
+    BulkResult,
     Distillation,
     Job,
     Memory,
@@ -36,6 +37,8 @@ from .models import (
     SavedMemory,
     SearchHit,
     SearchReport,
+    Suggestion,
+    Topic,
     UpdatedMemory,
 )
 
@@ -626,6 +629,98 @@ class Client:
                 "POST", f"/v1/projects/{_segment(project)}/merge", json={"into": into}
             )
         )
+
+    # --- topics and the review queue ----------------------------------
+
+    def topics(self) -> list[Topic]:
+        """Every topic: the built-ins, then the user's own, with counts."""
+        payload = self._request("GET", "/v1/topics")
+        return [Topic.model_validate(item) for item in payload.get("topics", [])]
+
+    def create_topic(self, topic_id: str, *, label: str | None = None) -> Topic:
+        """Adds a topic of the user's own, which saves can use at once.
+
+        Raises:
+            ConflictError: It exists already, or is a built-in's id.
+        """
+        body: dict[str, Any] = {"id": topic_id}
+        if label is not None:
+            body["label"] = label
+        return Topic.model_validate(self._request("POST", "/v1/topics", json=body))
+
+    def relabel_topic(self, topic_id: str, label: str | None) -> Topic:
+        """Relabels any topic; ``None`` goes back to the default wording.
+        Display only: memories keep the topic."""
+        return Topic.model_validate(
+            self._request(
+                "PATCH", f"/v1/topics/{_segment(topic_id)}", json={"label": label}
+            )
+        )
+
+    def bulk_edit(
+        self,
+        memory_ids: list[str],
+        *,
+        kind: str | None = None,
+        topic: str | None = None,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        reviewed: bool = False,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> BulkResult:
+        """One edit to many memories, all or nothing, under the save rules.
+
+        Args:
+            applies_to: ``"me"``, ``"general"``, or a known project
+                (``{"target": "project", "project_name": "quill"}``).
+            reviewed: Confirms each memory's structure as it is, so it
+                leaves the review queue (``needs_review``).
+
+        Raises:
+            RejectedError: ``invalid_value`` naming the memories that cannot
+                take the structure; nothing was changed.
+        """
+        body_set: dict[str, Any] = {}
+        if kind is not None:
+            body_set["kind"] = kind
+        if topic is not None:
+            body_set["topic"] = topic
+        if isinstance(applies_to, str):
+            body_set["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body_set["applies_to"] = applies_to.model_dump(
+                exclude_none=True, exclude={"new_project"}
+            )
+        elif applies_to is not None:
+            body_set["applies_to"] = applies_to
+        if reviewed:
+            body_set["reviewed"] = True
+        return BulkResult.model_validate(
+            self._request(
+                "POST",
+                "/v1/memories:bulk",
+                json={
+                    "ids": memory_ids,
+                    "set": body_set,
+                    "add_tags": add_tags or [],
+                    "remove_tags": remove_tags or [],
+                },
+            )
+        )
+
+    def suggest(self, memory_ids: list[str]) -> list[Suggestion]:
+        """What each memory may really be, for the user to accept or change
+        (up to 25). Writes nothing.
+
+        Raises:
+            RejectedError: ``no_model`` when the daemon has no language model.
+        """
+        payload = self._request(
+            "POST", "/v1/memories:suggest", json={"ids": memory_ids}
+        )
+        return [
+            Suggestion.model_validate(item) for item in payload.get("suggestions", [])
+        ]
 
     # --- jobs --------------------------------------------------------
 

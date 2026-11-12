@@ -29,6 +29,7 @@ from .errors import (
 )
 from .models import (
     AppliesTo,
+    BulkResult,
     Distillation,
     Job,
     JobStatus,
@@ -44,6 +45,8 @@ from .models import (
     SavedMemory,
     SearchHit,
     SearchReport,
+    Suggestion,
+    Topic,
     UpdatedMemory,
 )
 
@@ -53,6 +56,7 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "AppliesTo",
     "AuthenticationError",
+    "BulkResult",
     "Client",
     "ConflictError",
     "Distillation",
@@ -77,6 +81,8 @@ __all__ = [
     "SearchHit",
     "SearchReport",
     "ServerError",
+    "Suggestion",
+    "Topic",
     "TimeoutError_",
     "ValidationError",
     "__version__",

@@ -10,22 +10,22 @@
 
 use super::dto::{
     AuditEntryResponse, AuditResponse, BulkRequest, BulkResponse, CategoriesResponse,
-    CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, MapCategory, MapCategoryEdge,
-    MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest,
+    CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, CreateTopicRequest, MapEdge,
+    MapResponse, MapSubtopic, MapTopic, MapTopicEdge, MemoryResponse, MergeCategoryRequest,
     MergeProjectRequest, ProjectChangeResponse, ProjectResponse, ProjectsResponse,
-    RenameProjectRequest, RerankResponse, SaveMemoryRequest, SavedMemoryResponse, SearchHit,
-    SearchRequest, SearchResponse, UpdateCategoryRequest, UpdateMemoryRequest,
-    UpdatedMemoryResponse,
+    RelabelTopicRequest, RenameProjectRequest, RerankResponse, SaveMemoryRequest,
+    SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse, TopicResponse, TopicsResponse,
+    UpdateCategoryRequest, UpdateMemoryRequest, UpdatedMemoryResponse,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
 use crate::memories::application::category_curator::{CategoryCurator, CategoryView};
-use crate::memories::application::memory_bulk_editor::BulkEdit;
+use crate::memories::application::memory_bulk_editor::{BulkEdit, StructureChange};
 use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::application::memory_mapper::{MapDetail, MapQuery};
 use crate::memories::application::structured_memory_saver::{DetectedProject, SaveResult};
-use crate::memories::domain::applies_to::Target;
+use crate::memories::domain::applies_to::{AppliesTo, Target};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::Memory;
@@ -290,32 +290,31 @@ pub struct MapParams {
     k: Option<usize>,
     #[serde(default)]
     include_superseded: bool,
-    /// Only this category's memories.
+    /// Only this topic's memories.
     #[serde(default)]
-    category: Option<String>,
+    topic: Option<String>,
 }
 
-/// The mental map: every memory, how they link, and the categories. Above
-/// the detail limit, the categories alone (`detail: "categories"`); ask with
-/// `?category=` for one category's memories.
+/// The mental map: every memory, how they link, and the topics they are
+/// grouped by (ai-specs/memory-structure-plan.md D13). Above the detail
+/// limit, the topics alone (`detail: "topics"`); ask with `?topic=` for one
+/// topic's memories.
 pub async fn read_map(
     State(state): State<AppState>,
     ReadAccess(context): ReadAccess,
     Query(params): Query<MapParams>,
 ) -> Result<Json<MapResponse>> {
-    let query = MapQuery::new(params.k, params.include_superseded)?.in_category(params.category)?;
-    let scope = query.category.clone();
+    let query = MapQuery::new(params.k, params.include_superseded)?.in_topic(params.topic)?;
+    let scope = query.topic.clone();
     let memories = state.memories.clone();
     let (map, labels) = blocking(move || {
         let map = memories.mapper.execute(&context, query)?;
-        // The user's own labels: the map shows the words the categories
-        // curator shows.
+        // The user's own labels: the map shows the words the Topics tab shows.
         let labels: BTreeMap<String, String> = memories
-            .catalog
-            .all(&context)?
+            .topic_curator
+            .list(&context)?
             .into_iter()
-            .filter(|entry| entry.label.is_some())
-            .map(|entry| (entry.category.as_str().to_string(), entry.display_label()))
+            .map(|view| (view.entry.topic.as_str().to_string(), view.entry.label()))
             .collect();
         Ok((map, labels))
     })
@@ -340,31 +339,31 @@ pub async fn read_map(
         edges_omitted: map.edges_omitted,
         detail: match map.detail {
             MapDetail::Memories => "memories",
-            MapDetail::Categories => "categories",
+            MapDetail::Topics => "topics",
         },
         total: map.total,
-        category: scope,
+        topic: scope,
         nodes: map.memories.iter().map(MemoryResponse::from).collect(),
         edges: similar.chain(relations).collect(),
-        categories: map
-            .categories
+        topics: map
+            .topics
             .into_iter()
-            .map(|c| MapCategory {
-                label: labels.get(&c.id).cloned().unwrap_or(c.label),
-                id: c.id,
-                built_in: c.built_in,
-                count: c.count,
-                subcategories: c
+            .map(|t| MapTopic {
+                label: labels.get(&t.id).cloned().unwrap_or(t.label),
+                id: t.id,
+                built_in: t.built_in,
+                count: t.count,
+                subtopics: t
                     .subcategories
                     .into_iter()
-                    .map(|(name, count)| MapSubcategory { name, count })
+                    .map(|(name, count)| MapSubtopic { name, count })
                     .collect(),
             })
             .collect(),
-        category_edges: map
-            .category_edges
+        topic_edges: map
+            .topic_edges
             .into_iter()
-            .map(|e| MapCategoryEdge {
+            .map(|e| MapTopicEdge {
                 source: e.source,
                 target: e.target,
                 weight: e.weight,
@@ -539,14 +538,54 @@ pub async fn bulk_edit_memories(
         let category = request
             .set
             .category
+            .clone()
             .as_deref()
             .map(|raw| memories.catalog.resolve(&context, raw))
             .transpose()?;
+        let set = request.set;
+        let applies_to = match set.applies_to {
+            None => None,
+            Some(applies_to) => Some(
+                match (
+                    applies_to.target.parse::<Target>()?,
+                    applies_to.project_name,
+                ) {
+                    (Target::Me, None) => AppliesTo::Me,
+                    (Target::General, None) => AppliesTo::General,
+                    (Target::Project, Some(name)) => {
+                        AppliesTo::Project(memories.project_curator.find(&context, &name)?)
+                    }
+                    (Target::Project, None) => {
+                        return Err(RaError::rejected(
+                            "no_project",
+                            "Name the project: applies_to.project_name.",
+                        ));
+                    }
+                    (_, Some(_)) => {
+                        return Err(RaError::rejected(
+                            "invalid_value",
+                            "applies_to.project_name is only for target \"project\".",
+                        ));
+                    }
+                },
+            ),
+        };
+        let structure = StructureChange {
+            kind: set.kind.as_deref().map(str::parse::<Kind>).transpose()?,
+            topic: set
+                .topic
+                .as_deref()
+                .map(|raw| memories.topic_curator.known(&context, raw))
+                .transpose()?,
+            applies_to,
+            reviewed: set.reviewed,
+        };
         let edit = BulkEdit {
             category,
-            subcategory: request.set.subcategory,
+            subcategory: set.subcategory,
             add_tags: request.add_tags,
             remove_tags: request.remove_tags,
+            structure,
         };
         memories.bulk_editor.execute(&context, &ids, &edit, &actor)
     })
@@ -695,6 +734,51 @@ fn parse_id(raw: &str) -> Result<MemoryId> {
     // A malformed id is the caller's mistake, not a missing resource.
     MemoryId::from_str(raw)
         .map_err(|_| RaError::Validation(format!("{raw:?} is not a valid memory id")))
+}
+
+/// `GET /v1/topics`: built-ins, then the user's own, with counts.
+pub async fn list_topics(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+) -> Result<Json<TopicsResponse>> {
+    let memories = state.memories.clone();
+    let views = blocking(move || memories.topic_curator.list(&context)).await?;
+    Ok(Json(TopicsResponse {
+        topics: views.iter().map(TopicResponse::from).collect(),
+    }))
+}
+
+/// `POST /v1/topics`: adds a topic of the user's own.
+pub async fn create_topic(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Json(request): Json<CreateTopicRequest>,
+) -> Result<impl IntoResponse> {
+    let memories = state.memories.clone();
+    let view = blocking(move || {
+        memories
+            .topic_curator
+            .create(&context, &request.id, request.label.as_deref())
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(TopicResponse::from(&view))))
+}
+
+/// `PATCH /v1/topics/{id}`: relabels any topic.
+pub async fn relabel_topic(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Path(id): Path<String>,
+    Json(request): Json<RelabelTopicRequest>,
+) -> Result<Json<TopicResponse>> {
+    let memories = state.memories.clone();
+    let view = blocking(move || {
+        memories
+            .topic_curator
+            .relabel(&context, &id, request.label.as_deref())
+    })
+    .await?;
+    Ok(Json(TopicResponse::from(&view)))
 }
 
 /// `GET /v1/projects`: the user's projects, with what finds each one and

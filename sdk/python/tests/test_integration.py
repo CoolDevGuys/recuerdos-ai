@@ -413,3 +413,27 @@ def test_search_filters_by_structure_and_ranks_by_project(ra: Client, tag: str) 
         for name, hits in (("inside", inside), ("outside", outside))
     }
     assert relevance["outside"] < relevance["inside"], relevance
+
+
+def test_topics_and_the_review_queue(ra: Client, tag: str) -> None:
+    topic = f"{tag}-lab"
+    created = ra.create_topic(topic, label="Lab")
+    assert created.label == "Lab"
+    assert any(t.id == topic for t in ra.topics())
+
+    saved = ra.save_direct(
+        "The NAS has 40 TB of disks",
+        kind="fact",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        tags=[tag],
+    )
+    result = ra.bulk_edit([saved.id], kind="reference", topic=topic, reviewed=True)
+    assert result.changed == 1
+    assert result.memories[0].kind == "reference"
+    assert result.memories[0].topic == topic
+
+    with pytest.raises(RejectedError) as refused:
+        ra.suggest([saved.id])
+    assert refused.value.code == "no_model"

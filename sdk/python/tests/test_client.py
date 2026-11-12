@@ -749,3 +749,27 @@ def test_search_sends_the_structure_filters_and_the_context() -> None:
     assert body["project"] == "fern"
     assert body["scope"] == "all"
     assert "topics" not in body, "an empty filter is not sent"
+
+
+def test_bulk_edit_sends_the_structure() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"memories": [], "changed": 0, "reembedded": 0})
+
+    client_for(handler).bulk_edit(
+        ["m1"], kind="reference", applies_to="general", reviewed=True
+    )
+
+    assert seen[0].url.path == "/v1/memories:bulk"
+    assert json.loads(seen[0].content) == {
+        "ids": ["m1"],
+        "set": {
+            "kind": "reference",
+            "applies_to": {"target": "general"},
+            "reviewed": True,
+        },
+        "add_tags": [],
+        "remove_tags": [],
+    }

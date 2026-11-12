@@ -9,4 +9,5 @@ pub mod extraction_prompt;
 pub mod ingest_job;
 pub mod ingest_pipeline;
 pub mod reconciliation;
+pub mod structure_prompt;
 pub mod taxonomy;

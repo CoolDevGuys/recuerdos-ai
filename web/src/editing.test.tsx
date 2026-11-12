@@ -1,10 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api/client";
-import { ALEX_KEY, signedInAsAlex, standardServer } from "./test/renderApp";
+import { memory } from "./api/fake";
+import { ALEX_KEY, ALEX_MEMORIES, signedInAsAlex, standardServer } from "./test/renderApp";
 
-async function openMemory(content: string) {
-  const { server, user } = await signedInAsAlex();
+async function openMemory(content: string, server = standardServer()) {
+  const { user } = await signedInAsAlex(server);
   await user.click(screen.getByRole("button", { name: new RegExp(content) }));
   const dialog = await screen.findByRole("dialog", { name: "Edit memory" });
   return { server, user, dialog };
@@ -30,10 +31,11 @@ describe("editing a memory", () => {
     });
   });
 
-  it("re-categorises and re-tags a memory", async () => {
+  it("changes what a memory is and re-tags it", async () => {
     const { server, user, dialog } = await openMemory("The user prefers pnpm");
 
-    await user.selectOptions(within(dialog).getByLabelText("Category"), "Project fact");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Rule");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Work");
     const tags = within(dialog).getByLabelText(/Tags/);
     await user.clear(tags);
     await user.type(tags, "#Tooling, pnpm, tooling");
@@ -41,7 +43,66 @@ describe("editing a memory", () => {
 
     await screen.findByText("Changes saved.");
     const saved = server.memoriesOf(ALEX_KEY).find((m) => m.id === "a");
-    expect(saved).toMatchObject({ category: "fact.project", tags: ["tooling", "pnpm"] });
+    expect(saved).toMatchObject({ kind: "rule", topic: "work", tags: ["tooling", "pnpm"] });
+    const sent = server.calls.find((c) => c.method === "update")?.patch;
+    expect(sent).toMatchObject({ kind: "rule", topic: "work", origin: "user_said" });
+    expect(sent).not.toHaveProperty("category");
+  });
+
+  it("moves a memory to a project", async () => {
+    const { server, user, dialog } = await openMemory("Testing follows TDD");
+
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Convention");
+    await user.click(within(dialog).getByRole("radio", { name: /One project/ }));
+    await user.type(within(dialog).getByLabelText("Project"), "quill");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    await screen.findByText("Changes saved.");
+    expect(server.memoriesOf(ALEX_KEY).find((m) => m.id === "b")?.applies_to).toEqual({
+      target: "project",
+      project_name: "quill",
+    });
+  });
+
+  it("closes a goal, and says what that means", async () => {
+    const server = standardServer();
+    server.addAccount(
+      ALEX_KEY,
+      { user: "alex", scopes: ["read", "write"] },
+      [
+        ...ALEX_MEMORIES,
+        memory({ id: "g", content: "Run a half marathon in April", kind: "goal", topic: "health", goal_status: "active" }),
+      ],
+    );
+    const { user, dialog } = await openMemory("Run a half marathon in April", server);
+
+    expect(within(dialog).getByText(/Open: you are working towards it/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Mark achieved" }));
+
+    await screen.findByText("Changes saved.");
+    const closed = server.memoriesOf(ALEX_KEY).find((m) => m.id === "g");
+    expect(closed?.goal_status).toBe("achieved");
+    expect(server.calls.find((c) => c.method === "update")?.patch).toEqual({ goal_status: "achieved", origin: "user_said" });
+    // A closed goal leaves the current list, and shows under Closed goals.
+    expect(screen.queryByText("Run a half marathon in April")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Show"), "closed");
+    expect(await screen.findByText("Run a half marathon in April")).toBeInTheDocument();
+  });
+
+  it("confirms a guessed structure as it is", async () => {
+    const server = standardServer();
+    server.addAccount(
+      ALEX_KEY,
+      { user: "alex", scopes: ["read", "write"] },
+      [...ALEX_MEMORIES, memory({ id: "r", content: "The NAS has 40 TB", kind: "fact", topic: "tech", needs_review: true })],
+    );
+    const { user, dialog } = await openMemory("The NAS has 40 TB", server);
+
+    expect(within(dialog).getByText("Filed by a guess")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "It is right as it is" }));
+
+    await screen.findByText("Changes saved.");
+    expect(server.memoriesOf(ALEX_KEY).find((m) => m.id === "r")?.needs_review).toBe(false);
   });
 
   it("explains an empty memory on blur and does not send it", async () => {

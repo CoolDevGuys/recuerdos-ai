@@ -285,3 +285,35 @@ class ProjectChange(_Model):
     moved: int = 0
     #: Identifiers a rename learned: the remote of the folder it came from.
     learned: list[str] = Field(default_factory=list)
+
+
+class Topic(_Model):
+    """A topic memories can be about: a built-in or one of the user's."""
+
+    id: str
+    #: The user's label, else the default wording.
+    label: str
+    default_label: str = ""
+    built_in: bool = False
+    #: Active memories about it.
+    count: int = 0
+
+
+class Suggestion(_Model):
+    """What a memory may really be, proposed by the model for the review queue."""
+
+    id: str
+    kind: str
+    topic: str
+    applies_to: AppliesTo
+    #: One sentence a person reads to accept or change it.
+    reason: str = ""
+
+
+class BulkResult(_Model):
+    """What a bulk edit did."""
+
+    memories: list[Memory] = Field(default_factory=list)
+    #: How many actually changed.
+    changed: int = 0
+    reembedded: int = 0
