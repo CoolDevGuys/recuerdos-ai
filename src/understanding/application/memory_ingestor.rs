@@ -44,6 +44,7 @@ impl IngestPipeline for MemoryIngestor {
             client: payload.client.clone(),
             category: payload.category.clone(),
             tags: payload.tags.clone(),
+            project: payload.project.as_ref().map(|project| project.name.clone()),
         };
 
         let candidates = self
@@ -59,7 +60,10 @@ impl IngestPipeline for MemoryIngestor {
         }
 
         let actor = payload.client.as_deref().unwrap_or(DEFAULT_ACTOR);
-        let outcome = self.reconciler.execute(context, &candidates, actor).await?;
+        let outcome = self
+            .reconciler
+            .execute(context, &candidates, payload.project.as_ref(), actor)
+            .await?;
 
         tracing::info!(
             candidates = candidates.len(),
@@ -75,6 +79,7 @@ impl IngestPipeline for MemoryIngestor {
         Ok(IngestOutcome::from_reconciled(
             outcome.stored,
             outcome.superseded.len() + outcome.deleted.len(),
+            outcome.suggestions,
         ))
     }
 }
@@ -97,6 +102,7 @@ mod tests {
             tags: vec![],
             client: Some("claude-code".to_string()),
             session_id: None,
+            project: None,
         }
     }
 
@@ -118,6 +124,7 @@ mod tests {
                 Arc::new(fixture.saver()),
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                fixture.project_registry(),
                 model,
                 None,
                 true,
@@ -221,6 +228,7 @@ mod tests {
                 Arc::new(fixture.saver()),
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                fixture.project_registry(),
                 Arc::clone(&model) as Arc<dyn ChatModel>,
                 None,
                 true,
@@ -242,7 +250,7 @@ mod tests {
         // The project-plan §12.3 scenario, through the real pipeline:
         // extraction finds the new fact, reconciliation retires the old.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "Backend deploys on Fly.io");
+        let old = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
 
         let ingestor = ingestor(
             &fixture,

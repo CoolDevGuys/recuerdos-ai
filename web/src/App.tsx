@@ -128,6 +128,9 @@ function Memories({ client, user, access }: { client: ApiClient; user: string; a
     if (added.kind === "saved") {
       setHighlighted(added.memory.id);
       show({ tone: "success", message: "Memory saved." });
+    } else if (added.kind === "known") {
+      setHighlighted(added.memory.id);
+      show({ tone: "info", message: "You already have this memory, so nothing new was saved." });
     } else {
       setHighlighted(added.firstId);
       show({ tone: added.tone, message: added.message }, 8000);

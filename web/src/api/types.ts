@@ -84,6 +84,24 @@ export interface MemoryStructure {
   topic: string;
   applies_to: { target: "me" | "project" | "general"; project_name?: string; new_project?: boolean };
   origin: "user_said";
+  /** A stored memory this one replaces: the user changed their mind. */
+  replaces?: string;
+  /** Stored memories the user said this does not replace: both hold. */
+  coexists_with?: string[];
+}
+
+/** What a save did: stored it, or found a stored memory already says it. */
+export interface SavedMemory {
+  memory: Memory;
+  status: "stored" | "already_known";
+  /** The daemon's sentence about how it was filed. */
+  message: string;
+}
+
+/** A stored memory a save contradicts (a 422 `conflict`). */
+export interface ConflictingMemory {
+  id: string;
+  content: string;
 }
 
 /** An edit: only the fields that changed. */

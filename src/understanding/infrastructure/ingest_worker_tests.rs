@@ -119,6 +119,7 @@ fn payload(content: &str) -> IngestPayload {
         tags: vec![],
         client: None,
         session_id: None,
+        project: None,
     }
 }
 

@@ -41,9 +41,9 @@ def test_save_direct_then_get_round_trips_every_field(ra: Client, tag: str) -> N
     assert saved.message.startswith("Saved as your personal coding preference")
 
     fetched = ra.get(saved.id)
-    assert fetched.model_dump() == saved.model_dump(exclude={"message", "notes"}), (
-        "the model does not survive a round trip"
-    )
+    assert fetched.model_dump() == saved.model_dump(
+        exclude={"message", "notes", "status", "replaced"}
+    ), "the model does not survive a round trip"
 
 
 def test_a_rule_refusal_carries_its_code(ra: Client, tag: str) -> None:
@@ -60,6 +60,60 @@ def test_a_rule_refusal_carries_its_code(ra: Client, tag: str) -> None:
         )
     assert refused.value.code == "needs_confirmation"
     assert refused.value.status == 422
+
+
+def test_a_change_of_mind_replaces_the_old_memory(ra: Client, tag: str) -> None:
+    # Without a model the daemon stops only near-repeats, so a pair this
+    # close is refused; the user says they changed their mind.
+    old = ra.save_direct(
+        f"The user prefers tabs for indentation in {tag}",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+    with pytest.raises(RejectedError) as refused:
+        ra.save_direct(
+            f"The user prefers spaces for indentation in {tag}",
+            kind="preference",
+            topic="coding",
+            applies_to="me",
+            origin="user_said",
+            tags=[tag],
+        )
+    assert refused.value.code == "conflict"
+    assert any(c["id"] == old.id for c in refused.value.conflicts)
+
+    new = ra.save_direct(
+        f"The user prefers spaces for indentation in {tag}",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+        replaces=old.id,
+    )
+    assert new.replaced == [old.id]
+    assert ra.get(old.id).superseded_by == new.id
+
+
+def test_a_goal_is_closed_only_by_the_user(ra: Client, tag: str) -> None:
+    goal = ra.save_direct(
+        f"The user's goal is to learn the cello ({tag})",
+        kind="goal",
+        topic="lifestyle",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+    with pytest.raises(RejectedError) as refused:
+        ra.update(goal.id, goal_status="achieved", origin="inferred")
+    assert refused.value.code == "needs_confirmation"
+
+    closed = ra.update(goal.id, goal_status="achieved", origin="user_confirmed")
+    assert closed.goal_status == "achieved"
+    assert "closed as achieved" in closed.message
 
 
 def test_the_core_loop_save_then_recall_by_meaning(ra: Client, tag: str) -> None:
@@ -137,8 +191,10 @@ def test_search_report_agrees_with_the_server_about_floor_and_stage(
     # parses into the fields the SDK promises — and it earns its keep here,
     # because the floor the server reports is not always the configured
     # default, which a unit test has no way to find out.
+    # Not another pnpm sentence: the core-loop test stores one, and a near
+    # repeat in the same scope is refused as a conflict.
     ra.save_direct(
-        "User prefers pnpm over npm for JavaScript packages",
+        "User prefers uv over pip for Python packages",
         kind="preference",
         topic="coding",
         applies_to="me",

@@ -33,6 +33,7 @@ from .models import (
     SavedMemory,
     SearchHit,
     SearchReport,
+    UpdatedMemory,
 )
 
 __all__ = ["Client"]
@@ -172,6 +173,8 @@ class Client:
         category: str | None = None,
         client: str | None = None,
         session_id: str | None = None,
+        replaces: str | None = None,
+        coexists_with: list[str] | None = None,
     ) -> SavedMemory:
         """Stores one memory with its structure, with no pipeline.
 
@@ -200,9 +203,22 @@ class Client:
             valid_until: When it stops being true. Required for a plan.
             category: The old category to also file it under; derived from
                 kind and topic when omitted.
+            replaces: The id of a stored memory this one replaces, when the
+                user changed their mind. Same ``applies_to`` only; the old one
+                leaves recall and stays in history.
+            coexists_with: Ids of stored memories the user said this does
+                not replace (both hold), so they are not reported as
+                conflicts.
+
+        A save that contradicts a stored memory for the same scope raises
+        :class:`RejectedError` with ``code == "conflict"`` and the stored
+        memories in ``error.conflicts``.
 
         Returns:
             The memory, plus the server's ``message`` saying how it was filed.
+            ``status`` is ``"already_known"`` when a stored memory already
+            says this: nothing was written, and the memory returned is that
+            one.
         """
         body: dict[str, Any] = {
             "content": content,
@@ -228,6 +244,10 @@ class Client:
             body["client"] = client
         if session_id is not None:
             body["session_id"] = session_id
+        if replaces is not None:
+            body["replaces"] = replaces
+        if coexists_with:
+            body["coexists_with"] = coexists_with
 
         return SavedMemory.model_validate(
             self._request("POST", "/v1/memories:direct", json=body)
@@ -436,34 +456,68 @@ class Client:
         memory_id: str,
         *,
         content: str | None = None,
-        category: str | None = None,
+        kind: str | None = None,
+        topic: str | None = None,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        subtopic: str | None = None,
         tags: list[str] | None = None,
+        valid_until: datetime | None = None,
+        clear_valid_until: bool = False,
+        goal_status: str | None = None,
+        origin: str | None = None,
+        category: str | None = None,
         expires_at: datetime | None = None,
         clear_expiry: bool = False,
-    ) -> Memory:
-        """Edits a memory in place. Omitted fields are left alone.
+    ) -> UpdatedMemory:
+        """Amends a memory in place. Omitted fields are left alone.
 
-        Editing ``content`` re-embeds and re-indexes it.
+        The same rules as a save apply to what the memory becomes, and a
+        refusal raises :class:`RejectedError`. Editing ``content``
+        re-embeds and re-indexes it; the audit trail keeps the old text.
 
         Args:
-            clear_expiry: Removes an existing expiry. Distinct from
-                passing ``expires_at=None``, which means "leave it
-                alone" — JSON cannot express the difference between an
-                absent field and an explicit null, so this does.
+            applies_to: Moves it to another scope, as :meth:`save_direct`
+                takes it.
+            goal_status: ``"achieved"`` or ``"abandoned"`` closes a goal,
+                ``"active"`` reopens it. Only the user closes a goal: pass
+                ``origin="user_said"`` or ``"user_confirmed"``.
+            origin: Who asked for the change.
+            clear_valid_until: Removes an existing end date. Distinct from
+                passing ``valid_until=None``, which means "leave it alone" —
+                JSON cannot tell an absent field from an explicit null, so
+                this does. ``expires_at`` and ``clear_expiry`` are the older
+                names.
         """
         body: dict[str, Any] = {}
         if content is not None:
             body["content"] = content
+        if kind is not None:
+            body["kind"] = kind
+        if topic is not None:
+            body["topic"] = topic
+        if isinstance(applies_to, str):
+            body["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body["applies_to"] = applies_to.model_dump(exclude_none=True)
+        elif applies_to is not None:
+            body["applies_to"] = applies_to
+        if subtopic is not None:
+            body["subtopic"] = subtopic
         if category is not None:
             body["category"] = category
         if tags is not None:
             body["tags"] = tags
-        if clear_expiry:
-            body["expires_at"] = None
-        elif expires_at is not None:
-            body["expires_at"] = expires_at.isoformat()
+        if goal_status is not None:
+            body["goal_status"] = goal_status
+        if origin is not None:
+            body["origin"] = origin
+        until = valid_until if valid_until is not None else expires_at
+        if clear_valid_until or clear_expiry:
+            body["valid_until"] = None
+        elif until is not None:
+            body["valid_until"] = until.isoformat()
 
-        return Memory.model_validate(
+        return UpdatedMemory.model_validate(
             self._request("PATCH", f"/v1/memories/{memory_id}", json=body)
         )
 

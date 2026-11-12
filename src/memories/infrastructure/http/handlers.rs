@@ -13,7 +13,7 @@ use super::dto::{
     CategoryChangeResponse, CategoryResponse, CreateCategoryRequest, MapCategory, MapCategoryEdge,
     MapEdge, MapResponse, MapSubcategory, MemoryResponse, MergeCategoryRequest, RerankResponse,
     SaveMemoryRequest, SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse,
-    UpdateCategoryRequest, UpdateMemoryRequest,
+    UpdateCategoryRequest, UpdateMemoryRequest, UpdatedMemoryResponse,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -22,10 +22,9 @@ use crate::memories::application::category_curator::{CategoryCurator, CategoryVi
 use crate::memories::application::memory_bulk_editor::BulkEdit;
 use crate::memories::application::memory_exporter::ExportFormat;
 use crate::memories::application::memory_mapper::{MapDetail, MapQuery};
-use crate::memories::application::structured_memory_saver::DetectedProject;
+use crate::memories::application::structured_memory_saver::{DetectedProject, SaveResult};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::memory::Memory;
-use crate::memories::domain::memory::MemoryEdit;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::blocking::blocking;
 use crate::shared::error::{RaError, Result};
@@ -39,6 +38,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// The client name recorded in the audit trail for a REST write that does
@@ -74,26 +74,11 @@ impl<S: Send + Sync> FromRequestParts<S> for Actor {
     }
 }
 
-/// The project a local client says it is working in: the name and,
-/// optionally, the normalised git remote. Sent by the `recuerdos-ai mcp`
-/// shim, which runs inside the project folder; any other client may send
-/// them too.
-pub const PROJECT_HEADER: &str = "x-recuerdos-project";
-pub const PROJECT_REMOTE_HEADER: &str = "x-recuerdos-project-remote";
+pub use crate::shared::project_headers::{PROJECT_HEADER, PROJECT_REMOTE_HEADER};
 
 fn detected_project(headers: &HeaderMap) -> Option<DetectedProject> {
-    let read = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    };
-    read(PROJECT_HEADER).map(|name| DetectedProject {
-        name,
-        alias: read(PROJECT_REMOTE_HEADER),
-    })
+    crate::shared::project_headers::project_from(headers)
+        .map(|(name, alias)| DetectedProject { name, alias })
 }
 
 pub async fn save_memory(
@@ -106,15 +91,19 @@ pub async fn save_memory(
     let memories = state.memories.clone();
     let save = request.into_structured(detected_project(&headers))?;
 
-    let saved = blocking(move || {
-        let extras = memories.catalog.custom_ids(&context)?;
-        memories
-            .structured_saver
-            .execute(&context, save, &extras, &actor)
-    })
-    .await?;
+    let catalog = Arc::clone(&memories.catalog);
+    let lookup = context.clone();
+    let extras = blocking(move || catalog.custom_ids(&lookup)).await?;
+    let result = memories
+        .structured_saver
+        .save(&context, save, extras, &actor)
+        .await?;
 
-    Ok((StatusCode::CREATED, Json(SavedMemoryResponse::from(&saved))))
+    let status = match result {
+        SaveResult::Saved(_) => StatusCode::CREATED,
+        SaveResult::AlreadyKnown { .. } => StatusCode::OK,
+    };
+    Ok((status, Json(SavedMemoryResponse::from(&result))))
 }
 
 pub async fn search_memories(
@@ -210,27 +199,26 @@ pub async fn update_memory(
 ) -> Result<impl IntoResponse> {
     let id = parse_id(&id)?;
     let expected_updated_at = if_match(&headers)?;
+    let detected = detected_project(&headers);
     let memories = state.memories.clone();
 
-    let memory = blocking(move || {
+    let updated = blocking(move || {
         let category = request
             .category
             .as_deref()
             .map(|raw| memories.catalog.resolve(&context, raw))
             .transpose()?;
-        let edit = MemoryEdit {
-            content: request.content,
-            category,
-            subcategory: request.subcategory,
-            tags: request.tags,
-            expires_at: request.expires_at,
-            expected_updated_at,
-        };
-        memories.updater.execute(&context, id, edit, &actor)
+        let edit = request.into_structured(category, expected_updated_at, detected);
+        memories
+            .structured_updater
+            .execute(&context, id, edit, &actor)
     })
     .await?;
 
-    Ok(with_etag(&memory))
+    Ok((
+        etag_of(&updated.memory),
+        Json(UpdatedMemoryResponse::from(&updated)),
+    ))
 }
 
 /// Brings back a memory forgotten with `DELETE` — the web UI's undo.
@@ -525,12 +513,17 @@ pub async fn bulk_edit_memories(
 
 /// The memory, with its version as an `ETag` for a later `If-Match`.
 fn with_etag(memory: &Memory) -> impl IntoResponse + use<> {
+    (etag_of(memory), Json(MemoryResponse::from(memory)))
+}
+
+/// The `ETag` header naming this version of the memory.
+fn etag_of(memory: &Memory) -> HeaderMap {
     let tag = format!("\"{}\"", version_of(memory.updated_at()));
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(&tag) {
         headers.insert(header::ETAG, value);
     }
-    (headers, Json(MemoryResponse::from(memory)))
+    headers
 }
 
 /// A version is the memory's `updated_at`, spelled the way the JSON body

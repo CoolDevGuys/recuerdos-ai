@@ -175,6 +175,18 @@ pub fn check_mergeable(cluster: &[Memory]) -> Result<()> {
             "a cluster of fewer than two memories has nothing to merge".to_string(),
         ));
     }
+    // A merge across scopes would make one project's rule the user's, or
+    // another project's. The runner never builds such a cluster; this is
+    // the guarantee rather than the hope.
+    let scope = cluster[0].structure().applies_to();
+    if cluster
+        .iter()
+        .any(|memory| !memory.structure().applies_to().same_scope(scope))
+    {
+        return Err(RaError::Validation(
+            "a cluster mixes memories true for different scopes; they are not merged".to_string(),
+        ));
+    }
     Ok(())
 }
 

@@ -14,10 +14,12 @@ use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
+use crate::memories::application::structured_memory_updater::StructuredMemoryUpdater;
 use crate::memories::domain::category_catalog::CategoryCatalog;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::project_registry::ProjectRegistry;
 use crate::memories::domain::recall_ranker::{
     DEFAULT_SIMILARITY_BASELINE, RecallRanker, RelevanceCalibration, RerankStrategy,
     default_similarity_baseline_for,
@@ -54,9 +56,14 @@ pub struct Memories {
     /// applied (ai-specs/memory-structure-plan.md §4): what `:direct` and
     /// the MCP save tools use.
     pub structured_saver: Arc<StructuredMemorySaver>,
+    /// Amends a memory under the same rules, and closes goals (plan §5.2,
+    /// R12): what `PATCH /v1/memories/{id}` and `memory_update` use.
+    pub structured_updater: Arc<StructuredMemoryUpdater>,
+    /// Each user's projects: the pipeline files a job's memories under the
+    /// one its client works in.
+    pub projects: Arc<dyn ProjectRegistry>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
-    pub updater: Arc<MemoryUpdater>,
     pub forgetter: Arc<MemoryForgetter>,
     pub restorer: Arc<MemoryRestorer>,
     pub mapper: Arc<MemoryMapper>,
@@ -270,11 +277,32 @@ impl Memories {
             )
             .with_document_text(config.document_text()),
         );
+        let updater = Arc::new(
+            MemoryUpdater::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                Arc::clone(&text),
+                Arc::clone(&embedder),
+                Arc::clone(&clock),
+            )
+            .with_document_text(config.document_text()),
+        );
+        let recaller = Arc::new(recaller);
+        let projects: Arc<dyn ProjectRegistry> =
+            Arc::new(SqliteProjectRegistry::new(Arc::clone(&database)));
         let structured_saver = Arc::new(StructuredMemorySaver::new(
             Arc::clone(&saver),
-            Arc::new(SqliteProjectRegistry::new(Arc::clone(&database))),
+            Arc::clone(&repository),
+            Arc::clone(&recaller),
+            Arc::clone(&projects),
             Arc::new(SqliteTopicCatalog::new(Arc::clone(&database))),
             Arc::clone(&clock),
+        ));
+
+        let structured_updater = Arc::new(StructuredMemoryUpdater::new(
+            Arc::clone(&updater),
+            Arc::clone(&repository),
+            Arc::clone(&structured_saver),
         ));
 
         Ok(Self {
@@ -284,18 +312,10 @@ impl Memories {
             category_curator,
             saver,
             structured_saver,
-            recaller: Arc::new(recaller),
+            recaller,
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
-            updater: Arc::new(
-                MemoryUpdater::new(
-                    Arc::clone(&repository),
-                    Arc::clone(&vectors),
-                    Arc::clone(&text),
-                    Arc::clone(&embedder),
-                    Arc::clone(&clock),
-                )
-                .with_document_text(config.document_text()),
-            ),
+            structured_updater,
+            projects,
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),

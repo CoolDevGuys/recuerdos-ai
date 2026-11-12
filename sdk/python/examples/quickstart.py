@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import sys
 
-from recuerdos_ai import Client, RecuerdosError
+from recuerdos_ai import Client, RecuerdosError, RejectedError
 
 
 def main() -> int:
@@ -36,16 +36,27 @@ def main() -> int:
     #
     # `save_direct` writes it verbatim, with what it is and who it is true
     # for: a preference the user stated, about coding, true of them
-    # everywhere. No model, no waiting — but also no chance to notice that
-    # it contradicts something already stored.
-    saved = ra.save_direct(
-        "User forbids barrel files / index.ts re-exports",
-        kind="preference",
-        topic="coding",
-        applies_to="me",
-        origin="user_said",
-        tags=["typescript", "imports"],
-    )
+    # everywhere. No waiting — but it is still checked against what is
+    # stored for the same scope, and one that contradicts (or, without a
+    # model, nearly repeats) a stored memory is refused as a "conflict".
+    preference = {
+        "kind": "preference",
+        "topic": "coding",
+        "applies_to": "me",
+        "origin": "user_said",
+        "tags": ["typescript", "imports"],
+    }
+    content = "User forbids barrel files / index.ts re-exports"
+    try:
+        saved = ra.save_direct(content, **preference)
+    except RejectedError as refused:
+        if refused.code != "conflict":
+            raise
+        # An agent asks the user which holds. Replace the stored one if they
+        # changed their mind (`replaces=`), or, as here, keep both.
+        print(refused.message)
+        stored = [conflict["id"] for conflict in refused.conflicts]
+        saved = ra.save_direct(content, coexists_with=stored, **preference)
     print(saved.message)
 
     # --- 2. Hand over raw text and let the service decide ------------

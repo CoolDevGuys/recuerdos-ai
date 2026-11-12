@@ -87,7 +87,7 @@ memories = ra.save_and_wait("User is vegetarian now")
 An empty list is a legitimate outcome — most text contains nothing that
 stays true beyond the conversation.
 
-### `save_direct(content, *, kind, topic, origin, applies_to, subtopic, tags, valid_until, …) -> SavedMemory`
+### `save_direct(content, *, kind, topic, origin, applies_to, subtopic, tags, valid_until, replaces, coexists_with, …) -> SavedMemory`
 
 Stores one memory as given, with its structure. Synchronous, cheap, no model.
 Every field is explained in [memory-model.md](memory-model.md).
@@ -119,7 +119,27 @@ A memory rule that stops the save raises `RejectedError`, whose `code` says whic
 how to fix it. `Memory` carries the structure too: `kind`, `topic`, `applies_to`,
 `origin`, `goal_status` and `needs_review`.
 
-It cannot supersede a contradiction, because nothing read the content. Use it when
+Before storing, the daemon compares it with the nearest stored memories for the
+same scope. One that contradicts a stored memory (judged by the model when one is
+configured; without one, only a near repeat) raises `RejectedError` with
+`code == "conflict"`, and `error.conflicts` lists the stored memories (`id`,
+`content`, `kind`, `applies_to`, `reason`). Ask the user which holds:
+
+```python
+try:
+    saved = ra.save_direct("The user now avoids mocks in unit tests", **structure)
+except RejectedError as refused:
+    if refused.code != "conflict":
+        raise
+    old = refused.conflicts[0]["id"]
+    # They changed their mind: replace it (kept in history) …
+    saved = ra.save_direct("The user now avoids mocks in unit tests", replaces=old, **structure)
+    # … or both hold: ra.save_direct(..., coexists_with=[old], **structure)
+    # … or the stored one was wrong: ra.update(old, content=...)
+```
+
+`saved.status` is `"already_known"` when a stored memory already says this:
+nothing was written, and the memory returned is that one. Use `save_direct` when
 you have already decided what the memory should say; prefer `save` for raw
 material.
 
@@ -228,14 +248,25 @@ Every memory as markdown (grouped by category, greppable) or JSON.
 
 ## Modifying
 
-### `update(memory_id, *, content, category, tags, expires_at, clear_expiry) -> Memory`
+### `update(memory_id, *, content, kind, topic, applies_to, subtopic, tags, valid_until, clear_valid_until, goal_status, origin, …) -> UpdatedMemory`
 
-Omitted fields are left alone. Editing `content` re-embeds and re-indexes.
+Amends a memory in place; omitted fields are left alone. The same rules as a save
+apply to what it becomes, and a refusal raises `RejectedError`. Editing `content`
+re-embeds and re-indexes, and the audit trail keeps the old text. The result
+carries the server's `message`.
 
-`clear_expiry=True` removes an existing expiry — distinct from
-`expires_at=None`, which means "leave it alone". JSON cannot express the
-difference between an absent field and an explicit null, so the SDK gives
-it two call shapes.
+```python
+ra.update(memory_id, content="The user prefers mocks in unit tests")  # a typo fixed
+ra.update(goal_id, goal_status="achieved", origin="user_confirmed")    # a goal closed
+```
+
+Only the user closes a goal: `origin` must be `user_said` or `user_confirmed`, and
+`inferred` raises `RejectedError` with `needs_confirmation`.
+
+`clear_valid_until=True` removes an existing end date — distinct from
+`valid_until=None`, which means "leave it alone". JSON cannot express the
+difference between an absent field and an explicit null, so the SDK gives it two
+call shapes. `expires_at` and `clear_expiry` still work, as the older names.
 
 ### `forget(memory_id) -> None`
 
@@ -272,6 +303,7 @@ error `code` rather than its message:
 | `AuthenticationError` | `unauthorized` | 401 |
 | `PermissionError_` | `forbidden` | 403 |
 | `NotFoundError` | `not_found` | 404 |
+| `RejectedError` | a memory rule's code (`needs_confirmation`, `conflict`, …) | 422 |
 | `ConflictError` | `conflict` | 409 |
 | `ServerError` | `internal` | 5xx |
 | `TimeoutError_` | — | local |

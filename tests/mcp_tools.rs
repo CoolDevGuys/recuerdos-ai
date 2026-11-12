@@ -160,6 +160,10 @@ async fn the_client_sees_the_three_memory_tools() {
         names.contains(&"memory_save_batch".to_string()),
         "got {names:?}"
     );
+    assert!(
+        names.contains(&"memory_update".to_string()),
+        "got {names:?}"
+    );
 }
 
 #[tokio::test]
@@ -228,6 +232,18 @@ async fn the_tool_descriptions_tell_a_model_when_to_call_them() {
     assert!(
         save.contains("Do NOT"),
         "without negative guidance the store fills with task chatter: {save}"
+    );
+
+    assert!(
+        save.contains("conflict") && save.contains("replaces"),
+        "the agent must know how to answer a conflict: {save}"
+    );
+
+    let update = describe("memory_update");
+    assert!(update.contains("Only the user closes a goal"), "{update}");
+    assert!(
+        update.contains("replaces"),
+        "amend versus replace: {update}"
     );
 
     let forget = describe("memory_forget");
@@ -599,4 +615,61 @@ async fn inside_a_repository_the_project_is_detected_from_its_remote() {
         defaulted.contains("confirm that with the user"),
         "{defaulted}"
     );
+}
+
+/// A near-repeat is refused over MCP with the stored memory's id and the
+/// ways out; amending it with `memory_update` keeps its id; replacing it
+/// retires it.
+#[tokio::test]
+async fn a_conflict_is_explained_and_resolved_through_the_tools() {
+    let client = McpClient::connect().await;
+    let mine = |content: &str| {
+        json!({"content": content, "kind": "preference", "topic": "coding",
+               "applies_to": {"target": "me"}, "origin": "user_said"})
+    };
+
+    let saved = client
+        .call("memory_save", mine("The user prefers tabs for indentation"))
+        .await;
+    let id = saved
+        .split("(id ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_else(|| panic!("no id in {saved}"))
+        .to_string();
+
+    let refused = client
+        .call_refused(
+            "memory_save",
+            mine("The user prefers spaces for indentation"),
+        )
+        .await;
+    assert!(refused.starts_with("Not saved (conflict)"), "{refused}");
+    assert!(refused.contains(&id), "{refused}");
+    assert!(refused.contains("memory_update"), "{refused}");
+
+    let amended = client
+        .call(
+            "memory_update",
+            json!({"id": id, "content": "The user prefers tabs for indentation in Go"}),
+        )
+        .await;
+    assert!(
+        amended.starts_with("Updated; filed as your personal coding preference."),
+        "{amended}"
+    );
+    assert!(amended.contains(&id), "{amended}");
+
+    let mut replacing = mine("The user prefers spaces for indentation");
+    replacing["replaces"] = json!(id);
+    let replaced = client.call("memory_save", replacing).await;
+    assert!(replaced.contains("which is kept in history"), "{replaced}");
+
+    let refused = client
+        .call_refused(
+            "memory_update",
+            json!({"id": id, "content": "token: ghp_8Fk2LmQ9zXv7Rt3Wq1Yp6Hs4Jd0Nb5Ce1a2"}),
+        )
+        .await;
+    assert!(refused.starts_with("Not updated (secret)"), "{refused}");
 }

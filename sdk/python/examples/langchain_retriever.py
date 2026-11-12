@@ -64,7 +64,7 @@ def main() -> int:
     # run polluted.
     run = f"lc-{uuid.uuid4().hex[:8]}"
     for content, kind, topic, target in SEED:
-        ra.save_direct(
+        saved = ra.save_direct(
             content,
             kind=kind,
             topic=topic,
@@ -72,6 +72,10 @@ def main() -> int:
             origin="user_said",
             tags=[run],
         )
+        # A memory the store already holds is not stored twice: the save
+        # returns the one already there, which gets this run's tag instead.
+        if saved.status == "already_known":
+            ra.update(saved.id, tags=[*saved.tags, run])
     print(f"seeded {len(SEED)} memories (tag {run})")
 
     retriever = RecuerdosRetriever(client=ra, limit=2, tags=[run])

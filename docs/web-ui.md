@@ -127,7 +127,11 @@ easier view on a small screen.
   to**: you everywhere, one project, or in general. The choices a kind cannot take
   are greyed out (a preference is always yours), and the category follows from what
   you chose. A project name you type that is new becomes a new project. If the
-  daemon refuses the save, the form shows why and keeps what you typed. See
+  daemon refuses the save, the form shows why and keeps what you typed. When it
+  contradicts a memory you already have, the form names it and offers **Replace
+  it** (you changed your mind; the old one is kept in history) or **Keep both**
+  (each holds in its own case). If the stored one was wrong, edit it from the list
+  instead. Writing something you already have saves nothing, and says so. See
   [memory-model.md](memory-model.md). Tick **Let the AI classify it** to send it
   through the understanding pipeline instead:
   - The pipeline may split the text into several memories, or save nothing if

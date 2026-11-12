@@ -5,6 +5,7 @@ use crate::bootstrap::state::AppState;
 use crate::consolidation::domain::distillation::SessionTranscript;
 use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAccess};
 use crate::shared::error::Result;
+use crate::understanding::domain::ingest_job::ProjectHint;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, header};
@@ -15,11 +16,14 @@ use axum::response::IntoResponse;
 pub async fn distill_session(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    headers: HeaderMap,
     Json(request): Json<DistillRequest>,
 ) -> Result<Json<DistillResponse>> {
-    let transcript = SessionTranscript::new(request.content)?
+    let mut transcript = SessionTranscript::new(request.content)?
         .from(request.client, request.session_id)
         .tagged(request.tags);
+    transcript.project = crate::shared::project_headers::project_from(&headers)
+        .map(|(name, alias)| ProjectHint { name, alias });
 
     let distillation = state
         .consolidation

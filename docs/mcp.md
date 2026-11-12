@@ -147,9 +147,26 @@ project, leave the secret out. An agent should follow it, usually by asking you,
 rather than rewording to get past it. The codes are listed in
 [memory-model.md](memory-model.md#when-a-save-is-refused).
 
+**When it contradicts a stored memory** for the same scope, the save is refused as
+`Not saved (conflict):`, naming the stored memory and its id. The agent asks you
+which holds, then:
+
+- you changed your mind: it saves again with `"replaces": "<id>"`, and the old one
+  leaves recall but stays in history;
+- the stored one was wrong: it fixes it with `memory_update`;
+- both hold: it saves again with `"coexists_with": ["<id>"]`.
+
+With a language model configured, the model judges the contradiction, and also
+whether text filed as yours or as general is really about one project. Without
+one, only a near repeat of a stored memory is stopped. Saying something the store
+already knows stores nothing, and the reply says `Already known: …`.
+
+A project memory that contradicts one of your own is not a conflict: a project may
+make an exception, and the reply says it overrides your preference there.
+
 `memory_save` always stores as given. Raw text for the service to split and
 classify goes through [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)
-or `memory_distill`.
+or `session_distill`.
 
 ### `memory_save_batch`
 
@@ -164,9 +181,38 @@ Saved 1 memory from 2 items.
 
 They will be available in future sessions.
 
-1 item failed and was not saved:
+1 item was not saved:
 - item 1: not saved (needs_confirmation): This is about the user, and it was inferred. …
 ```
+
+An item the store already knew is listed under "added nothing new".
+
+### `memory_update`
+
+Amends one stored memory: its wording, its structure, or whether a goal is still
+open. It keeps its id, and the audit trail keeps what it said before. The same
+rules as a save apply to what it becomes; a refusal begins `Not updated (code):`.
+
+```json
+{"id": "019f7c5a-…", "content": "The user prefers mocks in unit tests"}
+```
+
+```
+Updated; filed as your personal coding preference. (id 019f7c5a-…): The user prefers mocks in unit tests
+```
+
+Every field but `id` is optional: `content`, `kind`, `topic`, `applies_to` (to move
+it to another scope), `subtopic` and `valid_until` (an empty string clears them),
+`tags`, `goal_status` and `origin`.
+
+**Closing a goal** is `{"id": …, "goal_status": "achieved", "origin":
+"user_confirmed"}` (or `"abandoned"`, or `"user_said"` when you said so yourself).
+Only you close a goal: an agent that only noticed it was reached is refused with
+`needs_confirmation` and should ask you first. A closed goal leaves recall and the
+profile, and stays in history.
+
+Amend when the stored memory is wrong; when you changed your mind, the new memory
+is saved with `replaces`, so the old one remains as what you used to think.
 
 ### `memory_recall`
 

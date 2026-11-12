@@ -323,6 +323,7 @@ async fn rate_limit(State(gate): State<Gate>, request: Request, next: Next) -> R
             message: format!(
                 "too many requests: this caller is allowed a burst and then a steady rate;                  retry in {seconds}s"
             ),
+            details: None,
         },
     });
 

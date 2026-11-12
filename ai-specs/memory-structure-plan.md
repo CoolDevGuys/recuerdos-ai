@@ -6,9 +6,10 @@ not my standards. Is there a way to improve how memories are stored — a better
 classification — so that recall can tell them apart? I would like to define as much structure as
 possible when memories are saved, instead of relying on the harness to get it right.*
 
-Status: **S0–S1 implemented** (2026-11-12, branch `feat/memory-structure`); S2–S5 to do. The shape,
+Status: **S0–S2 implemented** (2026-11-12, branch `feat/memory-structure`); S3–S5 to do. The shape,
 the rules and the examples in §3–§7 were settled with the owner in conversation on 2026-11-11/12
-(§1). §11 records how the last open questions were resolved; none remain. §12 records how S0 went.
+(§1). §11 records how the last open questions were resolved; none remain. §12 records how each
+phase went.
 
 ---
 
@@ -441,4 +442,47 @@ and the legend and tooltips name the kind, so colour is never the only cue.
 - **The pipeline's empty outcomes (`nothing_durable`, `already_known`) no longer come from the save
   tools**, which now always store or refuse. They stay in the toolbox for S2, whose conflict check
   reports `already_known` again.
+
+### S2 (2026-11-12)
+
+- **A save is check → judge → commit.** `StructuredMemorySaver::check` applies every rule that
+  needs no judgement and finds the neighbours; the `ConflictJudge` (a `memories` domain trait,
+  implemented by `understanding::ModelConflictJudge` and set on the saver by the wiring, since the
+  understanding context owns the model) runs outside the database work; `commit` decides and
+  writes. A judge error falls back to the model-free rule: an outage must not cost the memory.
+- **One model call per save at most**, covering R8 and R7's model layer, and none when there is
+  nothing to ask (a project memory with no neighbours, whose scope cannot claim too much). The
+  E22 paraphrase is caught by that call. Neighbours are shown by number, not id, so a verdict
+  about a memory the model was not shown resolves to nothing.
+- **Neighbours**: recall (untracked, so a check never bumps access counts) for 20 above relevance
+  0.3, narrowed to the save's scope, top 5. For a project save the user's own memories are shown
+  too, marked; a contradiction with one is an override note, not a refusal (§5.1).
+- **Without a model the check is a near-repeat guard, not a contradiction check.** Measured on
+  the default embedder: contradicting pairs score 0.52–0.78 in relevance and compatible ones up to
+  0.71 ("dentist on 14 December" / "haircut on 14 December", "prefers Rust for CLIs" / "Go for
+  CLIs"). No floor separates them, so `UNJUDGED_FLOOR` is 0.75, above every compatible pair: a
+  false refusal costs more than a missed one, the rule R7 and R9 were held to. E6 is therefore an
+  end-to-end test with a mock model; the model-free test uses tabs / spaces (0.78). An identical
+  sentence (ignoring case and punctuation) is `already_known` with or without a model.
+- **`coexists_with`** was added to §5.2's "both hold" row: without it, an unjudged near-repeat
+  that is genuinely a second fact had no way through except rewording.
+- **The `conflict` code is shared with the 409 uniqueness error**; the HTTP status tells them apart.
+  The Python SDK maps any 422 to `RejectedError` for that reason.
+- **Amending** is `StructuredMemoryUpdater`, behind `PATCH` and `memory_update`. An edit's
+  `origin` is who asked for the change: required to close a goal (R12), and the memory's new
+  origin only when its wording, kind or scope changes. Amendments are not conflict-checked.
+- **Re-filing no longer re-derives a stated structure**; only one still flagged `needs_review`
+  (i.e. derived) follows its new category.
+- **A closed goal is inactive** (`Memory::is_active_at`), which takes it out of recall, the
+  profile and consolidation at once.
+- **The pipeline**: extraction asks for `kind`, `topic`, `applies_to` and `origin`;
+  `candidate_filing` applies the rules a job can apply without asking anyone (§9), marking what
+  it had to guess `needs_review`. A plan cannot be filed (extraction gives no end date) and is
+  kept as a fact for review. Suggestions travel on the `wait: true` answer; an asynchronous job
+  only logs them (its record has no place for them yet).
+- **Consolidation** links only same-scope pairs, so clusters never mix scopes; the merged memory
+  keeps the most trusted member's structure. Suggesting a `me` rule from three projects'
+  identical conventions (§9) is left for the review queue (S5).
+- **The extractor set** (`eval/extraction-structure.toml`, 16 cases) needs a real model and is
+  an ignored test. It has not been run in this environment, which has no provider configured.
 

@@ -46,9 +46,9 @@ memories = ra.save_and_wait("User is vegetarian now")
 ## When you already know what to remember
 
 `save_direct` stores one memory as given, with what it is and who it is true
-for, and no model in the loop. It is cheap and synchronous — but nothing read
-the content, so it cannot supersede a contradiction. Prefer `save` unless you
-have already distilled the memory yourself.
+for. It is cheap and synchronous, and still checked against what is stored for
+the same scope: a contradiction is refused rather than stored alongside. Prefer
+`save` unless you have already distilled the memory yourself.
 
 ```python
 saved = ra.save_direct(
@@ -63,7 +63,11 @@ print(saved.message)
 ```
 
 The fields are explained in the repository's `docs/memory-model.md`. A memory
-rule that refuses the save raises `RejectedError` with its `code`.
+rule that refuses the save raises `RejectedError` with its `code`. For a
+`conflict`, `error.conflicts` names the stored memories: ask the user, then save
+again with `replaces=` (they changed their mind) or `coexists_with=` (both hold),
+or fix the stored one with `ra.update(...)`. `ra.update` also closes a goal:
+`ra.update(goal_id, goal_status="achieved", origin="user_confirmed")`.
 
 ## Session distillation
 

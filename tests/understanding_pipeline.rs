@@ -578,3 +578,74 @@ async fn an_empty_batch_is_rejected() {
 
     assert_eq!(status, 400);
 }
+
+/// The pipeline produces the structured shape (plan §9): a project's rule
+/// read out of a conversation is filed under the project the client names,
+/// and what the model only inferred about the user comes back as a
+/// suggestion to ask about, never stored as theirs.
+#[tokio::test]
+async fn extraction_files_a_projects_rule_under_it_and_holds_back_an_inference() {
+    let pipeline = Pipeline::with_model(vec![
+        json!({"candidates": [
+            {"content": "Quill never mocks the database in tests",
+             "category": "preference.coding", "kind": "rule", "topic": "coding",
+             "applies_to": "project", "origin": "user_said"},
+            {"content": "The user squashes every pull request before merging",
+             "category": "preference.coding", "kind": "preference", "topic": "coding",
+             "applies_to": "me", "origin": "inferred"},
+        ]}),
+        // Reconciling the rule against quill's other memory.
+        json!({"decisions": [{"action": "ADD", "reason": "a new rule"}]}),
+    ])
+    .await;
+
+    // The project exists: the user confirmed it on an earlier save.
+    let (status, body) = pipeline
+        .post(
+            "/v1/memories:direct",
+            json!({"content": "Quill deploys from the release branch", "kind": "fact",
+                   "topic": "coding", "origin": "user_said",
+                   "applies_to": {"target": "project", "project_name": "quill",
+                                  "new_project": true}}),
+        )
+        .await;
+    assert_eq!(status, 201, "{body}");
+
+    let response = pipeline
+        .http
+        .post(format!("{}/v1/memories", pipeline.app.base_url))
+        .bearer_auth(&pipeline.key)
+        .header("x-recuerdos-project", "quill")
+        .json(
+            &json!({"content": "we never mock the db here. (you always squash PRs, I see)",
+                      "wait": true}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let ingested: Value = response.json().await.unwrap();
+
+    assert_eq!(ingested["outcome"], "stored", "{ingested}");
+    assert_eq!(
+        ingested["suggestions"],
+        json!(["The user squashes every pull request before merging"]),
+        "{ingested}"
+    );
+    let id = ingested["memory_ids"][0].as_str().unwrap();
+    let (_, stored) = pipeline.get(&format!("/v1/memories/{id}")).await;
+    assert_eq!(stored["kind"], "rule");
+    assert_eq!(
+        stored["applies_to"],
+        json!({"target": "project", "project_name": "quill"})
+    );
+    assert_eq!(stored["needs_review"], false);
+    assert!(
+        !pipeline
+            .search("squash pull requests")
+            .await
+            .iter()
+            .any(|content| content.contains("squashes")),
+        "an inference about the user was stored"
+    );
+}

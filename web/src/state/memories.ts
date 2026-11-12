@@ -7,11 +7,13 @@ import type {
   Category,
   CategoryChange,
   CategoryUpdate,
+  ConflictingMemory,
   IngestResult,
   MapData,
   Memory,
   MemoryStructure,
   RecallHit,
+  SavedMemory,
 } from "../api/types";
 import { fieldsOf, patchOf, type FormValues } from "../domain/memoryForm";
 import { describeError } from "./errors";
@@ -62,6 +64,13 @@ export type SaveOutcome =
 
 export type Outcome<T> = { kind: "ok"; value: T } | { kind: "failed"; message: string };
 
+/** What saving a new memory did, including the refusal the user can resolve. */
+export type CreateOutcome =
+  | { kind: "ok"; value: SavedMemory }
+  /** It contradicts (or, without a model, nearly repeats) stored memories. */
+  | { kind: "conflict"; message: string; conflicts: ConflictingMemory[] }
+  | { kind: "failed"; message: string };
+
 /**
  * The write side, as plain async functions that never throw: each returns
  * what the UI needs to say next, and refreshes the cached lists after a
@@ -106,8 +115,18 @@ export function useMemoryActions(client: ApiClient, user: string) {
         }
       },
       latest: (id: string) => attempt(() => client.getMemory(id)),
-      create: (values: FormValues, structure: MemoryStructure) =>
-        attempt(() => client.createMemory(fieldsOf(values), structure)),
+      create: async (values: FormValues, structure: MemoryStructure): Promise<CreateOutcome> => {
+        try {
+          const value = await client.createMemory(fieldsOf(values), structure);
+          await refresh();
+          return { kind: "ok", value };
+        } catch (error) {
+          if (error instanceof ApiError && error.code === "conflict" && error.conflicts.length > 0) {
+            return { kind: "conflict", message: error.message, conflicts: error.conflicts };
+          }
+          return { kind: "failed", message: describeError(error) };
+        }
+      },
       ingest: (values: FormValues, useCategory: boolean): Promise<Outcome<IngestResult>> => {
         const fields = fieldsOf(values);
         return attempt(() =>

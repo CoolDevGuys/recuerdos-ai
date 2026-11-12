@@ -97,6 +97,7 @@ mod tests {
             tags: vec![],
             client: Some("claude-code".to_string()),
             session_id: None,
+            project: None,
         }
     }
 
@@ -132,6 +133,7 @@ mod tests {
                 Arc::new(fixture.saver()),
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                fixture.project_registry(),
                 Arc::clone(&model) as Arc<dyn ChatModel>,
                 None,
                 true,

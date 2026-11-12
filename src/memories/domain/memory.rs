@@ -277,8 +277,18 @@ impl Memory {
     }
 
     /// Whether this memory should appear in ordinary recall.
+    /// Whether recall, the profile and consolidation should see it: not
+    /// replaced, not expired, and — for a goal — not closed. A closed goal
+    /// stays in history, so "which goals did I reach?" can still be asked.
     pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
-        !self.is_superseded() && !self.is_expired_at(now)
+        !self.is_superseded() && !self.is_expired_at(now) && !self.is_closed_goal()
+    }
+
+    /// A goal the user said was achieved or abandoned.
+    pub fn is_closed_goal(&self) -> bool {
+        self.structure
+            .goal_status()
+            .is_some_and(|status| status.is_closed())
     }
 
     /// Applies an edit, returning the updated memory.
@@ -305,12 +315,19 @@ impl Memory {
             self.tags = normalize_tags(tags)?;
         }
         if let Some(category) = edit.category {
-            // Re-filing re-derives the structure: until edits can set it
-            // directly (plan phase S5), the category is the only way a user
-            // states it, so the old derivation must not outlive the category
-            // it came from.
-            self.structure = legacy_structure(&category, &self.tags);
+            // Re-filing re-derives a structure that was itself derived from
+            // the old category: that derivation must not outlive the category
+            // it came from. A structure someone stated is left alone — moving
+            // a project's rule to another category does not make it the
+            // user's.
+            if self.structure.needs_review() {
+                self.structure = legacy_structure(&category, &self.tags);
+            }
             self.category = category;
+        }
+        if let Some(structure) = edit.structure {
+            // Stated by whoever edited it, so no longer a guess to review.
+            self.structure = structure.flagged_for_review(false);
         }
         if let Some(expires_at) = edit.expires_at {
             self.expires_at = expires_at;
@@ -375,6 +392,10 @@ pub struct MemoryEdit {
     pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    /// A new structure, already checked against the memory rules by the
+    /// caller (`StructuredMemoryUpdater`). Applied after `category`, so it
+    /// wins over a re-derivation.
+    pub structure: Option<MemoryStructure>,
     /// The `updated_at` the editor last saw (`If-Match`). `Some` makes the
     /// edit conditional: it is refused with `PreconditionFailed` when the
     /// memory has changed since, so a long-lived editor (the web UI) cannot
@@ -512,6 +533,72 @@ mod tests {
 
         assert_eq!(edited.structure().kind(), Kind::Procedure);
         assert_eq!(edited.structure().topic(), &Topic::Tech, "from the nas tag");
+    }
+
+    #[test]
+    fn re_filing_leaves_a_stated_structure_alone() {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::kind::Kind;
+        use crate::memories::domain::memory_structure::Origin;
+        use crate::memories::domain::topic::Topic;
+
+        let stated = MemoryStructure::new(
+            Kind::Rule,
+            Topic::Coding,
+            AppliesTo::General,
+            Origin::UserSaid,
+            None,
+        )
+        .unwrap();
+        let memory = create("Never push to main").with_structure(stated.clone());
+
+        let edited = memory
+            .edit(
+                MemoryEdit {
+                    category: Some(Category::Skill),
+                    ..MemoryEdit::default()
+                },
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(edited.structure(), &stated);
+        assert_eq!(edited.category(), &Category::Skill);
+    }
+
+    #[test]
+    fn a_closed_goal_is_no_longer_active_but_is_kept() {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::kind::Kind;
+        use crate::memories::domain::memory_structure::{GoalStatus, Origin};
+        use crate::memories::domain::topic::Topic;
+
+        let goal = |status| {
+            MemoryStructure::new(
+                Kind::Goal,
+                Topic::Health,
+                AppliesTo::Me,
+                Origin::UserSaid,
+                Some(status),
+            )
+            .unwrap()
+        };
+        let memory =
+            create("Run a half marathon in April").with_structure(goal(GoalStatus::Active));
+        assert!(memory.is_active_at(now()));
+
+        let closed = memory
+            .edit(
+                MemoryEdit {
+                    structure: Some(goal(GoalStatus::Achieved)),
+                    ..MemoryEdit::default()
+                },
+                now(),
+            )
+            .unwrap();
+        assert!(closed.is_closed_goal());
+        assert!(!closed.is_active_at(now()));
+        assert!(!closed.is_superseded(), "kept in history, not replaced");
     }
 
     #[test]

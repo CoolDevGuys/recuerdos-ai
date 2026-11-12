@@ -5,6 +5,7 @@ import type {
   Category,
   CategoryChange,
   CategoryUpdate,
+  ConflictingMemory,
   Identity,
   IngestOutcome,
   IngestRequest,
@@ -16,6 +17,7 @@ import type {
   MemoryPatch,
   MemoryStructure,
   RecallHit,
+  SavedMemory,
   Scope,
 } from "./types";
 
@@ -30,7 +32,8 @@ export interface ApiClient {
   getMemory(id: string): Promise<Memory>;
   listCategories(): Promise<Category[]>;
   /** Saves exactly these fields and this structure, no pipeline. */
-  createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<Memory>;
+  /** Saves as written; a contradiction is a 422 `conflict` `ApiError`. */
+  createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<SavedMemory>;
   /** Runs the text through the understanding pipeline and waits for it. */
   ingest(request: IngestRequest): Promise<IngestResult>;
   /**
@@ -61,12 +64,15 @@ export interface ApiClient {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** For a `conflict`: the stored memories the save contradicts. */
+  readonly conflicts: ConflictingMemory[];
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, conflicts: ConflictingMemory[] = []) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.conflicts = conflicts;
   }
 }
 
@@ -119,7 +125,7 @@ export class HttpApiClient implements ApiClient {
     return parseCategories(await this.request("/v1/categories"));
   }
 
-  async createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<Memory> {
+  async createMemory(fields: MemoryFields, structure: MemoryStructure): Promise<SavedMemory> {
     // The structured save takes no category (it is derived from kind and
     // topic) and calls the sub-label a subtopic.
     const body = await this.request("/v1/memories:direct", {
@@ -132,7 +138,12 @@ export class HttpApiClient implements ApiClient {
         client: CLIENT_NAME,
       },
     });
-    return parseMemory(body);
+    const reply = isObject(body) ? body : {};
+    return {
+      memory: parseMemory(body),
+      status: reply.status === "already_known" ? "already_known" : "stored",
+      message: typeof reply.message === "string" ? reply.message : "",
+    };
   }
 
   async ingest(request: IngestRequest): Promise<IngestResult> {
@@ -243,8 +254,18 @@ export class HttpApiClient implements ApiClient {
 }
 
 function toApiError(status: number, body: unknown): ApiError {
-  if (isErrorBody(body)) return new ApiError(status, body.error.code, body.error.message);
+  if (isErrorBody(body)) return new ApiError(status, body.error.code, body.error.message, conflictsIn(body.error));
   return new ApiError(status, "unknown", `The server answered ${status}.`);
+}
+
+/** The stored memories a `conflict` refusal names, from its `details`. */
+function conflictsIn(error: unknown): ConflictingMemory[] {
+  if (!isObject(error) || !isObject(error.details) || !Array.isArray(error.details.conflicts)) return [];
+  return error.details.conflicts.flatMap((item: unknown) =>
+    isObject(item) && typeof item.id === "string" && typeof item.content === "string"
+      ? [{ id: item.id, content: item.content }]
+      : [],
+  );
 }
 
 function isErrorBody(body: unknown): body is ApiErrorBody {

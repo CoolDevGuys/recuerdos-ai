@@ -7,7 +7,7 @@
 use super::http_memory_toolbox::HttpMemoryToolbox;
 use super::memory_toolbox::{
     BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveAppliesTo, SaveOutcome,
-    SaveRequest,
+    SaveRequest, SaveStatus, ToolMemory, UpdateRequest,
 };
 use super::tool_text;
 use crate::shared::error::RaError;
@@ -78,6 +78,45 @@ pub struct SaveParams {
     /// meaning through the end of that day, UTC). Required for a plan; not
     /// allowed on a goal.
     pub valid_until: Option<String>,
+    /// The id of a stored memory this one replaces, when the user changed
+    /// their mind (often after a "conflict" refusal named it). It must apply
+    /// to the same scope. The old memory leaves recall and is kept in history.
+    pub replaces: Option<String>,
+    /// Ids of stored memories the user said this one does not replace: both
+    /// hold. Use only after asking the user about a "conflict" refusal.
+    #[serde(default)]
+    pub coexists_with: Vec<String>,
+}
+
+/// An amendment to one stored memory. Every field but `id` is optional, and
+/// a field left out is left as it is.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateParams {
+    /// The memory's id, from a recall or a save reply.
+    pub id: String,
+    /// The corrected sentence, when the stored wording was wrong. Same rules
+    /// as a save: standalone, one fact, never a secret.
+    pub content: Option<String>,
+    /// A new kind, as memory_save takes it.
+    pub kind: Option<String>,
+    /// A new topic, as memory_save takes it.
+    pub topic: Option<String>,
+    /// Move it to another scope (me, project or general), as memory_save
+    /// takes it.
+    pub applies_to: Option<AppliesToParams>,
+    /// A new subtopic; an empty string clears it.
+    pub subtopic: Option<String>,
+    /// Replaces the tags.
+    pub tags: Option<Vec<String>>,
+    /// A new end (RFC 3339 or YYYY-MM-DD); an empty string clears it.
+    pub valid_until: Option<String>,
+    /// For a goal: "achieved" or "abandoned" closes it, "active" reopens it.
+    /// Only the user closes a goal: send origin "user_said" when they told
+    /// you, or "user_confirmed" after you asked and they said yes.
+    pub goal_status: Option<String>,
+    /// Who asked for this change: user_said, user_confirmed, inferred or
+    /// document. Required to close a goal.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -231,6 +270,12 @@ impl MemoryMcpServer {
     /// user said, and ask when it is unclear. The reply says how the memory was filed —
     /// repeat it to the user so they can correct it. A refusal says why and what to
     /// change; follow it (often: ask the user) rather than rewording to get past it.
+    ///
+    /// A save that contradicts a stored memory in the same scope is refused as a
+    /// "conflict", naming the stored one. Ask the user which holds: if they changed their
+    /// mind, save again with `replaces` set to its id; if the stored one is wrong, fix it
+    /// with `memory_update`; if both hold, save again with `coexists_with`. A save the
+    /// store already knows is not stored twice, and the reply says so.
     #[tool(name = "memory_save")]
     async fn memory_save(
         &self,
@@ -243,7 +288,7 @@ impl MemoryMcpServer {
                 let text = tool_text::render_saved(&outcome);
                 Ok(save_result(&text, &outcome))
             }
-            Err(error) => rejected_result(error),
+            Err(error) => rejected_result(error, "Not saved"),
         }
     }
 
@@ -279,6 +324,36 @@ impl MemoryMcpServer {
 
         let text = tool_text::render_saved_batch(&outcome);
         Ok(save_batch_result(&text, &outcome))
+    }
+
+    /// Amend a stored memory: correct its wording, move it to another scope, or close a
+    /// goal. The memory keeps its id; the audit trail keeps what it said before.
+    ///
+    /// Use it when the user says a stored memory is wrong ("no, it's mocks, not
+    /// mokcs", "that's quill's rule, not mine"), and after a "conflict" refusal when the
+    /// user says the stored one should be corrected rather than replaced. When the user
+    /// has changed their mind, save the new memory with `replaces` instead, so the old
+    /// one stays in history as what they used to think.
+    ///
+    /// Closing a goal is `goal_status: "achieved"` (or "abandoned") with origin
+    /// "user_said" or "user_confirmed". Only the user closes a goal: if you only noticed
+    /// it was reached, ask them first. A closed goal leaves recall and the profile.
+    ///
+    /// The same rules as a save apply to what the memory becomes, and a refusal says
+    /// why and what to change.
+    #[tool(name = "memory_update")]
+    async fn memory_update(
+        &self,
+        Parameters(params): Parameters<UpdateParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let request = update_request(params).map_err(to_mcp_error)?;
+        match self.toolbox(&context).update(request).await {
+            Ok(outcome) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                tool_text::render_updated(&outcome),
+            )])),
+            Err(error) => rejected_result(error, "Not updated"),
+        }
     }
 
     /// Search the user's stored memories by meaning and by keyword.
@@ -514,9 +589,19 @@ fn save_result(text: &str, outcome: &SaveOutcome) -> CallToolResult {
     result.structured_content = Some(json!({
         "status": outcome.status,
         "understanding": outcome.understanding,
-        "stored": stored_json(&outcome.memories),
+        "stored": stored_unless_known(outcome.status, &outcome.memories),
     }));
     result
+}
+
+/// What a save wrote: nothing, when the store already knew it — the memory
+/// the daemon echoes then is the one already stored.
+fn stored_unless_known(status: SaveStatus, memories: &[ToolMemory]) -> Vec<Value> {
+    if status == SaveStatus::AlreadyKnown {
+        Vec::new()
+    } else {
+        stored_json(memories)
+    }
 }
 
 /// The batch form: one entry per submitted item, in order, so a client can
@@ -528,7 +613,10 @@ fn save_batch_result(text: &str, outcome: &BatchSaveOutcome) -> CallToolResult {
         "items": outcome.items.iter().map(|item| json!({
             "status": item.status,
             "error": item.error,
-            "stored": stored_json(&item.memories),
+            "stored": item
+                .status
+                .map(|status| stored_unless_known(status, &item.memories))
+                .unwrap_or_default(),
         })).collect::<Vec<_>>(),
     }));
     result
@@ -567,7 +655,32 @@ fn save_request(params: SaveParams, client: &str) -> std::result::Result<SaveReq
             .as_deref()
             .map(parse_valid_until)
             .transpose()?,
+        replaces: params.replaces,
+        coexists_with: params.coexists_with,
         client: Some(client.to_string()),
+    })
+}
+
+fn update_request(params: UpdateParams) -> std::result::Result<UpdateRequest, RaError> {
+    // An empty string is how a tool argument says "clear it".
+    let cleared = |raw: Option<String>| raw.map(|raw| Some(raw).filter(|v| !v.trim().is_empty()));
+    Ok(UpdateRequest {
+        id: params.id,
+        content: params.content,
+        kind: params.kind,
+        topic: params.topic,
+        applies_to: params.applies_to.map(|applies_to| SaveAppliesTo {
+            target: applies_to.target,
+            project_name: applies_to.project_name,
+            new_project: applies_to.new_project,
+        }),
+        subtopic: cleared(params.subtopic),
+        tags: params.tags,
+        valid_until: cleared(params.valid_until)
+            .map(|value| value.as_deref().map(parse_valid_until).transpose())
+            .transpose()?,
+        goal_status: params.goal_status,
+        origin: params.origin,
     })
 }
 
@@ -582,24 +695,32 @@ fn parse_valid_until(raw: &str) -> std::result::Result<DateTime<Utc>, RaError> {
         .and_then(|date| date.succ_opt())
         .and_then(|next| next.and_hms_opt(0, 0, 0))
         .map(|at| at.and_utc())
-        .ok_or_else(|| RaError::Rejected {
-            code: "invalid_value".to_string(),
-            message: format!(
-                "valid_until {raw:?} is neither an RFC 3339 time nor a YYYY-MM-DD date"
-            ),
+        .ok_or_else(|| {
+            RaError::rejected(
+                "invalid_value",
+                format!("valid_until {raw:?} is neither an RFC 3339 time nor a YYYY-MM-DD date"),
+            )
         })
 }
 
 /// A refused save as a tool result the agent reads — "not saved", the code,
 /// and how to fix it — rather than a protocol error it may not show. Any
 /// other failure stays an error.
-fn rejected_result(error: RaError) -> Result<CallToolResult, ErrorData> {
+fn rejected_result(error: RaError, verdict: &str) -> Result<CallToolResult, ErrorData> {
     match error {
-        RaError::Rejected { code, message } => {
+        RaError::Rejected {
+            code,
+            message,
+            details,
+        } => {
             let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
-                "Not saved ({code}): {message}"
+                "{verdict} ({code}): {message}"
             ))]);
-            result.structured_content = Some(json!({ "rejected": code, "message": message }));
+            let mut structured = json!({ "rejected": code, "message": message });
+            if let Some(details) = details {
+                structured["details"] = details;
+            }
+            result.structured_content = Some(structured);
             Ok(result)
         }
         other => Err(to_mcp_error(other)),
@@ -626,7 +747,7 @@ fn to_mcp_error(error: RaError) -> ErrorData {
         // The save tools turn a rejection into a tool result the agent reads
         // and acts on (`rejected_result`); any other tool reaching one reports
         // it the same way an invalid argument would be.
-        RaError::Rejected { code, message } => {
+        RaError::Rejected { code, message, .. } => {
             ErrorData::invalid_params(format!("{message} ({code})"), None)
         }
         // A busy second stage is not a client's mistake and never reaches

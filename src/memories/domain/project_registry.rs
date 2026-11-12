@@ -25,13 +25,13 @@ pub fn normalize_project_name(raw: &str) -> Result<String> {
     if valid {
         Ok(name)
     } else {
-        Err(RaError::Rejected {
-            code: "invalid_value".to_string(),
-            message: format!(
+        Err(RaError::rejected(
+            "invalid_value",
+            format!(
                 "project name {raw:?} must be 1 to {MAX_PROJECT_NAME_LEN} characters of a-z, \
                  0-9, '.', '_' or '-', like \"quill\""
             ),
-        })
+        ))
     }
 }
 

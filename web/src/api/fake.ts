@@ -13,8 +13,10 @@ import type {
   Memory,
   MemoryFields,
   MemoryPatch,
+  ConflictingMemory,
   MemoryStructure,
   RecallHit,
+  SavedMemory,
 } from "./types";
 
 interface Account {
@@ -80,7 +82,7 @@ export class FakeServer {
     structure?: MemoryStructure;
   }[] = [];
   /** What the next structured save is refused with, the way the daemon's rules would. */
-  rejectNextSave: { code: string; message: string } | null = null;
+  rejectNextSave: { code: string; message: string; conflicts?: ConflictingMemory[] } | null = null;
 
   addAccount(key: string | null, identity: Identity, memories: Memory[] = []): this {
     // Seeded like the daemon's catalog: every custom category already on a memory.
@@ -253,14 +255,21 @@ class FakeClient implements ApiClient {
     return { memories: result, changed: result.length, reembedded: 0 };
   }
 
-  async createMemory(fields: MemoryFields, structure?: MemoryStructure): Promise<Memory> {
+  async createMemory(fields: MemoryFields, structure?: MemoryStructure): Promise<SavedMemory> {
     const account = this.writable();
     const refusal = this.server.rejectNextSave;
     if (refusal !== null) {
       this.server.rejectNextSave = null;
-      throw new ApiError(422, refusal.code, refusal.message);
+      throw new ApiError(422, refusal.code, refusal.message, refusal.conflicts);
     }
     this.server.calls.push({ method: "create", ...(structure !== undefined && { structure }) });
+    // Like the daemon: the same sentence again is already known.
+    const same = account.memories.find(
+      (m) => m.content.trim().toLowerCase() === fields.content.trim().toLowerCase() && !structure?.coexists_with?.includes(m.id),
+    );
+    if (same !== undefined) {
+      return { memory: copy(same), status: "already_known", message: `Already known: "${same.content}".` };
+    }
     const now = this.server.tick();
     const memory: Memory = {
       id: this.server.nextId(),
@@ -271,8 +280,12 @@ class FakeClient implements ApiClient {
       updated_at: now,
       superseded_by: null,
     };
+    // A replaced memory leaves the list (it stays in the daemon's history).
+    if (structure?.replaces !== undefined) {
+      account.memories = account.memories.filter((m) => m.id !== structure.replaces);
+    }
     account.memories.push(memory);
-    return copy(memory);
+    return { memory: copy(memory), status: "stored", message: "Saved." };
   }
 
   async ingest(request: IngestRequest): Promise<IngestResult> {
@@ -281,7 +294,7 @@ class FakeClient implements ApiClient {
     if (this.server.ingestOutcome !== "stored") {
       return { outcome: this.server.ingestOutcome, memoryIds: [], understanding: this.server.understanding };
     }
-    const memory = await this.createMemory({
+    const { memory } = await this.createMemory({
       content: request.content,
       category: request.category ?? "fact.project",
       subcategory: null,

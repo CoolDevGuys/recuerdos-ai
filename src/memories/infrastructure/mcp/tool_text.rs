@@ -27,7 +27,7 @@
 //! the agent's context window, and JSON spends tokens on punctuation the
 //! model does not need.
 
-use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, SaveStatus, ToolMemory};
+use super::memory_toolbox::{BatchSaveOutcome, SaveOutcome, SaveStatus, ToolMemory, UpdateOutcome};
 
 pub const PROFILE_DESCRIPTION: &str = "\
 A short digest of who this user is: their standing preferences, \
@@ -75,148 +75,103 @@ stored."
     output.trim_end().to_string()
 }
 
-/// What a save did, phrased so an agent can repeat it to the user
-/// without overstating it.
-///
-/// The interesting case is zero memories. With understanding enabled that
-/// means the store already knew this, or there was nothing durable in it
-/// — both legitimate, and both very different from "saved". An agent told
-/// "saved" after a NOOP goes on to tell the user something untrue.
+/// What a save did, in words an agent repeats accurately: how it was filed,
+/// or that the store already knew it.
 pub fn render_saved(outcome: &SaveOutcome) -> String {
-    // The empty case used to be one blob, and an agent given a blob picks the
-    // reading it wants — "saved". Each kind of nothing now says which it was.
-    if outcome.memories.is_empty() {
-        return match outcome.status {
-            SaveStatus::NothingDurable => "Nothing was stored: there was nothing in it that \
-             stays true beyond this conversation — small talk, an acknowledgement, a step in \
-             the task. This is the expected answer to a lot of messages; do not rephrase it as \
-             a save, and do not try again with different words."
-                .to_string(),
-            SaveStatus::AlreadyKnown => "Nothing new was stored: the store already knows this. \
-             It is not lost — it will come back on recall. Saving it again only duplicates the \
-             question, so do not retry."
-                .to_string(),
-            SaveStatus::ChangedWithoutStoring => "Nothing was stored, but the store did change: \
-             this retracted or superseded what it already knew, and that update is done. Tell \
-             the user what changed rather than that something was saved."
-                .to_string(),
-            SaveStatus::Stored | SaveStatus::Unknown => {
-                if outcome.understanding {
-                    "Nothing was stored, and the reason is not known — it may already have been \
-                     known, or there may have been nothing durable in it. Do not tell the user \
-                     it was saved."
-                        .to_string()
-                } else {
-                    "Nothing was stored.".to_string()
-                }
-            }
-        };
-    }
-
-    if outcome.memories.len() == 1 {
-        let memory = &outcome.memories[0];
-        // A structured save: the daemon says how it filed it, which is the
-        // part the user may want to correct.
-        if let Some(message) = &outcome.message {
-            return format!(
-                "{message} (id {}): {}\nIt will be available in future sessions.",
-                memory.id,
-                memory.content.replace('\n', " ")
-            );
-        }
-        return format!(
-            "Saved as [{}] (id {}): {}
-It will be available in future sessions.",
-            memory.category,
-            memory.id,
-            memory.content.replace('\n', " ")
-        );
-    }
-
-    // Several memories from one submission means extraction split it.
-    // Showing each is how the agent learns that its one sentence became
-    // three separately-recallable facts.
-    let mut output = format!("Saved {} memories:\n\n", outcome.memories.len());
-    for memory in &outcome.memories {
-        output.push_str(&format!(
-            "- [{}] {} (id {})\n",
-            memory.category,
-            memory.content.replace('\n', " "),
+    let Some(memory) = outcome.memories.first() else {
+        return "Nothing was stored. Do not tell the user it was saved.".to_string();
+    };
+    let content = memory.content.replace('\n', " ");
+    match (outcome.status, &outcome.message) {
+        (SaveStatus::AlreadyKnown, message) => format!(
+            "{} It is not lost: it comes back on recall. Do not save it again.",
+            message.clone().unwrap_or_else(|| format!(
+                "Already known: \"{content}\" (id {}) says this, so nothing was saved.",
+                memory.id
+            ))
+        ),
+        (_, Some(message)) => format!(
+            "{message} (id {}): {content}\nIt will be available in future sessions.",
             memory.id
-        ));
+        ),
+        (_, None) => format!(
+            "Saved as [{}] (id {}): {content}\nIt will be available in future sessions.",
+            memory.category, memory.id
+        ),
     }
-    output.push_str("\nThey will be available in future sessions.");
-    output
 }
 
 /// What a batch save did, per item, phrased so an agent reports it
-/// accurately — including the items that stored nothing and the ones that
-/// failed, which "saved N memories" alone would paper over.
+/// accurately — including the items the store already knew and the ones
+/// that were refused, which "saved N memories" alone would paper over.
 pub fn render_saved_batch(outcome: &BatchSaveOutcome) -> String {
     let total = outcome.items.len();
-    let saved: usize = outcome.items.iter().map(|item| item.memories.len()).sum();
+    let stored: Vec<_> = outcome
+        .items
+        .iter()
+        .filter(|item| item.error.is_none() && item.status != Some(SaveStatus::AlreadyKnown))
+        .flat_map(|item| item.memories.iter().map(move |memory| (item, memory)))
+        .collect();
+    let known: Vec<(usize, &str)> = outcome
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.error.is_none() && item.status == Some(SaveStatus::AlreadyKnown))
+        .map(|(index, item)| (index, item.message.as_deref().unwrap_or("already known")))
+        .collect();
     let failures: Vec<(usize, &str)> = outcome
         .items
         .iter()
         .enumerate()
         .filter_map(|(index, item)| item.error.as_deref().map(|error| (index, error)))
         .collect();
-    let noops = outcome
-        .items
-        .iter()
-        .filter(|item| item.error.is_none() && item.memories.is_empty())
-        .count();
 
-    // Nothing stored and nothing failed: every item was a NOOP. Same trap
-    // as the single save — an agent told "saved" here misinforms the user.
-    if saved == 0 && failures.is_empty() {
-        return if outcome.understanding {
-            format!(
-                "Nothing new was stored — all {total} {} were already known, or held nothing \
-                 that stays true beyond this conversation. Do not tell the user they were saved.",
-                plural(total, "item", "items")
-            )
-        } else {
-            "Nothing was stored.".to_string()
-        };
-    }
+    let mut output = if stored.is_empty() {
+        format!(
+            "Nothing new was stored from {total} {}. Do not tell the user they were saved.",
+            plural(total, "item", "items")
+        )
+    } else {
+        format!(
+            "Saved {} {} from {total} {}.",
+            stored.len(),
+            plural(stored.len(), "memory", "memories"),
+            plural(total, "item", "items")
+        )
+    };
 
-    let mut output = format!(
-        "Saved {saved} {} from {total} {}.",
-        plural(saved, "memory", "memories"),
-        plural(total, "item", "items")
-    );
-
-    if saved > 0 {
+    if !stored.is_empty() {
         output.push('\n');
-        for item in &outcome.items {
-            for memory in &item.memories {
-                // A structured save says how it was filed; that is what the
-                // user may want to correct.
-                let filed = item
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| format!("[{}]", memory.category));
-                output.push_str(&format!(
-                    "\n- {filed} {} (id {})",
-                    memory.content.replace('\n', " "),
-                    memory.id
-                ));
-            }
+        for (item, memory) in &stored {
+            // A structured save says how it was filed; that is what the
+            // user may want to correct.
+            let filed = item
+                .message
+                .clone()
+                .unwrap_or_else(|| format!("[{}]", memory.category));
+            output.push_str(&format!(
+                "\n- {filed} {} (id {})",
+                memory.content.replace('\n', " "),
+                memory.id
+            ));
         }
         output.push_str("\n\nThey will be available in future sessions.");
     }
 
-    if noops > 0 {
+    if !known.is_empty() {
         output.push_str(&format!(
-            "\n\n{noops} {} added nothing new (already known, or nothing durable in it).",
-            plural(noops, "item", "items")
+            "\n\n{} {} added nothing new:",
+            known.len(),
+            plural(known.len(), "item", "items")
         ));
+        for (index, message) in known {
+            output.push_str(&format!("\n- item {index}: {message}"));
+        }
     }
 
     if !failures.is_empty() {
         output.push_str(&format!(
-            "\n\n{} {} failed and {} not saved:",
+            "\n\n{} {} {} not saved:",
             failures.len(),
             plural(failures.len(), "item", "items"),
             plural(failures.len(), "was", "were")
@@ -227,6 +182,21 @@ pub fn render_saved_batch(outcome: &BatchSaveOutcome) -> String {
     }
 
     output
+}
+
+/// What an amendment did: the daemon's sentence and the memory as it now
+/// reads.
+pub fn render_updated(outcome: &UpdateOutcome) -> String {
+    let memory = &outcome.memory;
+    format!(
+        "{} (id {}): {}",
+        outcome
+            .message
+            .clone()
+            .unwrap_or_else(|| "Updated.".to_string()),
+        memory.id,
+        memory.content.replace('\n', " ")
+    )
 }
 
 /// Singular or plural word for a count, so the summaries read as English
@@ -387,69 +357,66 @@ mod tests {
         assert!(render_forgotten(0).contains("No memories were deleted"));
     }
 
-    fn saved_nothing(status: SaveStatus) -> String {
+    fn saved(status: SaveStatus, message: Option<&str>) -> String {
         render_saved(&SaveOutcome {
-            memories: vec![],
-            understanding: true,
+            memories: vec![memory("User prefers pnpm", None)],
+            understanding: false,
             status,
-            message: None,
+            message: message.map(str::to_string),
         })
     }
 
     #[test]
-    fn a_save_that_found_nothing_durable_says_so_instead_of_making_it_vague() {
-        let rendered = saved_nothing(SaveStatus::NothingDurable);
-
-        assert!(rendered.contains("Nothing was stored"), "{rendered}");
-        assert!(
-            rendered.contains("stays true beyond this conversation"),
-            "the agent needs to know this is an ordinary outcome, not a failure: {rendered}"
+    fn a_stored_memory_repeats_how_it_was_filed() {
+        let rendered = saved(
+            SaveStatus::Stored,
+            Some("Saved as your personal coding preference (applies to you everywhere)."),
         );
+
+        assert!(
+            rendered.starts_with("Saved as your personal coding preference"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("User prefers pnpm"), "{rendered}");
     }
 
     #[test]
     fn a_save_that_was_already_known_says_it_is_not_lost() {
-        let rendered = saved_nothing(SaveStatus::AlreadyKnown);
+        let rendered = saved(
+            SaveStatus::AlreadyKnown,
+            Some("Already known: \"User prefers pnpm\" (id 1) says this, so nothing was saved."),
+        );
 
-        assert!(rendered.contains("already knows this"), "{rendered}");
+        assert!(rendered.starts_with("Already known"), "{rendered}");
         assert!(
-            rendered.contains("come back on recall"),
+            rendered.contains("comes back on recall"),
             "an agent that fears the memory was dropped will retry it: {rendered}"
         );
-    }
-
-    #[test]
-    fn a_change_that_stored_nothing_reports_the_change() {
-        // A retraction stores no memory but is not a no-op. Rendering it as
-        // "nothing was stored" would have the agent report inaction after the
-        // store deleted something.
-        let rendered = saved_nothing(SaveStatus::ChangedWithoutStoring);
-
-        assert!(rendered.contains("the store did change"), "{rendered}");
-        assert!(rendered.contains("superseded"), "{rendered}");
         assert!(
-            !rendered.starts_with("Nothing was stored."),
-            "must not read as an inaction: {rendered}"
+            !rendered.contains("available in future sessions"),
+            "{rendered}"
         );
     }
 
     #[test]
-    fn an_unknown_status_still_hedges_rather_than_claiming_a_save() {
-        // A daemon older than the outcome field sends nothing. The worst
-        // possible rendering here is "Saved".
-        let rendered = saved_nothing(SaveStatus::Unknown);
+    fn a_save_with_nothing_to_show_never_claims_it_saved() {
+        let rendered = render_saved(&SaveOutcome {
+            memories: vec![],
+            understanding: false,
+            status: SaveStatus::Unknown,
+            message: None,
+        });
 
         assert!(rendered.contains("Nothing was stored"), "{rendered}");
-        assert!(rendered.contains("not known"), "{rendered}");
         assert!(!rendered.contains("Saved as"), "{rendered}");
     }
 
     #[test]
-    fn a_batch_reports_saved_noop_and_failed_items_distinctly() {
+    fn a_batch_reports_saved_known_and_refused_items_distinctly() {
         use super::super::memory_toolbox::BatchItemOutcome;
 
         let outcome = BatchSaveOutcome {
-            understanding: true,
+            understanding: false,
             items: vec![
                 BatchItemOutcome {
                     memories: vec![memory("User prefers pnpm", None)],
@@ -457,16 +424,15 @@ mod tests {
                     status: Some(SaveStatus::Stored),
                     message: None,
                 },
-                // Stored nothing, but did not fail — already known.
                 BatchItemOutcome {
-                    memories: vec![],
+                    memories: vec![memory("User prefers Vitest", None)],
                     error: None,
                     status: Some(SaveStatus::AlreadyKnown),
-                    message: None,
+                    message: Some("Already known: \"User prefers Vitest\"".to_string()),
                 },
                 BatchItemOutcome {
                     memories: vec![],
-                    error: Some("provider down".to_string()),
+                    error: Some("not saved (secret): looks like a token".to_string()),
                     status: None,
                     message: None,
                 },
@@ -481,14 +447,11 @@ mod tests {
         );
         assert!(rendered.contains("User prefers pnpm"), "{rendered}");
         assert!(
-            rendered.contains("1 item added nothing new"),
-            "a NOOP item must be reported, not silently counted as saved: {rendered}"
+            rendered.contains("1 item added nothing new:\n- item 1: Already known"),
+            "a known item must be reported, not counted as saved: {rendered}"
         );
-        assert!(rendered.contains("1 item failed"), "{rendered}");
-        assert!(
-            rendered.contains("provider down"),
-            "the failure reason must reach the agent: {rendered}"
-        );
+        assert!(rendered.contains("1 item was not saved"), "{rendered}");
+        assert!(rendered.contains("looks like a token"), "{rendered}");
     }
 
     #[test]
@@ -496,29 +459,18 @@ mod tests {
         use super::super::memory_toolbox::BatchItemOutcome;
 
         let outcome = BatchSaveOutcome {
-            understanding: true,
-            items: vec![
-                BatchItemOutcome {
-                    memories: vec![],
-                    error: None,
-                    status: Some(SaveStatus::NothingDurable),
-                    message: None,
-                },
-                BatchItemOutcome {
-                    memories: vec![],
-                    error: None,
-                    status: Some(SaveStatus::AlreadyKnown),
-                    message: None,
-                },
-            ],
+            understanding: false,
+            items: vec![BatchItemOutcome {
+                memories: vec![memory("User prefers pnpm", None)],
+                error: None,
+                status: Some(SaveStatus::AlreadyKnown),
+                message: None,
+            }],
         };
 
         let rendered = render_saved_batch(&outcome);
 
         assert!(rendered.contains("Nothing new was stored"), "{rendered}");
-        assert!(
-            rendered.contains("Do not tell the user"),
-            "an all-NOOP batch must warn against reporting a save: {rendered}"
-        );
+        assert!(rendered.contains("Do not tell the user"), "{rendered}");
     }
 }

@@ -6,8 +6,9 @@
 
 use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
 use crate::memories::application::structured_memory_saver::{
-    AppliesToInput, DetectedProject, SaveNote, SavedMemory, StructuredSave,
+    AppliesToInput, DetectedProject, SaveNote, SaveResult, StructuredSave,
 };
+use crate::memories::application::structured_memory_updater::{StructuredEdit, UpdatedMemory};
 use crate::memories::domain::applies_to::AppliesTo;
 use crate::memories::domain::memory::{Memory, MemorySource};
 use crate::memories::domain::recall_ranker::ScoredMemory;
@@ -34,6 +35,13 @@ pub struct SaveMemoryRequest {
     pub category: Option<String>,
     pub client: Option<String>,
     pub session_id: Option<String>,
+    /// The id of a stored memory this one replaces: the user changed their
+    /// mind. Same scope only; the old one is kept in history.
+    pub replaces: Option<String>,
+    /// Ids of stored memories the user said this does not replace: both
+    /// hold, so they are not reported as conflicts.
+    #[serde(default)]
+    pub coexists_with: Vec<String>,
     // Fields of the old shape, refused by name so a client learns the new
     // one instead of having its value silently dropped.
     subcategory: Option<serde_json::Value>,
@@ -69,19 +77,17 @@ impl SaveMemoryRequest {
             ),
         ];
         if let Some((_, field, why)) = retired.iter().find(|(present, _, _)| *present) {
-            return Err(RaError::Rejected {
-                code: "invalid_value".to_string(),
-                message: format!("{field} is no longer accepted: {why}."),
-            });
+            return Err(RaError::rejected(
+                "invalid_value",
+                format!("{field} is no longer accepted: {why}."),
+            ));
         }
         if self.kind.is_none() && self.topic.is_none() && self.origin.is_none() {
-            return Err(RaError::Rejected {
-                code: "missing_field".to_string(),
-                message: "This is the old save shape. A memory now needs kind, topic, \
-                          applies_to and origin; a category alone is not enough. See \
-                          docs/memory-model.md."
-                    .to_string(),
-            });
+            return Err(RaError::rejected(
+                "missing_field",
+                "This is the old save shape. A memory now needs kind, topic, applies_to and \
+                 origin; a category alone is not enough. See docs/memory-model.md.",
+            ));
         }
         Ok(StructuredSave {
             content: self.content,
@@ -102,52 +108,138 @@ impl SaveMemoryRequest {
                 session_id: self.session_id,
             },
             detected_project: detected,
+            replaces: self.replaces,
+            coexists_with: self.coexists_with,
         })
     }
 }
 
-/// A saved memory, plus what to tell the user about how it was filed.
+/// A saved memory, plus what to tell the user about how it was filed — or,
+/// for `already_known`, the stored memory that already says it.
 #[derive(Debug, Serialize)]
 pub struct SavedMemoryResponse {
     #[serde(flatten)]
     pub memory: MemoryResponse,
+    /// `stored` (201), or `already_known` (200): nothing was written, and the
+    /// memory shown is the one already stored.
+    pub status: &'static str,
     /// The sentence to repeat to the user: "Saved as your personal coding
     /// preference (applies to you everywhere)."
     pub message: String,
     /// Machine-readable notes: `applies_to_defaulted`, `filed_from_document`,
-    /// `project_created`.
+    /// `project_created`, `replaced`, `overrides`.
     pub notes: Vec<&'static str>,
+    /// The ids this save superseded (`replaces`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<String>,
 }
 
-impl From<&SavedMemory> for SavedMemoryResponse {
-    fn from(saved: &SavedMemory) -> Self {
-        Self {
-            memory: MemoryResponse::from(&saved.memory),
-            message: saved.message(),
-            notes: saved
-                .notes
-                .iter()
-                .map(|note| match note {
-                    SaveNote::AppliesToDefaulted => "applies_to_defaulted",
-                    SaveNote::FiledFromDocument => "filed_from_document",
-                    SaveNote::ProjectCreated(_) => "project_created",
-                })
-                .collect(),
+impl From<&SaveResult> for SavedMemoryResponse {
+    fn from(result: &SaveResult) -> Self {
+        match result {
+            SaveResult::Saved(saved) => Self {
+                memory: MemoryResponse::from(&saved.memory),
+                status: "stored",
+                message: saved.message(),
+                notes: saved
+                    .notes
+                    .iter()
+                    .map(|note| match note {
+                        SaveNote::AppliesToDefaulted => "applies_to_defaulted",
+                        SaveNote::FiledFromDocument => "filed_from_document",
+                        SaveNote::ProjectCreated(_) => "project_created",
+                        SaveNote::Replaced { .. } => "replaced",
+                        SaveNote::Overrides { .. } => "overrides",
+                    })
+                    .collect(),
+                replaced: saved
+                    .notes
+                    .iter()
+                    .filter_map(|note| match note {
+                        SaveNote::Replaced { id, .. } => Some(id.to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+            },
+            SaveResult::AlreadyKnown { memory, .. } => Self {
+                memory: MemoryResponse::from(memory),
+                status: "already_known",
+                message: result.message(),
+                notes: Vec::new(),
+                replaced: Vec::new(),
+            },
         }
     }
 }
 
+/// `PATCH /v1/memories/{id}`: every field optional, and an omitted field is
+/// left alone. The structure fields are held to the same rules as a save.
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     pub category: Option<String>,
-    /// `null` clears the subcategory; omitting the field leaves it alone.
-    #[serde(default, with = "serde_with_double_option")]
+    /// `null` clears the subtopic; omitting the field leaves it alone.
+    /// `subcategory` is its older name.
+    #[serde(default, with = "serde_with_double_option", alias = "subtopic")]
     pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
-    /// `null` clears the expiry; omitting the field leaves it alone.
-    #[serde(default, with = "serde_with_double_option")]
+    /// `null` clears it; omitting the field leaves it alone. `expires_at` is
+    /// its older name.
+    #[serde(default, with = "serde_with_double_option", alias = "valid_until")]
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<AppliesToRequest>,
+    /// `achieved` or `abandoned` closes a goal (with `origin` user_said or
+    /// user_confirmed); `active` reopens it.
+    pub goal_status: Option<String>,
+    /// Who asked for this change.
+    pub origin: Option<String>,
+}
+
+impl UpdateMemoryRequest {
+    pub fn into_structured(
+        self,
+        category: Option<crate::memories::domain::category::Category>,
+        expected_updated_at: Option<DateTime<Utc>>,
+        detected: Option<DetectedProject>,
+    ) -> StructuredEdit {
+        StructuredEdit {
+            content: self.content,
+            category,
+            subtopic: self.subcategory,
+            tags: self.tags,
+            valid_until: self.expires_at,
+            kind: self.kind,
+            topic: self.topic,
+            applies_to: self.applies_to.map(|applies_to| AppliesToInput {
+                target: applies_to.target,
+                project_name: applies_to.project_name,
+                new_project: applies_to.new_project,
+            }),
+            goal_status: self.goal_status,
+            origin: self.origin,
+            expected_updated_at,
+            detected_project: detected,
+        }
+    }
+}
+
+/// An edited memory, plus the sentence to repeat to the user.
+#[derive(Debug, Serialize)]
+pub struct UpdatedMemoryResponse {
+    #[serde(flatten)]
+    pub memory: MemoryResponse,
+    pub message: String,
+}
+
+impl From<&UpdatedMemory> for UpdatedMemoryResponse {
+    fn from(updated: &UpdatedMemory) -> Self {
+        Self {
+            memory: MemoryResponse::from(&updated.memory),
+            message: updated.message(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

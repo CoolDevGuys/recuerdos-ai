@@ -42,6 +42,7 @@ from .models import (
     SavedMemory,
     SearchHit,
     SearchReport,
+    UpdatedMemory,
 )
 
 __version__ = "0.4.0"
@@ -68,6 +69,7 @@ __all__ = [
     "RerankShadow",
     "RerankStatus",
     "SavedMemory",
+    "UpdatedMemory",
     "SearchHit",
     "SearchReport",
     "ServerError",

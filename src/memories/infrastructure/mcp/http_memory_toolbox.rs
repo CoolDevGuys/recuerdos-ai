@@ -11,7 +11,7 @@
 
 use super::memory_toolbox::{
     BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome,
-    SaveRequest, SaveStatus, ToolMemory,
+    SaveRequest, SaveStatus, ToolMemory, UpdateOutcome, UpdateRequest,
 };
 use crate::memories::application::structured_memory_saver::DetectedProject;
 use crate::memories::infrastructure::http::handlers::{PROJECT_HEADER, PROJECT_REMOTE_HEADER};
@@ -101,6 +101,7 @@ impl HttpMemoryToolbox {
                     .unwrap_or("rejected")
                     .to_string(),
                 message,
+                details: payload["error"].get("details").cloned(),
             },
             _ => RaError::Internal(format!("daemon returned {status}: {message}")),
         })
@@ -133,6 +134,12 @@ impl MemoryToolbox for HttpMemoryToolbox {
         if let Some(client) = request.client {
             body["client"] = json!(client);
         }
+        if let Some(replaces) = request.replaces {
+            body["replaces"] = json!(replaces);
+        }
+        if !request.coexists_with.is_empty() {
+            body["coexists_with"] = json!(request.coexists_with);
+        }
 
         let saved = self
             .request(reqwest::Method::POST, "/v1/memories:direct", Some(body))
@@ -141,8 +148,56 @@ impl MemoryToolbox for HttpMemoryToolbox {
         Ok(SaveOutcome {
             memories: vec![parse_memory(&saved)?],
             understanding: false,
-            status: SaveStatus::Stored,
+            status: SaveStatus::from_wire(&saved["status"]),
             message: saved["message"].as_str().map(str::to_string),
+        })
+    }
+
+    async fn update(&self, request: UpdateRequest) -> Result<UpdateOutcome> {
+        let mut body = json!({});
+        if let Some(content) = request.content {
+            body["content"] = json!(content);
+        }
+        if let Some(kind) = request.kind {
+            body["kind"] = json!(kind);
+        }
+        if let Some(topic) = request.topic {
+            body["topic"] = json!(topic);
+        }
+        if let Some(applies_to) = request.applies_to {
+            body["applies_to"] = json!({
+                "target": applies_to.target,
+                "project_name": applies_to.project_name,
+                "new_project": applies_to.new_project,
+            });
+        }
+        if let Some(subtopic) = request.subtopic {
+            body["subtopic"] = json!(subtopic);
+        }
+        if let Some(tags) = request.tags {
+            body["tags"] = json!(tags);
+        }
+        if let Some(valid_until) = request.valid_until {
+            body["valid_until"] = json!(valid_until);
+        }
+        if let Some(goal_status) = request.goal_status {
+            body["goal_status"] = json!(goal_status);
+        }
+        if let Some(origin) = request.origin {
+            body["origin"] = json!(origin);
+        }
+
+        let id = request.id.trim();
+        let updated = self
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/v1/memories/{id}"),
+                Some(body),
+            )
+            .await?;
+        Ok(UpdateOutcome {
+            memory: parse_memory(&updated)?,
+            message: updated["message"].as_str().map(str::to_string),
         })
     }
 
@@ -159,7 +214,7 @@ impl MemoryToolbox for HttpMemoryToolbox {
                     status: Some(outcome.status),
                     message: outcome.message,
                 },
-                Err(RaError::Rejected { code, message }) => BatchItemOutcome {
+                Err(RaError::Rejected { code, message, .. }) => BatchItemOutcome {
                     memories: Vec::new(),
                     error: Some(format!("not saved ({code}): {message}")),
                     status: None,

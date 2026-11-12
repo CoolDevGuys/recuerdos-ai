@@ -82,6 +82,30 @@ Each memory must stand alone, out of context, months later.
   for what you inferred from the flow of the session. If you would not
   defend it, do not include the memory at all.
 
+## What it is, and who it is true for
+
+Every memory also says:
+
+- `kind` — `preference` (what the user picks when free to choose; only ever
+  about the user), `rule` (a hard line), `convention` (how one project does
+  things), `decision` (a choice made, with its reason), `fact`, `experience`
+  (something that happened), `learning` (the lesson from it), `procedure`
+  (steps to repeat), `reference` (a pointer: a path, a URL), `goal`
+  (something the user works towards).
+- `topic` — `coding`, `tech` (machines, servers, services outside a
+  codebase), `work`, `family`, `people`, `health`, `lifestyle`, `home`,
+  `finance`, `travel` or `food`.
+- `applies_to` — `me` for the user themselves, everywhere ("I prefer", "I
+  always", "personally"); `project` for the project the text is about ("in
+  this repo", "here we", a project's rules file); `general` for the user's
+  world outside any project (a server, a file location, an appointment).
+  **This is the field that matters most.** A project's "always use X" is that
+  project's `convention`, not the user's `preference`, unless the user says it
+  is how *they* work everywhere.
+- `origin` — `user_said` when the user stated it; `inferred` when you
+  concluded it from what they did. Never present an inference about the user
+  as something they said.
+
 ## Categories
 
 {{CATEGORIES}}

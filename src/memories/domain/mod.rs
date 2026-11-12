@@ -5,6 +5,7 @@
 pub mod applies_to;
 pub mod category;
 pub mod category_catalog;
+pub mod conflict_judge;
 pub mod content_checks;
 pub mod document_text;
 pub mod embedder;

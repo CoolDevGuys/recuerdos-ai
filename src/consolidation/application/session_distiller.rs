@@ -79,6 +79,7 @@ impl SessionDistiller {
                     .unwrap_or_else(|| DEFAULT_CLIENT.to_string()),
             ),
             session_id: transcript.session_id.clone(),
+            project: transcript.project.clone(),
         };
 
         let outcome = self.pipeline.execute(context, &payload).await?;
@@ -131,6 +132,7 @@ mod tests {
                 Arc::new(fixture.saver()),
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                fixture.project_registry(),
                 shared,
                 None,
                 true,
@@ -262,7 +264,7 @@ mod tests {
         // Without it, every session would pile a fresh copy of the
         // current convention on top of the last one.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "The project uses npm");
+        let old = fixture.save_fact(&fixture.alex, "The project uses npm");
 
         let (distiller, _) = distiller(
             &fixture,

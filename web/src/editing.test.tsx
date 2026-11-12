@@ -227,6 +227,62 @@ describe("adding a memory", () => {
     expect(within(dialog).getByLabelText("Memory")).toHaveValue("This repo uses pnpm");
   });
 
+  async function fillPreference(user: Awaited<ReturnType<typeof openAdd>>["user"], dialog: HTMLElement, text: string) {
+    await user.type(within(dialog).getByLabelText("Memory"), text);
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Preference");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Coding");
+    await user.click(within(dialog).getByRole("radio", { name: /Me, everywhere/ }));
+  }
+
+  it("lets the user replace a memory a save contradicts", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "conflict",
+      message: "It contradicts what is stored for me.",
+      conflicts: [{ id: "a", content: "The user prefers pnpm" }],
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await fillPreference(user, dialog, "The user now prefers npm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("This may contradict a memory you already have");
+    expect(alert).toHaveTextContent("The user prefers pnpm");
+    await user.click(within(alert).getByRole("button", { name: "Replace it" }));
+
+    expect(await screen.findByText("Memory saved.")).toBeInTheDocument();
+    expect(server.calls.at(-1)).toMatchObject({ method: "create", structure: { replaces: "a" } });
+    expect(server.memoriesOf(ALEX_KEY).some((m) => m.id === "a")).toBe(false);
+  });
+
+  it("lets the user keep both when each holds", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "conflict",
+      message: "It is very close to what is stored for me.",
+      conflicts: [{ id: "a", content: "The user prefers pnpm" }],
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await fillPreference(user, dialog, "The user prefers pnpm for monorepos");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+    await user.click(within(await within(dialog).findByRole("alert")).getByRole("button", { name: "Keep both" }));
+
+    expect(await screen.findByText("Memory saved.")).toBeInTheDocument();
+    expect(server.calls.at(-1)).toMatchObject({ method: "create", structure: { coexists_with: ["a"] } });
+  });
+
+  it("says so when the memory is already stored", async () => {
+    const { server, user, dialog } = await openAdd();
+
+    await fillPreference(user, dialog, "The user prefers pnpm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(await screen.findByText("You already have this memory, so nothing new was saved.")).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).filter((m) => m.content === "The user prefers pnpm")).toHaveLength(1);
+  });
+
   it("requires the text", async () => {
     const { server, user, dialog } = await openAdd();
 

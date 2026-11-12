@@ -184,6 +184,20 @@ impl Fixture {
             .with_reranker(reranker, mode, depth, timeout)
     }
 
+    /// The structured save over this fixture's stores, with no model.
+    pub fn structured_saver(
+        &self,
+    ) -> crate::memories::application::structured_memory_saver::StructuredMemorySaver {
+        crate::memories::application::structured_memory_saver::StructuredMemorySaver::new(
+            Arc::new(self.saver()),
+            Arc::clone(&self.memories) as Arc<dyn MemoryRepository>,
+            Arc::new(self.recaller()),
+            self.project_registry(),
+            self.topic_catalog(),
+            fixed_clock(),
+        )
+    }
+
     pub fn finder(&self) -> MemoryFinder {
         MemoryFinder::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
     }
@@ -287,6 +301,16 @@ impl Fixture {
 
     pub fn exporter(&self) -> MemoryExporter {
         MemoryExporter::new(Arc::clone(&self.memories) as Arc<dyn MemoryRepository>)
+    }
+
+    /// Saves a project fact, which the old categories file as `general`:
+    /// what a candidate the model gave no scope is compared against.
+    pub fn save_fact(&self, context: &UserContext, content: &str) -> Memory {
+        let mut new = new_memory(content);
+        new.category = crate::memories::domain::category::Category::FactProject;
+        self.saver()
+            .execute(context, new, "test")
+            .expect("save should succeed")
     }
 
     /// Saves a memory through the real use case, returning it.

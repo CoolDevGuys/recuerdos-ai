@@ -92,10 +92,17 @@ impl AppliesTo {
         }
     }
 
+    /// How a prompt or a reply names it: `me`, `project quill`, `general`.
+    pub fn label(&self) -> String {
+        match self {
+            AppliesTo::Project(project) => format!("project {}", project.name),
+            AppliesTo::Me | AppliesTo::General => self.target().to_string(),
+        }
+    }
+
     /// Whether two memories share a scope: the same target and, for a
     /// project, the same project (by id, so a rename does not split it).
     /// Contradiction checks and merges only compare memories that do.
-    #[allow(dead_code)] // the conflict check and the merger use it from S2 on
     pub fn same_scope(&self, other: &AppliesTo) -> bool {
         match (self, other) {
             (AppliesTo::Project(a), AppliesTo::Project(b)) => a.id == b.id,

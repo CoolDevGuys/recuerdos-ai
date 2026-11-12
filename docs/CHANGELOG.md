@@ -5,6 +5,65 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Structured memories, phase S2: contradictions are caught at the door, and fixed or replaced on purpose
+
+Phase S2 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in
+[memory-model.md](memory-model.md#contradictions-amend-replace-or-keep-both).
+
+- **A save that contradicts a stored memory for the same scope is refused** as
+  `conflict` (`422`), naming the stored memory and its id, with `details.conflicts`
+  for clients. Compared only within the scope: your own memories for `me`, one
+  project's for that project, `general` for `general`. A project memory that
+  contradicts one of yours is stored, and the reply says it overrides your
+  preference there. A save the store already knows stores nothing: `200` with
+  `status: "already_known"`, `Already known: …` over MCP.
+  - With a model configured, it judges the nearest five memories in one call, which
+    also checks whether text filed as yours or as general is really one project's
+    (the model half of the scope check; "here the convention is…" is now caught).
+    One call per save at most, none for a project memory with nothing near it; an
+    outage falls back to the model-free rule rather than losing the save.
+  - Without a model, only a near repeat of a stored memory is stopped, with
+    `judged: false`. Measured on the default embedder, contradicting and compatible
+    pairs overlap in similarity, so the floor (0.75) sits above every compatible
+    pair rather than catching every contradiction.
+- **Three ways out**: `replaces` on a save (the user changed their mind: the old
+  memory is superseded, out of recall, kept in history), an amendment (the old one
+  was wrong), or `coexists_with` (both hold).
+- **Amending**: the new MCP tool `memory_update`, and `PATCH /v1/memories/{id}`
+  extended with `kind`, `topic`, `applies_to`, `goal_status` and `origin` (and
+  `subtopic`, `valid_until` as the new names of `subcategory`, `expires_at`). What a
+  memory becomes is held to the save rules (no secrets, allowed kinds, the scope
+  phrase list); the reply carries a `message`. Re-filing a memory under another
+  category no longer resets a structure someone stated.
+- **Goals close only when the user says so**: `goal_status` `achieved` or
+  `abandoned` with `origin` `user_said` / `user_confirmed`; `inferred` is refused
+  with `needs_confirmation`. A closed goal leaves recall, the profile and
+  consolidation, and stays in history.
+- **The AI pipeline produces the structure**: extraction and session distillation
+  ask the model for `kind`, `topic`, `applies_to` and `origin`, and file each memory
+  under the same rules, safely where a save would refuse: an inference about you is
+  returned in `suggestions` (outcome `needs_confirmation` when nothing else was
+  stored), never stored as yours; a credential is dropped; a project memory with no
+  known project is `general` and marked `needs_review`. `POST /v1/memories`,
+  `POST /v1/memories/batch` and `POST /v1/sessions/distill` read the
+  `X-Recuerdos-Project` headers (existing projects only).
+- **Reconciliation and consolidation stay inside a scope**: a candidate is only
+  reconciled against memories for the same scope, and duplicates are only merged
+  with others for the same scope, keeping it.
+- **MCP**: `memory_save` and `memory_save_batch` take `replaces` and
+  `coexists_with`, and their descriptions say how to answer a conflict. Batch items
+  the store already knew are listed apart from the stored ones.
+- **Web UI**: a conflict in **Add memory** names the stored memory and offers
+  **Replace it** or **Keep both**; saving something you already have says so.
+- **Python SDK**: `save_direct(…, replaces=, coexists_with=)`, `SavedMemory.status`
+  and `.replaced`; `update()` takes the structure and `goal_status` and returns an
+  `UpdatedMemory` with `message`; `RejectedError.conflicts` and `.judged`, and a
+  `422` is always a `RejectedError` (its `conflict` is not the `409` one).
+- **An extraction structure set** (`eval/extraction-structure.toml`, 16 cases in
+  English and Spanish) and a runner that needs a real model:
+  `cargo test --bin recuerdos-ai extraction_structure_set -- --ignored`.
+
 ### Structured memories, phase S1: every save states what it is and who it is true for
 
 Phase S1 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md). **A
@@ -53,7 +112,7 @@ The field reference is the new [docs/memory-model.md](memory-model.md).
   returns a `SavedMemory` with `message`; `RejectedError` (422) carries the rule's
   `code`; `Memory` gains the structure fields; `AppliesTo` is exported.
 - Unchanged in S1: the editor, bulk edits and category management still work on
-  categories (re-filing re-derives the structure), and raw text through
+  categories (re-filing re-derived the structure until S2), and raw text through
   `POST /v1/memories` and session distillation still goes through the pipeline,
   which learns the shape in S2.
 

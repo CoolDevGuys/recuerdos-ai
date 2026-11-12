@@ -52,7 +52,12 @@ Branch on `code`; `message` is for the human reading the log.
 | `forbidden` | 403 | Valid key, missing scope |
 | `not_found` | 404 | No such resource |
 | `conflict` | 409 | Violates a uniqueness rule |
+| *(a memory rule's code)* | 422 | A save or edit refused by a memory rule; see [memory-model.md](memory-model.md#when-a-save-is-refused) |
 | `internal` | 500 | Server fault |
+
+A `422` may carry `details`: for a `conflict` (the memory contradicts one already
+stored), the stored memories it names. A `422 conflict` and a `409 conflict` are
+different things; tell them apart by the status.
 
 `internal` responses always carry the literal message `"internal error"`.
 Details (paths, SQL, driver text) go to the server log with the request id
@@ -189,7 +194,16 @@ Runs the pipeline inline and answers `201` with what happened:
 ```
 
 For callers with nowhere to put a job id — the MCP tools use it, because
-an agent has to tell the user what happened in one turn. Everything else
+an agent has to tell the user what happened in one turn.
+
+Extraction gives every memory the same structure a direct save states, under the
+same rules. Send `X-Recuerdos-Project` (and `X-Recuerdos-Project-Remote`) to say
+which project the text is about; only a project you already have is used, since
+a job cannot ask whether a new one is meant. A project memory with no known
+project is filed as `general` and marked `needs_review`. Each memory is reconciled
+only against stored memories for the same scope. What the model only inferred
+about you is never stored as yours: it comes back in `suggestions`, with outcome
+`needs_confirmation` when nothing else was stored, for the agent to ask you about. Everything else
 should take the `202`. `understanding` is `false` when no provider is
 configured, so you can tell "extracted and reconciled" from "stored as
 sent".
@@ -265,6 +279,8 @@ curl -X POST localhost:7070/v1/memories:direct \
 | `valid_until` | for a plan | RFC 3339; in the future; not allowed on a goal |
 | `category` | no | The old category to also file it under; derived from kind and topic when left out |
 | `client`, `session_id` | no | Recorded as the memory's source |
+| `replaces` | no | The id of a stored memory this one replaces: the user changed their mind. It must be yours, active and filed for the same `applies_to`; it is superseded (out of recall, kept in history) |
+| `coexists_with` | no | Ids of stored memories the user said this does not replace: both hold, so they are not reported as conflicts |
 
 The old shape is refused: a body with only `category` gets `missing_field`, and
 `subcategory`, `confidence` and `expires_at` get `invalid_value` naming their
@@ -274,9 +290,10 @@ Headers `X-Recuerdos-Project` (a project name) and `X-Recuerdos-Project-Remote`
 (a normalised git remote, `github.com/acme/quill`) say which project the caller is
 working in; the `recuerdos-ai mcp` shim sends them.
 
-Responds `201` with the memory, plus `message` (how it was filed, to repeat to
-the user) and `notes` (`applies_to_defaulted`, `filed_from_document`,
-`project_created`):
+Responds `201` with the memory, plus `status: "stored"`, `message` (how it was
+filed, to repeat to the user), `notes` (`applies_to_defaulted`,
+`filed_from_document`, `project_created`, `replaced`, `overrides`) and, after a
+`replaces`, the superseded ids in `replaced`:
 
 ```json
 {
@@ -284,15 +301,42 @@ the user) and `notes` (`applies_to_defaulted`, `filed_from_document`,
   "content": "User forbids barrel files / index.ts re-exports",
   "kind": "preference", "topic": "coding",
   "applies_to": {"target": "me"}, "origin": "user_said",
+  "status": "stored",
   "message": "Saved as your personal coding preference (applies to you everywhere).",
   "notes": []
 }
 ```
 
-A rule that stops the save answers `422` with its code: `missing_field`,
-`invalid_value`, `unknown_topic`, `kind_target_mismatch`, `needs_confirmation`,
-`scope_contradiction`, `no_project`, `unknown_project` or `secret`. The message
-says how to fix it. See [memory-model.md](memory-model.md#when-a-save-is-refused).
+When a stored memory for the same scope already says this, nothing is written:
+the answer is `200` with `status: "already_known"` and the memory already stored.
+
+Before anything is written, the save is compared with the nearest stored memories
+for the same `applies_to` (and, for a project memory, with the user's own, which it
+may override). One that contradicts a stored memory is refused:
+
+```json
+{"error": {
+  "code": "conflict",
+  "message": "It contradicts what is stored for me: \"The user prefers mocks…\" (id 019f…). Ask the user which holds. …",
+  "details": {
+    "judged": true,
+    "conflicts": [{"id": "019f…", "content": "The user prefers mocks…", "kind": "preference",
+                   "applies_to": "me", "reason": "…"}]
+  }
+}}
+```
+
+With a language model configured, the model judges it (one call per save, none
+when there is nothing to compare and nothing to check). Without one, only a near
+repeat of a stored memory is stopped, with `judged: false`. Then: save again with
+`replaces` (changed their mind), amend the stored one with `PATCH` (it was wrong),
+or save again with `coexists_with` (both hold).
+
+Any other rule that stops the save also answers `422` with its code:
+`missing_field`, `invalid_value`, `unknown_topic`, `kind_target_mismatch`,
+`needs_confirmation`, `scope_contradiction`, `no_project`, `unknown_project` or
+`secret`. The message says how to fix it. See
+[memory-model.md](memory-model.md#when-a-save-is-refused).
 
 ### `POST /v1/memories/search`
 
@@ -427,10 +471,24 @@ back as `If-Match` on a `PATCH` to make the edit conditional.
 
 ### `PATCH /v1/memories/{id}`
 
-Requires `write`. Any of `content`, `category`, `subcategory`, `tags`,
-`expires_at`. Omitting a field leaves it alone; sending `null` for
-`subcategory` or `expires_at` clears it. Editing content re-embeds and
-re-indexes; so does editing the labels under `document_text = "enriched"`.
+Requires `write`. Amends a memory in place: it keeps its id, and the audit trail
+keeps what it said before. Any of:
+
+| Field | Notes |
+|---|---|
+| `content` | The corrected sentence |
+| `kind`, `topic`, `applies_to` | A new structure, as a save takes it. Moving a memory to another scope is done here, not with `replaces` |
+| `subtopic` (or `subcategory`), `tags`, `category` | Labels. Re-filing under another category leaves a stated structure alone |
+| `valid_until` (or `expires_at`) | `null` clears it |
+| `goal_status` | `achieved` or `abandoned` closes a goal; `active` reopens it. Closing needs `origin` `user_said` or `user_confirmed`: only the user closes a goal (`inferred` is refused with `needs_confirmation`). A closed goal leaves recall and the profile and stays in history |
+| `origin` | Who asked for the change. It becomes the memory's origin when its wording, kind or scope changes |
+
+Omitting a field leaves it alone. What the memory becomes is held to the same
+rules as a save (no secret, a kind its target allows, a plan keeps its end date…)
+and a refusal is a `422` with its code. An amendment is not checked for conflicts:
+it is how one is resolved. Editing content re-embeds and re-indexes; so does
+editing the labels under `document_text = "enriched"`. The response is the memory
+plus a `message` ("Updated; filed as your personal coding preference.").
 
 **Conditional edits.** With `If-Match: "<updated_at>"` (the `ETag` of a
 `GET`, `PATCH` or restore, or the `updated_at` of any listing), the edit

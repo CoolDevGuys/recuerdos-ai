@@ -39,6 +39,19 @@ pub struct IngestPayload {
     pub client: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The project the caller is working in, as its local client detected it
+    /// (the `X-Recuerdos-Project` headers). Only a project the user already
+    /// has is used: a job cannot ask whether a new one is meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectHint>,
+}
+
+/// A project as a client names it: the name, and its normalised remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectHint {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +180,7 @@ mod tests {
             tags: vec!["tooling".to_string()],
             client: Some("claude-code".to_string()),
             session_id: None,
+            project: None,
         };
 
         let json = serde_json::to_string(&payload).unwrap();

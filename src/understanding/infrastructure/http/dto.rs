@@ -37,6 +37,7 @@ impl From<IngestRequest> for IngestPayload {
             tags: request.tags,
             client: request.client,
             session_id: request.session_id,
+            project: None,
         }
     }
 }
@@ -80,6 +81,7 @@ impl BatchIngestItem {
             tags: self.tags,
             client,
             session_id: self.session_id,
+            project: None,
         }
     }
 }
@@ -117,6 +119,10 @@ pub struct BatchItemResult {
     /// Present only for an item that failed, carrying why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Inferences about the user that were not stored: ask the user, and
+    /// save what they confirm with origin `user_confirmed`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
 }
 
 /// The 202 answer: what to poll.
@@ -142,6 +148,10 @@ pub struct IngestedResponse {
     /// False when no provider is configured, so a caller can tell
     /// "extracted and reconciled" from "stored as sent".
     pub understanding: bool,
+    /// Inferences about the user that were not stored (plan D5): ask the
+    /// user, and save what they confirm with origin `user_confirmed`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -566,8 +566,17 @@ impl ConsolidationRunner {
         let mut builder = ClusterBuilder::new();
         for (left, left_vector) in vectors.iter().enumerate() {
             for (offset, right_vector) in vectors[left + 1..].iter().enumerate() {
-                if cosine(left_vector, right_vector) >= self.threshold {
-                    builder.link(group[left].id(), group[left + 1 + offset].id());
+                let right = left + 1 + offset;
+                // Only memories true for the same scope are ever merged:
+                // two projects' identical conventions are two facts, and a
+                // project's rule is not the user's (plan §9). Scope is an
+                // equivalence, so clusters linked this way never mix scopes.
+                let same_scope = group[left]
+                    .structure()
+                    .applies_to()
+                    .same_scope(group[right].structure().applies_to());
+                if same_scope && cosine(left_vector, right_vector) >= self.threshold {
+                    builder.link(group[left].id(), group[right].id());
                 }
             }
         }

@@ -27,6 +27,10 @@ pub struct ApiErrorBody {
 pub struct ApiErrorDetail {
     pub code: String,
     pub message: String,
+    /// Machine-readable context for a refusal: for a `conflict`, the stored
+    /// memories it contradicts. Absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl IntoResponse for RaError {
@@ -37,9 +41,17 @@ impl IntoResponse for RaError {
             RaError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             RaError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             RaError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
-            RaError::Rejected { code, message } => {
+            RaError::Rejected {
+                code,
+                message,
+                details,
+            } => {
                 let body = Json(ApiErrorBody {
-                    error: ApiErrorDetail { code, message },
+                    error: ApiErrorDetail {
+                        code,
+                        message,
+                        details,
+                    },
                 });
                 return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
             }
@@ -83,6 +95,7 @@ impl IntoResponse for RaError {
             error: ApiErrorDetail {
                 code: code.to_string(),
                 message,
+                details: None,
             },
         });
 
@@ -142,10 +155,10 @@ mod tests {
             ),
         ];
 
-        let rejected = RaError::Rejected {
-            code: "kind_target_mismatch".into(),
-            message: "a preference cannot apply to project".into(),
-        };
+        let rejected = RaError::rejected(
+            "kind_target_mismatch",
+            "a preference cannot apply to project",
+        );
         let (status, body) = parts(rejected).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(body["error"]["code"], "kind_target_mismatch");

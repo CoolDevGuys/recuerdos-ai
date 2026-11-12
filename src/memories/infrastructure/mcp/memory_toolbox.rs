@@ -68,8 +68,37 @@ pub struct SaveRequest {
     pub subtopic: Option<String>,
     pub tags: Vec<String>,
     pub valid_until: Option<DateTime<Utc>>,
+    /// The id of a stored memory this one replaces (the user changed their
+    /// mind).
+    pub replaces: Option<String>,
+    /// Ids of stored memories the user said this does not replace.
+    pub coexists_with: Vec<String>,
     /// Which client stored it, for the audit trail.
     pub client: Option<String>,
+}
+
+/// An amendment to a stored memory (`memory_update`). `None` leaves a field
+/// alone; `Some(None)` on `subtopic` or `valid_until` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateRequest {
+    pub id: String,
+    pub content: Option<String>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<SaveAppliesTo>,
+    pub subtopic: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
+    pub valid_until: Option<Option<DateTime<Utc>>>,
+    pub goal_status: Option<String>,
+    pub origin: Option<String>,
+}
+
+/// What an amendment did: the memory as it now is, and the daemon's
+/// sentence about it.
+#[derive(Debug, Clone)]
+pub struct UpdateOutcome {
+    pub memory: ToolMemory,
+    pub message: Option<String>,
 }
 
 /// What a save did, in the daemon's own words.
@@ -80,39 +109,25 @@ pub struct SaveRequest {
 /// it has never seen turns a future improvement into a broken client. An
 /// unrecognised status degrades to [`SaveStatus::Unknown`], which renders as
 /// the honest "something happened, details above" rather than an error.
-// Since the structured save (plan S1) a save either stores or is refused;
-// the empty outcomes below came from the extraction pipeline, which the save
-// tools no longer use. S2's conflict check reports `AlreadyKnown` again, and
-// decides what of the rest stays.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SaveStatus {
-    /// At least one memory was written.
+    /// The memory was written.
     Stored,
-    /// Nothing in the content was durable — small talk, an acknowledgement, a
-    /// step in the task.
-    NothingDurable,
-    /// The store already knew it, so nothing new was written.
+    /// A stored memory in the same scope already says this, so nothing new
+    /// was written.
     AlreadyKnown,
-    /// The store changed without a memory being written — a retraction
-    /// deleted, a candidate superseded something. Not a no-op.
-    ChangedWithoutStoring,
     /// The daemon did not say, or said something this client does not know.
     Unknown,
 }
 
-#[allow(dead_code)]
 impl SaveStatus {
-    /// Parses the daemon's `outcome` field. Anything unrecognised — including
-    /// its absence, from a daemon predating the field — is
-    /// [`SaveStatus::Unknown`] rather than a guess.
+    /// Parses the daemon's `status` field. Anything unrecognised — including
+    /// its absence — is [`SaveStatus::Unknown`] rather than a guess.
     pub fn from_wire(value: &serde_json::Value) -> Self {
         match value.as_str() {
             Some("stored") => Self::Stored,
-            Some("nothing_durable") => Self::NothingDurable,
             Some("already_known") => Self::AlreadyKnown,
-            Some("changed_without_storing") => Self::ChangedWithoutStoring,
             _ => Self::Unknown,
         }
     }
@@ -230,6 +245,9 @@ pub trait MemoryToolbox: Send + Sync {
     /// agent that reported "all saved" over a batch where one item failed
     /// would be telling the user something untrue.
     async fn save_batch(&self, requests: Vec<SaveRequest>) -> Result<BatchSaveOutcome>;
+
+    /// Amends a stored memory, under the same rules as a save.
+    async fn update(&self, request: UpdateRequest) -> Result<UpdateOutcome>;
 
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>>;
 

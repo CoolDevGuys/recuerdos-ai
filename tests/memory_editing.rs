@@ -334,7 +334,33 @@ async fn every_memory_carries_its_structure() {
     assert_eq!(response.status(), StatusCode::OK);
     let refiled: Value = response.json().await.unwrap();
 
-    assert_eq!(refiled["kind"], "procedure");
-    assert_eq!(refiled["topic"], "tech", "from the docker tag");
-    assert_eq!(refiled["applies_to"], json!({"target": "general"}));
+    // A stated structure outlives a re-filing: moving it to another
+    // category does not make the user's preference something else.
+    assert_eq!(refiled["category"], "skill");
+    assert_eq!(refiled["kind"], "preference");
+    assert_eq!(refiled["applies_to"], json!({"target": "me"}));
+
+    // The structure is edited by naming it, under the same rules.
+    let response = session
+        .patch(
+            id,
+            None,
+            json!({"kind": "rule", "applies_to": {"target": "general"}, "origin": "user_said"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let rescoped: Value = response.json().await.unwrap();
+    assert_eq!(rescoped["kind"], "rule");
+    assert_eq!(rescoped["applies_to"], json!({"target": "general"}));
+    assert_eq!(
+        rescoped["message"],
+        "Updated; filed as a general coding rule."
+    );
+
+    let response = session
+        .patch(id, None, json!({"applies_to": {"target": "project"}}))
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: Value = response.json().await.unwrap();
+    assert_eq!(refused["error"]["code"], "no_project");
 }

@@ -86,11 +86,25 @@ class Memory(_Model):
 class SavedMemory(Memory):
     """A memory just saved, with what the server says about how it filed it."""
 
+    #: ``stored``, or ``already_known``: a stored memory already says this,
+    #: nothing was written, and this is that memory.
+    status: str = "stored"
     #: The sentence to repeat to the user: "Saved as your personal coding
     #: preference (applies to you everywhere)."
     message: str = ""
-    #: ``applies_to_defaulted``, ``filed_from_document``, ``project_created``.
+    #: ``applies_to_defaulted``, ``filed_from_document``, ``project_created``,
+    #: ``replaced``, ``overrides``.
     notes: list[str] = Field(default_factory=list)
+    #: The ids this save superseded (``replaces``).
+    replaced: list[str] = Field(default_factory=list)
+
+
+class UpdatedMemory(Memory):
+    """A memory just amended, with the server's sentence about it."""
+
+    #: "Updated; filed as your personal coding preference." — and, for a
+    #: goal just closed, that it leaves recall.
+    message: str = ""
 
 
 class MatchDetail(_Model):

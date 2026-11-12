@@ -230,6 +230,57 @@ def test_a_rule_refusal_raises_rejected_with_its_code() -> None:
     assert refused.value.status == 422
 
 
+def test_a_conflict_is_a_rejection_with_the_stored_memories() -> None:
+    # "conflict" is also the 409 uniqueness code; a 422 is a memory rule's
+    # refusal whatever its code, and carries what it contradicts.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "error": {
+                    "code": "conflict",
+                    "message": "It contradicts what is stored for me",
+                    "details": {
+                        "judged": True,
+                        "conflicts": [{"id": "m-1", "content": "Prefers mocks"}],
+                    },
+                }
+            },
+        )
+
+    with pytest.raises(RejectedError) as refused:
+        client_for(handler).save_direct(
+            "Avoids mocks", kind="preference", topic="coding", origin="user_said"
+        )
+    assert refused.value.code == "conflict"
+    assert refused.value.judged
+    assert refused.value.conflicts[0]["id"] == "m-1"
+
+
+def test_replacing_and_amending_send_the_structured_fields() -> None:
+    bodies: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={**MEMORY, "message": "Updated."})
+
+    ra = client_for(handler)
+    ra.save_direct(
+        "Avoids mocks",
+        kind="preference",
+        topic="coding",
+        origin="user_said",
+        replaces="m-1",
+        coexists_with=["m-2"],
+    )
+    updated = ra.update("m-3", goal_status="achieved", origin="user_confirmed")
+
+    assert bodies[0]["replaces"] == "m-1"
+    assert bodies[0]["coexists_with"] == ["m-2"]
+    assert bodies[1] == {"goal_status": "achieved", "origin": "user_confirmed"}
+    assert updated.message == "Updated."
+
+
 def test_clearing_an_expiry_is_distinct_from_leaving_it_alone() -> None:
     # JSON cannot express the difference between "absent" and "null", so
     # the SDK gives it two different call shapes.
@@ -243,8 +294,8 @@ def test_clearing_an_expiry_is_distinct_from_leaving_it_alone() -> None:
     ra.update("an-id", content="revised")
     ra.update("an-id", clear_expiry=True)
 
-    assert "expires_at" not in bodies[0], "leaving it alone sent a null"
-    assert bodies[1]["expires_at"] is None, "clearing it did not send a null"
+    assert "valid_until" not in bodies[0], "leaving it alone sent a null"
+    assert bodies[1]["valid_until"] is None, "clearing it did not send a null"
 
 
 def test_saving_defaults_to_not_waiting() -> None:

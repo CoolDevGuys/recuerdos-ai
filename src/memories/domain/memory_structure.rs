@@ -78,7 +78,6 @@ impl GoalStatus {
         }
     }
 
-    #[allow(dead_code)] // recall and the profile read it from S2 on
     pub fn is_closed(&self) -> bool {
         !matches!(self, GoalStatus::Active)
     }

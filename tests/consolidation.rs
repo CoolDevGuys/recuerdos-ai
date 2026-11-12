@@ -72,6 +72,19 @@ impl Instance {
         }
     }
 
+    /// Stores a memory as sent, with no conflict check: the pipeline's
+    /// category-routed path, which is how duplicates reach the store for
+    /// consolidation to merge (the direct save refuses them now).
+    async fn seed(&self, content: &str) {
+        let (status, body) = self
+            .post(
+                "/v1/memories",
+                json!({"content": content, "category": "preference.coding", "wait": true}),
+            )
+            .await;
+        assert_eq!(status, 201, "{body}");
+    }
+
     async fn post(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
         let response = self
             .http
@@ -200,14 +213,7 @@ async fn five_phrasings_of_one_preference_become_one_memory() {
     // Identical content, so the deterministic local embedder puts them in
     // one cluster regardless of the configured threshold.
     for _ in 0..5 {
-        instance
-            .post(
-                "/v1/memories:direct",
-                common::structured(
-                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
-                ),
-            )
-            .await;
+        instance.seed("User prefers pnpm").await;
     }
     assert_eq!(instance.search("pnpm").await.len(), 5);
 
@@ -243,14 +249,7 @@ async fn a_dry_run_reports_what_it_would_merge_and_changes_nothing() {
     let instance = Instance::with_model(vec![]).await;
 
     for _ in 0..3 {
-        instance
-            .post(
-                "/v1/memories:direct",
-                common::structured(
-                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
-                ),
-            )
-            .await;
+        instance.seed("User prefers pnpm").await;
     }
 
     let output = consolidate(&instance, &instance.model.uri(), &["--dry-run"]);
@@ -287,14 +286,7 @@ async fn without_a_provider_consolidation_still_expires_and_decays_but_never_mer
     let instance = Instance::degraded().await;
 
     for _ in 0..3 {
-        instance
-            .post(
-                "/v1/memories:direct",
-                common::structured(
-                    json!({"content": "User prefers pnpm", "category": "preference.coding"}),
-                ),
-            )
-            .await;
+        instance.seed("User prefers pnpm").await;
     }
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_recuerdos-ai"))
@@ -487,12 +479,7 @@ async fn the_profile_read_serves_without_calling_the_model() {
     // `ProfileDigestWriter` and `ConsolidationRunner`.
     let instance = Instance::with_model(vec![]).await;
 
-    instance
-        .post(
-            "/v1/memories:direct",
-            common::structured(json!({"content": "prefers pnpm", "category": "preference.coding"})),
-        )
-        .await;
+    instance.seed("prefers pnpm").await;
 
     let first = instance.profile().await;
     assert!(first.starts_with("# Memory profile: alex"), "{first}");
@@ -519,14 +506,7 @@ async fn without_a_provider_the_profile_falls_back_to_assembly() {
     // memories listed rather than summarised.
     let instance = Instance::degraded().await;
 
-    instance
-        .post(
-            "/v1/memories:direct",
-            common::structured(
-                json!({"content": "User forbids barrel files", "category": "preference.coding"}),
-            ),
-        )
-        .await;
+    instance.seed("User forbids barrel files").await;
 
     let profile = instance.profile().await;
 

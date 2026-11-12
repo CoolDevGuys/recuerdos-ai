@@ -7,8 +7,9 @@ or offer one project's stack when you ask for your favourite framework.
 
 You state the structure when you save a memory: in `memory_save` over MCP,
 `POST /v1/memories:direct` over REST, `save_direct` in the Python SDK, and the
-**Add memory** form in the web UI. The daemon checks it against a few rules and
-refuses what does not fit, saying why and how to fix it. The design and its reasons
+**Add memory** form in the web UI. The daemon checks it against a few rules, and
+against what is already stored, and refuses what does not fit, saying why and how
+to fix it. The design and its reasons
 are in [ai-specs/memory-structure-plan.md](../ai-specs/memory-structure-plan.md).
 
 ## A save, field by field
@@ -132,6 +133,8 @@ The memory's confidence comes from its origin.
 | `tags` | Keywords for filtering | `["pnpm", "tooling"]` |
 | `valid_until` | When it stops being true; it leaves recall after this date. Required for a `plan`; not allowed on a `goal`. Over MCP a date (`2026-12-14`) means through the end of that day, UTC. | `"2026-12-14T23:59:59Z"` |
 | `category` | The old category to also file it under, while recall filters and the map still read categories. Derived from kind and topic when left out. | `"health.sleep"` |
+| `replaces` | The id of a stored memory this one replaces, when the user changed their mind. See [Contradictions](#contradictions-amend-replace-or-keep-both). | `"019f7c5a-…"` |
+| `coexists_with` | Ids of stored memories the user said this one does not replace: both hold. | `["019f7c5a-…"]` |
 
 ## Projects
 
@@ -151,10 +154,89 @@ A memory that applies to a project stores the project's id, not its name.
 - **The first save** to a project the daemon does not know is refused until you
   confirm it is new; then the project is created and its remote remembered.
 
+## Contradictions: amend, replace, or keep both
+
+Before a memory is stored, it is compared with the nearest stored memories **for
+the same scope**: your own memories for `me`, one project's for that project, and
+`general` for `general`. Kind and topic need not match; a `rule` can contradict a
+`preference`. Memories that were replaced, have expired, or are closed goals are
+not compared.
+
+| What the check finds | What happens |
+|---|---|
+| A stored memory says the opposite | Refused as `conflict`, naming it and its id |
+| A stored memory already says this | Nothing is stored; the reply is `Already known: …` (REST: `200`, `status: "already_known"`) |
+| A project memory contradicts one of your own | Stored. A project may make an exception, and the reply says it overrides your preference there |
+| Another project's memory says the opposite | Stored: projects do not contradict each other |
+
+**With a language model configured** (`[understanding].provider`), the model judges
+each neighbour as *contradicts*, *same* or *unrelated*. In the same call it also
+checks whether text filed as `me` or `general` is really about one project, which
+catches what the phrase list misses ("here the convention is…"). That is one
+model call per save at most, and none for a project memory with nothing near it.
+
+**Without a model**, similarity alone cannot tell "prefers tabs" from "prefers
+spaces" apart from "prefers Rust" and "prefers Go", so the check only stops a
+save that nearly repeats a stored memory, and says it could not judge
+(`judged: false`). Real contradiction checking needs a model.
+
+When a save is refused as a conflict, ask the user which holds:
+
+| The user says | What to do | Result |
+|---|---|---|
+| "I've changed my mind" | Save again with `replaces: "<id>"` | The new memory is stored; the old one is superseded: out of recall, kept in history |
+| "The old one was wrong" | Amend it: `memory_update` over MCP, `PATCH /v1/memories/{id}` over REST | Same memory, corrected; the audit trail keeps the old text |
+| "Both hold, in different cases" | Save again with `coexists_with: ["<id>"]`, or reword it so the case is clear | Two memories |
+| "Never mind" | Nothing | Nothing changes |
+
+`replaces` must name your own active memory with the same `applies_to`. Moving a
+memory to another scope is an amendment (change its `applies_to`), not a
+replacement.
+
+## Amending a memory
+
+`memory_update` (MCP) and `PATCH /v1/memories/{id}` (REST) change a memory in
+place: `content`, `kind`, `topic`, `applies_to`, `subtopic`, `tags`,
+`valid_until`, `goal_status`, `origin`. The same rules as a save apply to what it
+becomes, so it cannot be amended into a secret or a kind its target does not
+allow. An amendment is not checked for conflicts, because it is how one is
+resolved.
+
+### Closing a goal
+
+A goal stays `active` until **the user** says it was reached or given up:
+
+```jsonc
+{ "goal_status": "achieved", "origin": "user_confirmed" }   // or "abandoned"; "user_said"
+```
+
+An agent that only noticed it ("finished the race in 1:58") is refused with
+`needs_confirmation`, and should ask: *"It looks like you ran the half marathon.
+Shall I mark that goal as achieved?"* A closed goal leaves recall and the profile,
+and stays in history. `"active"` reopens it.
+
+## Memories the AI pipeline extracts
+
+Raw text sent to `POST /v1/memories` and sessions sent to `session_distill` are
+split into memories by the model, and each one gets the same structure, under the
+same rules, as a save. A job cannot ask anyone anything, so where a save would be
+refused it files the memory somewhere safe instead:
+
+- what the model only **inferred** about you is never stored as yours. It comes
+  back as a **suggestion** for the agent to ask you about;
+- a credential is dropped;
+- a project's rule with no known project is filed as `general`, and one that
+  names a kind its target does not allow is moved to one that fits. Both are
+  marked `needs_review`.
+
+Send the `X-Recuerdos-Project` header to say which project the text is about. The
+local MCP server does this for you. Only a project you already have is used.
+
 ## When a save is refused
 
 A refusal is HTTP `422` with a code, and over MCP a tool result beginning
-`Not saved (code):`. The message says what to change. Usually it means asking you.
+`Not saved (code):` (`Not updated (code):` for an amendment). The message says what
+to change. Usually it means asking you.
 
 | Code | Why | What to do |
 |---|---|---|
@@ -167,6 +249,7 @@ A refusal is HTTP `422` with a code, and over MCP a tool result beginning
 | `no_project` | `target: "project"` with no project known | Ask which project, and name it |
 | `unknown_project` | A project the daemon does not know | Ask whether it is new (`new_project: true`) or a known one under another name |
 | `secret` | It looks like it contains a password, token or key | Store how to reach it, not the secret |
+| `conflict` | It contradicts (or, without a model, nearly repeats) a stored memory for the same scope; `details.conflicts` names them | Ask the user, then use `replaces`, `memory_update` or `coexists_with` ([above](#contradictions-amend-replace-or-keep-both)) |
 
 The text checks (`scope_contradiction`, `secret`) are tuned to refuse only on a clear
 signal: on their labelled test sets, in English and Spanish, they refuse nothing they
