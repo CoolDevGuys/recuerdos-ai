@@ -426,6 +426,11 @@ Models ignore unknown response fields, so an SDK pinned to an older
 version keeps working against a newer daemon. Adding a response field is
 not a breaking change.
 
+**0.5.0 needs daemon 0.6.0 or later**: structured memories changed what a
+save sends and what a refusal returns, and the projects, topics and review
+calls do not exist on an older daemon. Against a 0.5.x daemon, stay on SDK
+0.4.0.
+
 ## Developing
 
 Everything runs in Docker, like the rest of the repo:

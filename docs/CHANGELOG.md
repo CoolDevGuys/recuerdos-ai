@@ -5,6 +5,21 @@ One entry per phase, backfilled as phases land.
 
 ## Unreleased
 
+### Python SDK 0.5.0
+
+The SDK for structured memories, released with daemon `v0.6.0` and needing it
+([sdk-python.md](sdk-python.md#compatibility)). A minor bump, because before 1.0 a
+breaking change takes the minor. It breaks callers of 0.4.0 in three places:
+
+- `save_direct()` takes `kind`, `topic`, `origin` and `applies_to`; a category-only save
+  is refused by the daemon.
+- `update()` returns `UpdatedMemory` (a `Memory` plus the server's `message`).
+- Every `422` is a `RejectedError`, carrying `code` and, for a conflict, `conflicts`.
+
+Everything added since 0.4.0 is in the S1–S5 entries below: `replaces` and
+`coexists_with`, structured `update()`, projects, topics, `bulk_edit()`, `suggest()`, and
+search's structure filters, `project` and `scope`.
+
 ### Structured memories, phase S5: the web UI speaks structure
 
 Phase S5 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), the last
