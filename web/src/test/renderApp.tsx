@@ -17,7 +17,15 @@ export const UNKNOWN_KEY = "ra_live_ffffffffffffffffffffffffffffffffffffffff";
 export const ALEX_MEMORIES: Memory[] = [
   memory({ id: "a", content: "The user prefers pnpm", tags: ["package-management"], updated_at: "2026-08-31T00:00:00Z" }),
   memory({ id: "b", content: "Testing follows TDD", subcategory: "testing", updated_at: "2026-08-12T00:00:00Z" }),
-  memory({ id: "c", content: "Frontend uses Next.js", category: "fact.project", updated_at: "2026-08-11T00:00:00Z" }),
+  memory({
+    id: "c",
+    content: "Frontend uses Next.js",
+    category: "fact.project",
+    kind: "fact",
+    topic: "work",
+    applies_to: { target: "project", project_name: "quill" },
+    updated_at: "2026-08-11T00:00:00Z",
+  }),
 ];
 
 export function standardServer(): FakeServer {

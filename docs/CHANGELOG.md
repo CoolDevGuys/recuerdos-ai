@@ -3,7 +3,288 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-## Unreleased
+## v0.6.0 — Structured memories: every memory says what it is, what it is about, and who it is true for
+
+The first final release since `v0.4.3`, so it also carries everything the `v0.5.0`
+release candidates brought (the recall measured on a real store in rc1–rc4, the web UI in
+rc5, and the paged list below): `v0.5.0` itself never had a final release.
+
+Until now a memory carried one category, which could not tell a project's rule from the
+user's own preference: a recall asking how the user likes things done got one project's
+conventions back. In `v0.6.0` every memory states its **kind** (preference, rule,
+convention, decision, fact…), its **topic**, **who it applies to** (the user everywhere,
+one project, or their general world) and **where it came from**. Saves are checked
+against rules that keep a project's conventions out of the user's preferences,
+contradictions are caught when they are saved, projects are first-class, and recall and
+the profile rank by the project the caller is in. The plan is
+[memory-structure-plan.md](../ai-specs/memory-structure-plan.md); the user's guide is
+[memory-model.md](memory-model.md).
+
+**Upgrading** (see [deployment.md](deployment.md#what-v060-does-on-its-first-start)):
+
+- *Breaking:* `POST /v1/memories:direct`, `memory_save` and `memory_save_batch` need the
+  structured shape (`kind`, `topic`, `applies_to`, `origin`); a category-only save is
+  refused with a message naming the new fields. `POST /v1/memories` (the pipeline) is
+  unchanged for callers.
+- *Breaking:* `GET /v1/map` groups by topic: `topics`, `topic_edges`, `topic` and
+  `?topic=` replace the category fields.
+- *Breaking:* the Python SDK needs `0.5.0`, and `0.5.0` needs this daemon.
+- *Behaviour change:* a save that contradicts or repeats a stored memory is refused as
+  `conflict` (or answered `already_known`); the agent asks the user, then replaces,
+  amends or keeps both. Recall demotes other projects' memories (`scope: "all"` turns it
+  off), and the profile is per project.
+- *On upgrade:* migrations V11 and V12 run, forward-only like every migration: back up
+  the store first if you might roll back. The first start then derives a structure for
+  every existing memory from its category, in one transaction; what it could not place
+  is marked `needs_review`, and the web UI's **Needs review** tab lists it. Nothing is
+  rewritten without the user's click, and no re-embedding is needed.
+- *On upgrade:* the stdio shim (`recuerdos-ai mcp`) detects the project from the folder
+  the harness starts it in; run the same version as the daemon.
+
+### Python SDK 0.5.0
+
+The SDK for structured memories, released with daemon `v0.6.0` and needing it
+([sdk-python.md](sdk-python.md#compatibility)). A minor bump, because before 1.0 a
+breaking change takes the minor. It breaks callers of 0.4.0 in three places:
+
+- `save_direct()` takes `kind`, `topic`, `origin` and `applies_to`; a category-only save
+  is refused by the daemon.
+- `update()` returns `UpdatedMemory` (a `Memory` plus the server's `message`).
+- Every `422` is a `RejectedError`, carrying `code` and, for a conflict, `conflicts`.
+
+Everything added since 0.4.0 is in the S1–S5 entries below: `replaces` and
+`coexists_with`, structured `update()`, projects, topics, `bulk_edit()`, `suggest()`, and
+search's structure filters, `project` and `scope`.
+
+### Structured memories, phase S5: the web UI speaks structure
+
+Phase S5 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), the last
+of `v0.6.0`. Explained for users in [web-ui.md](web-ui.md).
+
+- **The editor** edits what a memory is, what it is about, who it applies to and when it
+  ends, with help text for each; the category is no longer shown there. `plan` and an
+  end date are offered (a plan needs one, a goal takes none).
+- **Goals**: **Mark achieved**, **Abandon it**, **Reopen it** from the editor. A closed
+  goal leaves the current list and shows under **Closed goals**.
+- **The list** shows each memory's structure ("Convention · Coding · quill") and filters
+  by topic, kind, who it applies to, and status (current, needs review, closed goals,
+  expired, everything).
+- **Needs review** tab: the memories filed by a guess, with the tab counting them; bulk
+  filing, and **Suggest** (with a model) whose proposals are accepted one by one or all
+  at once. Nothing changes without a click.
+- **Projects** tab: rename, merge, and open a project's memories.
+- **Topics** tab: add your own topic, relabel any.
+- **Bulk edit** sets kind, topic and who memories apply to, or marks them reviewed, all
+  or nothing under the save rules.
+- **The map groups by topic and colours by kind** (D13), with a kind key. The eleven
+  kind colours were found by search and keep ΔE ≥ 18 between every pair under normal
+  vision and simulated protanopia, deuteranopia and tritanopia, with 3:1 contrast on
+  both canvases; the plan's fallback (shared hues) was not needed. Topic groups are
+  neutral, so colour means one thing.
+- **REST**: `GET /v1/topics`, `POST /v1/topics`, `PATCH /v1/topics/{id}`;
+  `POST /v1/memories:bulk` takes `set.kind`, `set.topic`, `set.applies_to` and
+  `set.reviewed`; `POST /v1/memories:suggest` (needs a model, `422 no_model` without);
+  `/v1/ping` reports `understanding`.
+- **Breaking: `GET /v1/map` groups by topic**: `topics`, `topic_edges`, `topic` and
+  `?topic=` replace `categories`, `category_edges`, `category` and `?category=`;
+  `detail` is `"topics"` above the detail limit.
+- **Python SDK**: `topics()`, `create_topic()`, `relabel_topic()`, `bulk_edit()`,
+  `suggest()`, and the `Topic`, `Suggestion` and `BulkResult` models.
+- **Playwright** covers the review queue, renaming a project, closing a goal and a
+  conflict shown to the user (10 of 10 against a real daemon).
+
+### Structured memories, phase S4: recall and the profile know which project you are in
+
+Phase S4 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in
+[memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
+
+- **Scope-aware recall**: the caller's project (the stdio shim's folder, the
+  `X-Recuerdos-Project` headers, or `project` in the request) ranks with the user's own
+  and general memories; another project's memories count half, in rank and in
+  relevance, unless the query names that project. Outside any project every project's
+  memories count half. E16–E18 pass end to end on the real embedder, with a control
+  test showing that without the demotion quill's memories would answer both "my coding
+  preferences" (relevance 0.39) and "my favourite frontend framework" (0.36).
+- **`scope: "all"`** on `POST /v1/memories/search` ranks every scope alike; the web UI
+  sends it, and `memory_forget` finds its candidates that way.
+- **Filters** on search, `memory_recall` and the SDK: `kinds`, `topics`, `targets`,
+  `projects`. `categories` still works.
+- **Recall lines name the scope**: `[convention · coding · quill]`,
+  `[preference · coding · me]`.
+- **The profile is per project**: about you, then the current project, then your
+  general world; other projects are left out. `GET /v1/profile?project=` or the
+  headers pick the project. With a model there is one cached digest per scope (`me`,
+  `general`, one per project), so a project convention regenerates only that
+  project's. V12 drops the old `coding` / `personal` digest rows; each user's profile is
+  assembled until their next refresh.
+- **Eval**: `eval/scope.toml` (17 memories, 12 cases; `just eval-scope`). Cases can
+  seed a structure, set the agent's `context` and `forbid` answers. On it: recall@5
+  100%, p@1 90.9%, MRR 93.9% (81.8% and 89.4% with the demotion off, which also fails
+  E18). The main set is unchanged against its baseline (0.0 on every gated number).
+- Python SDK: `search` takes the filters, `project` and `scope`; `SearchHit.relevance`
+  is declared.
+
+### Structured memories, phase S3: projects can be listed, renamed and merged
+
+Phase S3 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in [memory-model.md](memory-model.md#projects).
+
+- **REST**: `GET /v1/projects`, `GET /v1/projects/{project}`, `PATCH
+  /v1/projects/{project}` (rename) and `POST /v1/projects/{project}/merge`. A project
+  is named by id, name or alias.
+- **MCP**: `project_list`, `project_rename` and `project_merge`.
+- **Python SDK**: `projects()`, `project()`, `rename_project()`, `merge_project()`,
+  and the `Project` and `ProjectChange` models.
+- **A rename is one row**: memories store the project's id and follow; the old name
+  stays as an alias. Asked from inside a folder whose project is the new name, the
+  folder's remote is learned too.
+- **A repository renamed on its host** is no longer just "unknown project": the
+  refusal asks whether it is a rename of the project with the same owner's remote,
+  and `details.rename_of` names it (E15).
+- **Collisions**: a second repository with the same name (`me/quill` next to
+  `acme/quill`) is offered as its own project, `me-quill`, instead of being filed
+  under the first. Before, its remote was silently added to `quill`.
+- **Merging** moves every memory of one project into another, audited per memory;
+  the merged project's name and remotes find the one that stays.
+- `SaveNote::ProjectCreated` gained the name it would have had; the REST note is
+  still `project_created`.
+
+### Structured memories, phase S2: contradictions are caught at the door, and fixed or replaced on purpose
+
+Phase S2 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md), part of
+`v0.6.0`. Explained for users in
+[memory-model.md](memory-model.md#contradictions-amend-replace-or-keep-both).
+
+- **A save that contradicts a stored memory for the same scope is refused** as
+  `conflict` (`422`), naming the stored memory and its id, with `details.conflicts`
+  for clients. Compared only within the scope: your own memories for `me`, one
+  project's for that project, `general` for `general`. A project memory that
+  contradicts one of yours is stored, and the reply says it overrides your
+  preference there. A save the store already knows stores nothing: `200` with
+  `status: "already_known"`, `Already known: …` over MCP.
+  - With a model configured, it judges the nearest five memories in one call, which
+    also checks whether text filed as yours or as general is really one project's
+    (the model half of the scope check; "here the convention is…" is now caught).
+    One call per save at most, none for a project memory with nothing near it; an
+    outage falls back to the model-free rule rather than losing the save.
+  - Without a model, only a near repeat of a stored memory is stopped, with
+    `judged: false`. Measured on the default embedder, contradicting and compatible
+    pairs overlap in similarity, so the floor (0.75) sits above every compatible
+    pair rather than catching every contradiction.
+- **Three ways out**: `replaces` on a save (the user changed their mind: the old
+  memory is superseded, out of recall, kept in history), an amendment (the old one
+  was wrong), or `coexists_with` (both hold).
+- **Amending**: the new MCP tool `memory_update`, and `PATCH /v1/memories/{id}`
+  extended with `kind`, `topic`, `applies_to`, `goal_status` and `origin` (and
+  `subtopic`, `valid_until` as the new names of `subcategory`, `expires_at`). What a
+  memory becomes is held to the save rules (no secrets, allowed kinds, the scope
+  phrase list); the reply carries a `message`. Re-filing a memory under another
+  category no longer resets a structure someone stated.
+- **Goals close only when the user says so**: `goal_status` `achieved` or
+  `abandoned` with `origin` `user_said` / `user_confirmed`; `inferred` is refused
+  with `needs_confirmation`. A closed goal leaves recall, the profile and
+  consolidation, and stays in history.
+- **The AI pipeline produces the structure**: extraction and session distillation
+  ask the model for `kind`, `topic`, `applies_to` and `origin`, and file each memory
+  under the same rules, safely where a save would refuse: an inference about you is
+  returned in `suggestions` (outcome `needs_confirmation` when nothing else was
+  stored), never stored as yours; a credential is dropped; a project memory with no
+  known project is `general` and marked `needs_review`. `POST /v1/memories`,
+  `POST /v1/memories/batch` and `POST /v1/sessions/distill` read the
+  `X-Recuerdos-Project` headers (existing projects only).
+- **Reconciliation and consolidation stay inside a scope**: a candidate is only
+  reconciled against memories for the same scope, and duplicates are only merged
+  with others for the same scope, keeping it.
+- **MCP**: `memory_save` and `memory_save_batch` take `replaces` and
+  `coexists_with`, and their descriptions say how to answer a conflict. Batch items
+  the store already knew are listed apart from the stored ones.
+- **Web UI**: a conflict in **Add memory** names the stored memory and offers
+  **Replace it** or **Keep both**; saving something you already have says so.
+- **Python SDK**: `save_direct(…, replaces=, coexists_with=)`, `SavedMemory.status`
+  and `.replaced`; `update()` takes the structure and `goal_status` and returns an
+  `UpdatedMemory` with `message`; `RejectedError.conflicts` and `.judged`, and a
+  `422` is always a `RejectedError` (its `conflict` is not the `409` one).
+- **An extraction structure set** (`eval/extraction-structure.toml`, 16 cases in
+  English and Spanish) and a runner that needs a real model:
+  `cargo test --bin recuerdos-ai extraction_structure_set -- --ignored`.
+
+### Structured memories, phase S1: every save states what it is and who it is true for
+
+Phase S1 of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md). **A
+breaking change to the save API**, shipping with the rest of the plan as `v0.6.0`.
+The field reference is the new [docs/memory-model.md](memory-model.md).
+
+- **`POST /v1/memories:direct`, `memory_save` and `memory_save_batch` take the
+  structured shape**: `content`, `kind`, `topic`, `applies_to`
+  (`{"target": "me" | "project" | "general", "project_name", "new_project"}`),
+  `origin`, plus optional `subtopic`, `tags`, `valid_until` and `category`. The old
+  shape is refused by name: `category` alone gets `missing_field`, and
+  `subcategory`, `confidence` and `expires_at` get `invalid_value` naming their
+  replacement. The reply carries `message` ("Saved as your personal coding
+  preference (applies to you everywhere).") and `notes`.
+- **The rules every entry point enforces** (`StructuredMemorySaver`), each refusal a
+  `422` with a code and a fix:
+  - a kind only applies where it can (a preference is yours; a convention is a
+    project's) — `kind_target_mismatch`;
+  - an inferred memory about you needs your confirmation — `needs_confirmation`;
+  - a memory read from a document is filed under its project, and a preference in
+    one becomes a convention;
+  - text tied to one project ("the codebase", "este proyecto") cannot apply to you
+    or in general — `scope_contradiction`;
+  - no credentials — `secret`;
+  - a project memory needs a known project, or one you confirm is new —
+    `no_project`, `unknown_project`;
+  - a plan needs `valid_until`; a goal takes none; unknown topics are refused.
+  - With no `applies_to`, the default is the current project, else `general`, never
+    `me`, and the reply asks for confirmation.
+- **The two text checks are tuned for precision**, on labelled sets in English and
+  Spanish: the scope check and the secret check each refuse none of the texts they
+  should keep, and miss none of their test cases.
+- **Projects.** A per-user registry (V11's `projects` and `project_aliases`).
+  `recuerdos-ai mcp` detects the project of the folder it runs in —
+  `RECUERDOS_AI_PROJECT`, else the git `origin` remote (`github.com/acme/quill` →
+  `quill`, the same for every clone and worktree), else the repository's folder
+  name; nothing outside a repository — and sends it as `X-Recuerdos-Project` /
+  `X-Recuerdos-Project-Remote`. A remote is remembered as an alias.
+- **MCP**: the save tools' descriptions carry the field guidance; a refusal is a tool
+  result beginning `Not saved (code):`, which an agent reads and acts on.
+- **Web UI**: **Add memory** asks what it is, what it is about and who it applies
+  to, greys out what a kind cannot take, and shows a refusal without losing the
+  text. The category is derived for a direct save; custom categories stay
+  available to the AI path and the editor.
+- **Python SDK**: `save_direct(content, *, kind, topic, origin, applies_to=…)`
+  returns a `SavedMemory` with `message`; `RejectedError` (422) carries the rule's
+  `code`; `Memory` gains the structure fields; `AppliesTo` is exported.
+- Unchanged in S1: the editor, bulk edits and category management still work on
+  categories (re-filing re-derived the structure until S2), and raw text through
+  `POST /v1/memories` and session distillation still goes through the pipeline,
+  which learns the shape in S2.
+
+### Structured memories, phase S0: every memory has a kind, a topic and a scope
+
+The first phase of [memory-structure-plan.md](../ai-specs/memory-structure-plan.md):
+the model and the migration, with no change to how memories are saved yet.
+
+- **Migration V11** adds `kind`, `topic`, `target` (`me` / `project` /
+  `general`), `project_id`, `origin`, `goal_status` and `needs_review` to
+  memories, and the `projects`, `project_aliases` and `topics` tables.
+  Nothing is dropped: `category` and `subcategory` stay.
+- **On first start, every existing memory gets a structure** derived from its
+  category (plan §8), in one transaction, without touching `updated_at`.
+  What the mapping cannot place is flagged `needs_review`: every coding
+  preference (it may be one project's convention), and every project fact and
+  decision (the project is not on record). On a copy of the field store, all
+  225 memories were mapped, none to an illegal pair, and 185 of the 222 active
+  ones were flagged.
+- **Every memory the API returns carries it**: `kind`, `topic`, `applies_to`
+  (`{"target": …, "project_name": …}`), `origin`, `goal_status` (goals only)
+  and `needs_review`, in saves, reads, search hits, edits and the JSON export.
+  Until the save path takes a structure (S1), a new memory's comes from its
+  category, and re-filing it re-derives it.
+- Domain: `Kind` (with the kinds each target allows), `Topic`, `AppliesTo`,
+  `Origin`, `GoalStatus` and `MemoryStructure`, which refuses an illegal
+  kind × target pair and a goal status on anything but a goal.
 
 ### Web UI: the memory list is paged
 

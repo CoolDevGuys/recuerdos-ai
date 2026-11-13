@@ -32,9 +32,10 @@ LangChain ──SDK───▶ │               │  nightly: merge, decay, ex
 - 🔒 **Yours** — SQLite on your disk, runs offline, no account, Apache-2.0.
 - 🧩 **Any agent, any LLM** — REST + MCP, provider-agnostic, one shared memory.
 - 🧠 **Understands, not just stores** — splits, labels, and resolves contradictions.
+- 🧭 **Knows whose rule it is** — every memory says what it is (a preference, a project's convention, a decision…), what it is about and who it is true for: you everywhere, one project, or your world in general. A project's conventions never come back as your preferences, a contradiction is caught when it is saved, and recall and the profile follow the project you are working in. [docs/memory-model.md](docs/memory-model.md)
 - 🕸️ **Relational recall** — an entity graph recall hops over, reaching the memory that answers a question it shares no words with. Opt-in (`[graph].enabled`) since v0.5.0-rc4: it wins multi-hop questions about people, teams and ownership, and on a store of ordinary preferences it measured as displacing better matches.
 - 🎯 **Optional second opinion** — a local cross-encoder can re-read the head of the result list *together with* your query, the one thing the vector and keyword legs never do. +5.8 precision@1 on the eval set, for a 1.1 GB model — and 0 of 13 queries changed their top result on the first real store it was audited against, so it is off by default and the honest advice is to leave it off until your own audit says otherwise. `rerank audit` judges it on your store before you turn it on.
-- 🗺️ **See and curate it** — a browser UI at `/ui`, built into the daemon: a map of your memories that zooms from categories to single memories, plus editing, bulk edits and your own categories. [docs/web-ui.md](docs/web-ui.md)
+- 🗺️ **See and curate it** — a browser UI at `/ui`, built into the daemon: a map of your memories grouped by topic and coloured by kind, a review queue for memories filed by a guess, projects and topics to rename and relabel, goals to close, and bulk edits. [docs/web-ui.md](docs/web-ui.md)
 - ⚡ **Fast** — hybrid recall in tens of milliseconds at 100k memories.
 
 ---
@@ -265,8 +266,14 @@ Once the daemon is running, store something:
 ```bash
 curl -X POST localhost:7070/v1/memories:direct -H 'Content-Type: application/json' \
   -d '{"content": "User forbids barrel files / index.ts re-exports",
-       "category": "preference.coding"}'
+       "kind": "preference", "topic": "coding",
+       "applies_to": {"target": "me"}, "origin": "user_said"}'
 ```
+
+It answers with how it filed it — *"Saved as your personal coding preference
+(applies to you everywhere)."* — because a memory says what it is and who it is
+true for. That is what keeps one project's rules out of your own preferences; see
+[docs/memory-model.md](docs/memory-model.md).
 
 Then ask a question that shares almost none of its words:
 
@@ -470,6 +477,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 | 🚀 [deployment.md](docs/deployment.md) | Run it on a server, with HTTPS and auth |
 | 🌐 [api.md](docs/api.md) | Every REST endpoint and field |
 | 🔌 [mcp.md](docs/mcp.md) | MCP tools and the `memory://profile` resource |
+| 🧭 [memory-model.md](docs/memory-model.md) | What a memory is, who it is true for, and the save rules |
 | ⚙️ [configuration.md](docs/configuration.md) | Every config key |
 | 🖥️ [web-ui.md](docs/web-ui.md) | The browser UI at `/ui` |
 | 🐍 [sdk-python.md](docs/sdk-python.md) | The Python client |
@@ -483,10 +491,10 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ## 🗺️ Status
 
-**`v0.5.0-rc5`** — a release candidate for `v0.5.0`. The latest final release
-is `v0.4.3`. Used daily by its author since Phase 3: the API is stable enough
-to build on, and the storage format has migrated itself forward cleanly across
-every release.
+**`v0.6.0`** — structured memories. Used daily by its author since Phase 3:
+the storage format has migrated itself forward cleanly across every release, and
+`v0.6.0` is the one release that changed the save API on purpose (see
+[upgrading](docs/deployment.md#what-v060-does-on-its-first-start)).
 
 | Phase | Scope | |
 |---|---|:---:|
@@ -499,6 +507,7 @@ every release.
 | 6 — Release | SDK, docs, packaging | ✅ |
 | 7 — Capability upgrades | Budgeted consolidation, sub-labels, entity graph, recall quality, reranking | ✅ |
 | Web UI | Browse, curate and map memories at `/ui` | ✅ |
+| Structured memories | Kind, topic and scope on every memory; projects; conflicts; scope-aware recall | ✅ |
 
 **Shipped in `v0.2.0`:** a relational recall layer — a bi-temporal
 entity/relation graph that recall hops over as a third leg (on by default
@@ -513,17 +522,27 @@ a local cross-encoder that reads query and memory together, opt-in because
 it costs 1.1 GB and ~70 ms for the +5.8 precision@1 it earned. See the
 [CHANGELOG](docs/CHANGELOG.md#v040--recall-quality-and-an-optional-cross-encoder-reranker).
 
-**Coming in `v0.5.0`** (release candidates out now):
+**Shipped in `v0.6.0`:** structured memories, and everything the `v0.5.0`
+release candidates brought, which never had a final release of their own:
 
+- **Every memory says what it is and who it is true for** — a kind, a topic, and
+  whether it applies to you everywhere, to one project, or to your world in general.
+  Saves are checked so a project's conventions never land in your preferences, a
+  contradiction is refused with the memory it contradicts, projects can be renamed
+  and merged, and recall and the profile follow the project you are in. Existing
+  memories are given a structure on the first start, and the web UI's review queue
+  holds the guesses. See [memory-model.md](docs/memory-model.md) and the
+  [CHANGELOG](docs/CHANGELOG.md#v060--structured-memories-every-memory-says-what-it-is-what-it-is-about-and-who-it-is-true-for).
+  *Breaking:* direct saves need the new fields, and the Python SDK needs `0.5.0`.
 - **Recall measured on a real store, and tuned to it** (rc1–rc4). Memories
   are embedded together with their labels (`document_text = "enriched"`), the
   graph leg and the confidence × importance multiplier are off by default, and
   unused knobs are gone. On a frozen copy of a real 222-memory store, the rc4
   defaults lift precision@1 from 66.7 to 83.3. *Upgrading from v0.4:* a store built before rc4 needs one
   `recuerdos-ai reindex`; see [configuration.md](docs/configuration.md).
-- **A web UI at `/ui`** (rc5): a mental map of your memories that zooms from
-  categories to clusters to single memories, plus editing, bulk edits and
-  your own categories. See [docs/web-ui.md](docs/web-ui.md).
+- **A web UI at `/ui`** (rc5, extended in `v0.6.0`): a mental map of your memories,
+  editing, bulk edits, a review queue, projects and topics. See
+  [docs/web-ui.md](docs/web-ui.md).
 
 **On the roadmap:** Postgres/Qdrant storage backends, and
 user-visible collections/workspaces. See

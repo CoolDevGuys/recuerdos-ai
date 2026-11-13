@@ -1,6 +1,6 @@
 import { useId, useState, type FormEvent } from "react";
 import type { RecallHit } from "../../api/types";
-import { categoryLabel } from "../../domain/memories";
+import { describeStructure, topicLabelOf } from "../../domain/structureForm";
 import type { Outcome } from "../../state/memories";
 import { FieldError } from "../FieldError";
 import * as styles from "../styles";
@@ -22,12 +22,13 @@ export function RecallPanel({
   recall,
   onResults,
   onPick,
-  labelOf = categoryLabel,
+  labelOf = topicLabelOf,
 }: {
   recall: (query: string) => Promise<Outcome<RecallHit[]>>;
   /** The hits to highlight, or `null` to clear. */
   onResults: (hits: RecallHit[] | null) => void;
   onPick: (hit: RecallHit) => void;
+  /** A topic's words. */
   labelOf?: (id: string) => string;
 }) {
   const inputId = useId();
@@ -117,7 +118,7 @@ export function RecallPanel({
                     {index + 1}. {hit.memory.content}
                   </span>
                   <span className="mt-0.5 block text-xs text-slate-600 dark:text-slate-400">
-                    {Math.round(hit.relevance * 100)}% relevant · {labelOf(hit.memory.category)}
+                    {Math.round(hit.relevance * 100)}% relevant · {describeStructure(hit.memory, labelOf)}
                     {legs(hit) !== "" && ` · ${legs(hit)}`}
                   </span>
                 </button>

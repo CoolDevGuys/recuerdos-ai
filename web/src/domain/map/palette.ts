@@ -1,46 +1,67 @@
-import { hashUnit } from "./geometry";
-
 /**
- * How a category looks on the map: a colour *and* a glyph and its label,
- * never colour alone (owner's accessibility rule; plan §5.3).
+ * How things look on the map (ai-specs/memory-structure-plan.md D13: group by
+ * topic, colour by kind). A memory is coloured by its **kind** and carries the
+ * kind's glyph; a topic — the group a memory sits in — is a neutral disc with
+ * the topic's initial, so colour means one thing only. Never colour alone:
+ * the glyph and the label carry the meaning too (owner's accessibility rule).
  *
- * Every colour keeps at least 3:1 against both the light canvas (white)
- * and the dark one (slate-950). The eight built-ins were chosen from
- * Tailwind's mid-tones to stay apart under simulated protanopia,
- * deuteranopia and tritanopia as well as normal vision (CIELAB ΔE ≥ 14
- * for every pair, checked in palette.test.ts). Eight hues at one
- * lightness cannot all stay far apart for every viewer, which is why the
- * glyph and the label carry the meaning and colour only helps.
+ * The eleven kind colours were found by search (maximin over a 16-step RGB
+ * grid): every one keeps at least 3:1 against both the light canvas (white)
+ * and the dark one (slate-950), and every pair stays at CIELAB ΔE ≥ 18 under
+ * normal vision and simulated protanopia, deuteranopia and tritanopia (the
+ * test holds them to 14). The plan feared eleven could not all stay that far
+ * apart; they can.
  */
 export interface CategoryStyle {
   color: string;
   glyph: Glyph;
 }
 
-export type Glyph = "code" | "heart" | "diamond" | "folder" | "person" | "star" | "bolt" | "link" | "letter";
+export type Glyph =
+  | "code"
+  | "heart"
+  | "diamond"
+  | "folder"
+  | "person"
+  | "star"
+  | "bolt"
+  | "link"
+  | "letter"
+  | "ban"
+  | "check"
+  | "info"
+  | "list"
+  | "flag"
+  | "calendar";
 
-const BUILT_IN: Record<string, CategoryStyle> = {
-  "preference.coding": { color: "#7c3aed", glyph: "code" },
-  "preference.personal": { color: "#be123c", glyph: "heart" },
-  decision: { color: "#b45309", glyph: "diamond" },
-  "fact.project": { color: "#0369a1", glyph: "folder" },
-  "fact.person": { color: "#059669", glyph: "person" },
-  experience: { color: "#c026d3", glyph: "star" },
-  skill: { color: "#3b82f6", glyph: "bolt" },
-  reference: { color: "#64748b", glyph: "link" },
+const KIND: Record<string, CategoryStyle> = {
+  preference: { color: "#9900ff", glyph: "heart" },
+  rule: { color: "#aa3300", glyph: "ban" },
+  convention: { color: "#dd7711", glyph: "check" },
+  decision: { color: "#bb8855", glyph: "diamond" },
+  fact: { color: "#4499cc", glyph: "info" },
+  experience: { color: "#ff22bb", glyph: "star" },
+  learning: { color: "#885577", glyph: "bolt" },
+  procedure: { color: "#556644", glyph: "list" },
+  reference: { color: "#779988", glyph: "link" },
+  goal: { color: "#6644cc", glyph: "flag" },
+  plan: { color: "#9977ff", glyph: "calendar" },
 };
 
-/** For custom categories, picked by id hash; their glyph is their initial. */
-export const CUSTOM_COLORS = ["#65a30d", "#78716c", "#d97706", "#ec4899", "#4d7c0f", "#ef4444"];
+/** Every kind's style, in the order a legend lists them. */
+export const KIND_STYLES: Readonly<Record<string, CategoryStyle>> = KIND;
 
-/** The built-in categories' styles, for checks and legends. */
-export const BUILT_IN_STYLES: Readonly<Record<string, CategoryStyle>> = BUILT_IN;
+/** A topic group's colour: neutral, so colour on the map always means a kind. */
+export const TOPIC_COLOR = "#64748b";
 
-export function categoryStyle(id: string): CategoryStyle {
-  const builtIn = BUILT_IN[id];
-  if (builtIn !== undefined) return builtIn;
-  const color = CUSTOM_COLORS[Math.floor(hashUnit(id) * CUSTOM_COLORS.length)] ?? CUSTOM_COLORS[0]!;
-  return { color, glyph: "letter" };
+/** How a memory of `kind` looks; a kind this UI does not know is neutral. */
+export function kindStyle(kind: string): CategoryStyle {
+  return KIND[kind] ?? { color: TOPIC_COLOR, glyph: "letter" };
+}
+
+/** How a topic group looks: neutral, with the topic's initial. */
+export function categoryStyle(_topic: string): CategoryStyle {
+  return { color: TOPIC_COLOR, glyph: "letter" };
 }
 
 const PATHS: Record<Exclude<Glyph, "letter">, string> = {
@@ -52,6 +73,12 @@ const PATHS: Record<Exclude<Glyph, "letter">, string> = {
   star: '<path d="m12 2 3 7 7 .6-5.3 4.7L18.3 22 12 18l-6.3 4 1.6-7.7L2 9.6 9 9z" fill="#fff"/>',
   bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="#fff"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>',
+  ban: '<circle cx="12" cy="12" r="8" fill="none" stroke="#fff" stroke-width="2.6"/><path d="M6.5 6.5l11 11" stroke="#fff" stroke-width="2.6"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="#fff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  info: '<circle cx="12" cy="6.5" r="1.9" fill="#fff"/><path d="M12 10.5v8" stroke="#fff" stroke-width="3" stroke-linecap="round"/>',
+  list: '<path d="M5 7h14M5 12h14M5 17h14" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/>',
+  flag: '<path d="M6 21V4M6 4h11l-2.5 4L17 12H6" fill="#fff" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>',
+  calendar: '<rect x="4" y="6" width="16" height="14" rx="2" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M4 10h16M8 3v5M16 3v5" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/>',
 };
 
 /** The glyph as an SVG data URL (white on transparent), for the map's pictogram nodes. */

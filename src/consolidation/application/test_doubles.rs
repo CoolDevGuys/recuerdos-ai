@@ -23,15 +23,15 @@ impl ProfileDigestStore for InMemoryProfileDigestStore {
             .digests
             .lock()
             .expect("digest mutex poisoned")
-            .get(&(context.user_id(), domain.as_str().to_string()))
+            .get(&(context.user_id(), domain.key()))
             .cloned())
     }
 
     fn save(&self, context: &UserContext, domain: Domain, digest: &StoredDigest) -> Result<()> {
-        self.digests.lock().expect("digest mutex poisoned").insert(
-            (context.user_id(), domain.as_str().to_string()),
-            digest.clone(),
-        );
+        self.digests
+            .lock()
+            .expect("digest mutex poisoned")
+            .insert((context.user_id(), domain.key()), digest.clone());
         Ok(())
     }
 }

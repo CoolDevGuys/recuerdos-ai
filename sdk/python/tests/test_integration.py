@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from recuerdos_ai import Client, NotFoundError
+from recuerdos_ai import Client, NotFoundError, RejectedError
 
 pytestmark = pytest.mark.integration
 
@@ -24,19 +24,96 @@ def test_the_daemon_is_reachable(ra: Client) -> None:
 def test_save_direct_then_get_round_trips_every_field(ra: Client, tag: str) -> None:
     saved = ra.save_direct(
         "User forbids barrel files and index.ts re-exports",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag, "typescript"],
-        confidence=0.9,
         client="sdk-test",
     )
 
     assert saved.content == "User forbids barrel files and index.ts re-exports"
     assert saved.category == "preference.coding"
     assert tag in saved.tags
-    assert abs(saved.confidence - 0.9) < 1e-6
+    assert saved.kind == "preference"
+    assert saved.applies_to is not None and saved.applies_to.target == "me"
+    assert saved.message.startswith("Saved as your personal coding preference")
 
     fetched = ra.get(saved.id)
-    assert fetched == saved, "the model does not survive a round trip"
+    assert fetched.model_dump() == saved.model_dump(
+        exclude={"message", "notes", "status", "replaced"}
+    ), "the model does not survive a round trip"
+
+
+def test_a_rule_refusal_carries_its_code(ra: Client, tag: str) -> None:
+    # An inferred preference is the user's to confirm: the server refuses
+    # it, and says so in a way a caller can branch on.
+    with pytest.raises(RejectedError) as refused:
+        ra.save_direct(
+            "Prefers small pull requests",
+            kind="preference",
+            topic="coding",
+            applies_to="me",
+            origin="inferred",
+            tags=[tag],
+        )
+    assert refused.value.code == "needs_confirmation"
+    assert refused.value.status == 422
+
+
+def test_a_change_of_mind_replaces_the_old_memory(ra: Client, tag: str) -> None:
+    # Without a model the daemon stops only near-repeats, so a pair this
+    # close is refused; the user says they changed their mind.
+    old = ra.save_direct(
+        f"The user prefers tabs for indentation in {tag}",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+    with pytest.raises(RejectedError) as refused:
+        ra.save_direct(
+            f"The user prefers spaces for indentation in {tag}",
+            kind="preference",
+            topic="coding",
+            applies_to="me",
+            origin="user_said",
+            tags=[tag],
+        )
+    assert refused.value.code == "conflict"
+    assert any(c["id"] == old.id for c in refused.value.conflicts)
+
+    new = ra.save_direct(
+        f"The user prefers spaces for indentation in {tag}",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+        replaces=old.id,
+    )
+    assert new.replaced == [old.id]
+    assert ra.get(old.id).superseded_by == new.id
+
+
+def test_a_goal_is_closed_only_by_the_user(ra: Client, tag: str) -> None:
+    goal = ra.save_direct(
+        f"The user's goal is to learn the cello ({tag})",
+        kind="goal",
+        topic="lifestyle",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+    with pytest.raises(RejectedError) as refused:
+        ra.update(goal.id, goal_status="achieved", origin="inferred")
+    assert refused.value.code == "needs_confirmation"
+
+    closed = ra.update(goal.id, goal_status="achieved", origin="user_confirmed")
+    assert closed.goal_status == "achieved"
+    assert "closed as achieved" in closed.message
 
 
 def test_the_core_loop_save_then_recall_by_meaning(ra: Client, tag: str) -> None:
@@ -44,6 +121,10 @@ def test_the_core_loop_save_then_recall_by_meaning(ra: Client, tag: str) -> None
     # find it with another.
     ra.save_direct(
         "User prefers pnpm and never uses npm or yarn",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -59,7 +140,11 @@ def test_recall_finds_an_exact_identifier(ra: Client, tag: str) -> None:
     # The keyword leg's reason for existing: a vector alone blurs
     # identifiers into their neighbourhood.
     ra.save_direct(
-        "Prefer useQuery over manual fetch effects in this codebase",
+        "Prefers useQuery over manual fetch effects",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -72,8 +157,24 @@ def test_recall_finds_an_exact_identifier(ra: Client, tag: str) -> None:
 
 
 def test_search_filters_narrow_rather_than_widen(ra: Client, tag: str) -> None:
-    ra.save_direct("A coding preference", category="preference.coding", tags=[tag])
-    ra.save_direct("A project fact", category="fact.project", tags=[tag])
+    ra.save_direct(
+        "A coding preference",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        category="preference.coding",
+        tags=[tag],
+    )
+    ra.save_direct(
+        "A project fact",
+        kind="fact",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="fact.project",
+        tags=[tag],
+    )
 
     everything = ra.search("a", tags=[tag], limit=50)
     only_facts = ra.search("a", tags=[tag], categories=["fact.project"], limit=50)
@@ -90,8 +191,14 @@ def test_search_report_agrees_with_the_server_about_floor_and_stage(
     # parses into the fields the SDK promises — and it earns its keep here,
     # because the floor the server reports is not always the configured
     # default, which a unit test has no way to find out.
+    # Not another pnpm sentence: the core-loop test stores one, and a near
+    # repeat in the same scope is refused as a conflict.
     ra.save_direct(
-        "User prefers pnpm over npm for JavaScript packages",
+        "User prefers uv over pip for Python packages",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -123,7 +230,15 @@ def test_search_report_agrees_with_the_server_about_floor_and_stage(
 
 
 def test_a_memory_can_be_edited_and_forgotten(ra: Client, tag: str) -> None:
-    saved = ra.save_direct("original wording", category="reference", tags=[tag])
+    saved = ra.save_direct(
+        "original wording",
+        kind="reference",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="reference",
+        tags=[tag],
+    )
 
     edited = ra.update(saved.id, content="revised wording", tags=[tag, "edited"])
     assert edited.content == "revised wording"
@@ -180,6 +295,10 @@ def test_the_profile_is_markdown_and_mentions_a_stored_memory(
 ) -> None:
     ra.save_direct(
         "User writes commit messages in the imperative mood",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
         category="preference.coding",
         tags=[tag],
     )
@@ -191,7 +310,15 @@ def test_the_profile_is_markdown_and_mentions_a_stored_memory(
 
 
 def test_export_returns_both_formats(ra: Client, tag: str) -> None:
-    ra.save_direct("An exportable memory", category="reference", tags=[tag])
+    ra.save_direct(
+        "An exportable memory",
+        kind="reference",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        category="reference",
+        tags=[tag],
+    )
 
     markdown = ra.export()
     as_json = ra.export(format="json")
@@ -210,3 +337,103 @@ def test_distillation_without_a_provider_refuses_and_says_why(ra: Client) -> Non
         ra.distill_session("a long transcript of a session that went nowhere")
 
     assert "[understanding].provider" in str(caught.value)
+
+
+def test_a_project_is_renamed_and_merged(ra: Client, tag: str) -> None:
+    def rule(content: str, project: str) -> None:
+        ra.save_direct(
+            content,
+            kind="rule",
+            topic="coding",
+            applies_to={
+                "target": "project",
+                "project_name": project,
+                "new_project": True,
+            },
+            origin="user_said",
+            tags=[tag],
+        )
+
+    rule("Migrations are forward-only", f"{tag}-quill")
+    rule("The fork releases from its own main", f"{tag}-fork")
+
+    renamed = ra.rename_project(f"{tag}-quill", f"{tag}-app")
+    assert renamed.previous == f"{tag}-quill"
+    assert renamed.project.memories == 1
+    assert ra.project(f"{tag}-quill").name == f"{tag}-app", "the old name finds it"
+
+    merged = ra.merge_project(f"{tag}-fork", f"{tag}-app")
+    assert merged.moved == 1
+    assert merged.project.memories == 2
+    names = [project.name for project in ra.projects()]
+    assert f"{tag}-app" in names and f"{tag}-fork" not in names
+
+    with pytest.raises(RejectedError) as refused:
+        ra.project(f"{tag}-nope")
+    assert refused.value.code == "unknown_project"
+
+
+def test_search_filters_by_structure_and_ranks_by_project(ra: Client, tag: str) -> None:
+    ra.save_direct(
+        "Command handlers are named after the command they run",
+        kind="convention",
+        topic="coding",
+        applies_to={
+            "target": "project",
+            "project_name": f"{tag}-q",
+            "new_project": True,
+        },
+        origin="user_said",
+        tags=[tag],
+    )
+    ra.save_direct(
+        "The user prefers short handler names",
+        kind="preference",
+        topic="coding",
+        applies_to="me",
+        origin="user_said",
+        tags=[tag],
+    )
+
+    conventions = ra.search("handler names", kinds=["convention"], tags=[tag])
+    assert [hit.kind for hit in conventions] == ["convention"]
+
+    mine = ra.search("handler names", targets=["me"], tags=[tag])
+    assert [hit.content for hit in mine] == ["The user prefers short handler names"]
+
+    inside = ra.search(
+        "how are command handlers named",
+        project=f"{tag}-q",
+        tags=[tag],
+        min_relevance=0.0,
+    )
+    outside = ra.search("how are command handlers named", tags=[tag], min_relevance=0.0)
+    relevance = {
+        name: next(h.relevance for h in hits if h.kind == "convention")
+        for name, hits in (("inside", inside), ("outside", outside))
+    }
+    assert relevance["outside"] < relevance["inside"], relevance
+
+
+def test_topics_and_the_review_queue(ra: Client, tag: str) -> None:
+    topic = f"{tag}-lab"
+    created = ra.create_topic(topic, label="Lab")
+    assert created.label == "Lab"
+    assert any(t.id == topic for t in ra.topics())
+
+    saved = ra.save_direct(
+        "The NAS has 40 TB of disks",
+        kind="fact",
+        topic="coding",
+        applies_to="general",
+        origin="user_said",
+        tags=[tag],
+    )
+    result = ra.bulk_edit([saved.id], kind="reference", topic=topic, reviewed=True)
+    assert result.changed == 1
+    assert result.memories[0].kind == "reference"
+    assert result.memories[0].topic == topic
+
+    with pytest.raises(RejectedError) as refused:
+        ra.suggest([saved.id])
+    assert refused.value.code == "no_model"

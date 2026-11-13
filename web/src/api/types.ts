@@ -7,7 +7,20 @@ export type Scope = "read" | "write" | "admin";
 export interface Identity {
   user: string;
   scopes: Scope[];
+  /** A language model is configured: Suggest works. Absent means no. */
+  understanding?: boolean;
 }
+
+/** Who or what a memory is true for (ai-specs/memory-structure-plan.md §3). */
+export type Target = "me" | "project" | "general";
+
+export interface AppliesTo {
+  target: Target;
+  /** With `target: "project"`, the project's name. */
+  project_name: string | null;
+}
+
+export type GoalStatus = "active" | "achieved" | "abandoned";
 
 /** One memory, as the export, `GET`/`PATCH /v1/memories/{id}` and restore return it. */
 export interface Memory {
@@ -21,6 +34,57 @@ export interface Memory {
   /** Also the memory's version: sent back as `If-Match` to edit it. */
   updated_at: string;
   superseded_by: string | null;
+  /** What sort of statement it is: preference, rule, convention… */
+  kind: string;
+  /** What it is about: a topic id. */
+  topic: string;
+  applies_to: AppliesTo;
+  /** Where it came from: user_said, user_confirmed, inferred, document. */
+  origin: string;
+  /** For goals only. A closed goal (achieved, abandoned) leaves recall. */
+  goal_status: GoalStatus | null;
+  /** Filed by a guess (the migration from categories): the review queue lists it. */
+  needs_review: boolean;
+  /** When it stops being true; past it, it leaves recall. */
+  valid_until: string | null;
+}
+
+/** `GET /v1/topics`: one topic a memory can be about. */
+export interface Topic {
+  id: string;
+  /** The user's label, else the default wording. */
+  label: string;
+  default_label: string;
+  built_in: boolean;
+  /** Active memories about it. */
+  count: number;
+}
+
+/** `GET /v1/projects`: one project memories can apply to. */
+export interface Project {
+  id: string;
+  name: string;
+  /** Remotes, folder names and former names that also find it. */
+  aliases: string[];
+  /** Active memories filed under it. */
+  memories: number;
+}
+
+/** What renaming or merging a project did. */
+export interface ProjectChange {
+  project: Project;
+  /** The daemon's sentence about it. */
+  message: string;
+  moved: number;
+}
+
+/** `POST /v1/memories:suggest`: what one memory may really be. */
+export interface Suggestion {
+  id: string;
+  kind: string;
+  topic: string;
+  applies_to: AppliesTo;
+  reason: string;
 }
 
 /** `GET /v1/categories`: one category a memory can be filed under. */
@@ -59,6 +123,12 @@ export interface BulkEdit {
   subcategory?: string | null;
   addTags?: string[];
   removeTags?: string[];
+  kind?: string;
+  topic?: string;
+  /** A known project only, for `target: "project"`. */
+  appliesTo?: AppliesTo;
+  /** Confirms each memory's structure as it is: it leaves the review queue. */
+  reviewed?: boolean;
 }
 
 export interface BulkResult {
@@ -75,8 +145,51 @@ export interface MemoryFields {
   tags: string[];
 }
 
+/**
+ * What a new memory is, what it is about and who it is true for
+ * (ai-specs/memory-structure-plan.md §3). The daemon applies the rules.
+ */
+export interface MemoryStructure {
+  kind: string;
+  topic: string;
+  applies_to: { target: "me" | "project" | "general"; project_name?: string; new_project?: boolean };
+  origin: "user_said";
+  /** A stored memory this one replaces: the user changed their mind. */
+  replaces?: string;
+  /** Stored memories the user said this does not replace: both hold. */
+  coexists_with?: string[];
+  /** When it stops being true (RFC 3339). Required for a plan. */
+  valid_until?: string;
+}
+
+/** What a save did: stored it, or found a stored memory already says it. */
+export interface SavedMemory {
+  memory: Memory;
+  status: "stored" | "already_known";
+  /** The daemon's sentence about how it was filed. */
+  message: string;
+}
+
+/** A stored memory a save contradicts (a 422 `conflict`). */
+export interface ConflictingMemory {
+  id: string;
+  content: string;
+}
+
+/** An edit of what a memory is (PATCH): only what changed. */
+export interface StructurePatch {
+  kind?: string;
+  topic?: string;
+  applies_to?: { target: Target; project_name?: string; new_project?: boolean };
+  goal_status?: GoalStatus;
+  /** `null` removes the end date. */
+  valid_until?: string | null;
+  /** Who asked for the change: the user, here. Required to close a goal. */
+  origin?: "user_said";
+}
+
 /** An edit: only the fields that changed. */
-export type MemoryPatch = Partial<MemoryFields>;
+export type MemoryPatch = Partial<MemoryFields> & StructurePatch;
 
 /** What the understanding pipeline did with a submission (`POST /v1/memories`, `wait: true`). */
 export type IngestOutcome = "stored" | "nothing_durable" | "already_known" | "changed_without_storing";
@@ -115,7 +228,11 @@ export interface MapData {
   detail: "memories" | "categories";
   /** Memories in scope, whether or not `nodes` carries them. */
   total: number;
-  /** The category this map is limited to, or `null` for the whole store. */
+  /**
+   * The topic this map is limited to, or `null` for the whole store. The map
+   * groups by topic (plan D13); the wire calls the groups `topics`, and the
+   * map code calls each group a "category" internally.
+   */
   category: string | null;
   nodes: Memory[];
   edges: MapEdge[];

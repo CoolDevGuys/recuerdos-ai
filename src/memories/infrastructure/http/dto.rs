@@ -5,68 +5,243 @@
 //! are where that promise is written down.
 
 use crate::memories::application::memory_recaller::{RerankSkip, RerankTrace};
-use crate::memories::domain::category::Category;
-use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
+use crate::memories::application::project_curator::{Merged, ProjectView, Renamed};
+use crate::memories::application::structured_memory_saver::{
+    AppliesToInput, DetectedProject, SaveNote, SaveResult, StructuredSave,
+};
+use crate::memories::application::structured_memory_updater::{StructuredEdit, UpdatedMemory};
+use crate::memories::application::topic_curator::TopicView;
+use crate::memories::domain::applies_to::AppliesTo;
+use crate::memories::domain::memory::{Memory, MemorySource};
 use crate::memories::domain::recall_ranker::ScoredMemory;
-use crate::shared::error::Result;
+use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-fn default_confidence() -> f32 {
-    1.0
-}
-
+/// `POST /v1/memories:direct`: a memory and its structure
+/// (ai-specs/memory-structure-plan.md §3.1). `kind`, `topic` and `origin` are
+/// required; the rules in `StructuredMemorySaver` decide the rest.
 #[derive(Debug, Deserialize)]
 pub struct SaveMemoryRequest {
     pub content: String,
-    /// Defaults to `fact.project` when a client has no opinion. Phase 4's
-    /// pipeline is what makes this a real classification; a verbatim save
-    /// should not be forced to guess.
-    pub category: Option<String>,
-    pub subcategory: Option<String>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<AppliesToRequest>,
+    pub origin: Option<String>,
+    pub subtopic: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default = "default_confidence")]
-    pub confidence: f32,
+    pub valid_until: Option<DateTime<Utc>>,
+    /// Optional while categories still drive recall filters and the map;
+    /// derived from kind and topic when absent.
+    pub category: Option<String>,
     pub client: Option<String>,
     pub session_id: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
+    /// The id of a stored memory this one replaces: the user changed their
+    /// mind. Same scope only; the old one is kept in history.
+    pub replaces: Option<String>,
+    /// Ids of stored memories the user said this does not replace: both
+    /// hold, so they are not reported as conflicts.
+    #[serde(default)]
+    pub coexists_with: Vec<String>,
+    // Fields of the old shape, refused by name so a client learns the new
+    // one instead of having its value silently dropped.
+    subcategory: Option<serde_json::Value>,
+    confidence: Option<serde_json::Value>,
+    expires_at: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppliesToRequest {
+    pub target: Option<String>,
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub new_project: bool,
 }
 
 impl SaveMemoryRequest {
-    pub fn into_new_memory(self, extra_categories: &[String]) -> Result<NewMemory> {
-        let category = match self.category.as_deref() {
-            Some(raw) => Category::parse_with_extras(raw, extra_categories)?,
-            None => Category::FactProject,
-        };
-
-        Ok(NewMemory {
+    pub fn into_structured(self, detected: Option<DetectedProject>) -> Result<StructuredSave> {
+        let retired = [
+            (
+                self.subcategory.is_some(),
+                "subcategory",
+                "it is called subtopic now",
+            ),
+            (
+                self.confidence.is_some(),
+                "confidence",
+                "it is derived from origin now",
+            ),
+            (
+                self.expires_at.is_some(),
+                "expires_at",
+                "it is called valid_until now",
+            ),
+        ];
+        if let Some((_, field, why)) = retired.iter().find(|(present, _, _)| *present) {
+            return Err(RaError::rejected(
+                "invalid_value",
+                format!("{field} is no longer accepted: {why}."),
+            ));
+        }
+        if self.kind.is_none() && self.topic.is_none() && self.origin.is_none() {
+            return Err(RaError::rejected(
+                "missing_field",
+                "This is the old save shape. A memory now needs kind, topic, applies_to and \
+                 origin; a category alone is not enough. See docs/memory-model.md.",
+            ));
+        }
+        Ok(StructuredSave {
             content: self.content,
-            category,
-            subcategory: self.subcategory,
+            kind: self.kind,
+            topic: self.topic,
+            applies_to: self.applies_to.map(|applies_to| AppliesToInput {
+                target: applies_to.target,
+                project_name: applies_to.project_name,
+                new_project: applies_to.new_project,
+            }),
+            origin: self.origin,
+            subtopic: self.subtopic,
             tags: self.tags,
-            entities: Vec::new(),
-            confidence: self.confidence,
+            valid_until: self.valid_until,
+            category: self.category,
             source: MemorySource {
                 client: self.client,
                 session_id: self.session_id,
             },
-            expires_at: self.expires_at,
+            detected_project: detected,
+            replaces: self.replaces,
+            coexists_with: self.coexists_with,
         })
     }
 }
 
+/// A saved memory, plus what to tell the user about how it was filed — or,
+/// for `already_known`, the stored memory that already says it.
+#[derive(Debug, Serialize)]
+pub struct SavedMemoryResponse {
+    #[serde(flatten)]
+    pub memory: MemoryResponse,
+    /// `stored` (201), or `already_known` (200): nothing was written, and the
+    /// memory shown is the one already stored.
+    pub status: &'static str,
+    /// The sentence to repeat to the user: "Saved as your personal coding
+    /// preference (applies to you everywhere)."
+    pub message: String,
+    /// Machine-readable notes: `applies_to_defaulted`, `filed_from_document`,
+    /// `project_created`, `replaced`, `overrides`.
+    pub notes: Vec<&'static str>,
+    /// The ids this save superseded (`replaces`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<String>,
+}
+
+impl From<&SaveResult> for SavedMemoryResponse {
+    fn from(result: &SaveResult) -> Self {
+        match result {
+            SaveResult::Saved(saved) => Self {
+                memory: MemoryResponse::from(&saved.memory),
+                status: "stored",
+                message: saved.message(),
+                notes: saved
+                    .notes
+                    .iter()
+                    .map(|note| match note {
+                        SaveNote::AppliesToDefaulted => "applies_to_defaulted",
+                        SaveNote::FiledFromDocument => "filed_from_document",
+                        SaveNote::ProjectCreated { .. } => "project_created",
+                        SaveNote::Replaced { .. } => "replaced",
+                        SaveNote::Overrides { .. } => "overrides",
+                    })
+                    .collect(),
+                replaced: saved
+                    .notes
+                    .iter()
+                    .filter_map(|note| match note {
+                        SaveNote::Replaced { id, .. } => Some(id.to_string()),
+                        _ => None,
+                    })
+                    .collect(),
+            },
+            SaveResult::AlreadyKnown { memory, .. } => Self {
+                memory: MemoryResponse::from(memory),
+                status: "already_known",
+                message: result.message(),
+                notes: Vec::new(),
+                replaced: Vec::new(),
+            },
+        }
+    }
+}
+
+/// `PATCH /v1/memories/{id}`: every field optional, and an omitted field is
+/// left alone. The structure fields are held to the same rules as a save.
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemoryRequest {
     pub content: Option<String>,
     pub category: Option<String>,
-    /// `null` clears the subcategory; omitting the field leaves it alone.
-    #[serde(default, with = "serde_with_double_option")]
+    /// `null` clears the subtopic; omitting the field leaves it alone.
+    /// `subcategory` is its older name.
+    #[serde(default, with = "serde_with_double_option", alias = "subtopic")]
     pub subcategory: Option<Option<String>>,
     pub tags: Option<Vec<String>>,
-    /// `null` clears the expiry; omitting the field leaves it alone.
-    #[serde(default, with = "serde_with_double_option")]
+    /// `null` clears it; omitting the field leaves it alone. `expires_at` is
+    /// its older name.
+    #[serde(default, with = "serde_with_double_option", alias = "valid_until")]
     pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<AppliesToRequest>,
+    /// `achieved` or `abandoned` closes a goal (with `origin` user_said or
+    /// user_confirmed); `active` reopens it.
+    pub goal_status: Option<String>,
+    /// Who asked for this change.
+    pub origin: Option<String>,
+}
+
+impl UpdateMemoryRequest {
+    pub fn into_structured(
+        self,
+        category: Option<crate::memories::domain::category::Category>,
+        expected_updated_at: Option<DateTime<Utc>>,
+        detected: Option<DetectedProject>,
+    ) -> StructuredEdit {
+        StructuredEdit {
+            content: self.content,
+            category,
+            subtopic: self.subcategory,
+            tags: self.tags,
+            valid_until: self.expires_at,
+            kind: self.kind,
+            topic: self.topic,
+            applies_to: self.applies_to.map(|applies_to| AppliesToInput {
+                target: applies_to.target,
+                project_name: applies_to.project_name,
+                new_project: applies_to.new_project,
+            }),
+            goal_status: self.goal_status,
+            origin: self.origin,
+            expected_updated_at,
+            detected_project: detected,
+        }
+    }
+}
+
+/// An edited memory, plus the sentence to repeat to the user.
+#[derive(Debug, Serialize)]
+pub struct UpdatedMemoryResponse {
+    #[serde(flatten)]
+    pub memory: MemoryResponse,
+    pub message: String,
+}
+
+impl From<&UpdatedMemory> for UpdatedMemoryResponse {
+    fn from(updated: &UpdatedMemory) -> Self {
+        Self {
+            memory: MemoryResponse::from(&updated.memory),
+            message: updated.message(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +271,25 @@ pub struct SearchRequest {
     pub as_of: Option<DateTime<Utc>>,
     #[serde(default)]
     pub include_superseded: bool,
+    /// Structure filters (ai-specs/memory-structure-plan.md §9), each OR-ed
+    /// within itself: kinds (`rule`), topics (`coding`), targets (`me`,
+    /// `project`, `general`) and projects (by name, alias or id).
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default)]
+    pub targets: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// The project the caller works in, when it is not sent as the
+    /// `X-Recuerdos-Project` headers. Its memories rank with the user's
+    /// own; other projects' are demoted.
+    pub project: Option<String>,
+    /// `context` (the default): demote other projects' memories, as an
+    /// agent wants. `all`: rank every scope alike, as a person browsing
+    /// their whole store does.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +307,38 @@ pub struct MemoryResponse {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// What sort of statement it is (ai-specs/memory-structure-plan.md §3).
+    pub kind: String,
+    /// What it is about.
+    pub topic: String,
+    /// Who or what it is true for.
+    pub applies_to: AppliesToResponse,
+    /// Where it came from: `user_said`, `user_confirmed`, `inferred` or
+    /// `document`.
+    pub origin: String,
+    /// For goals only: `active`, `achieved` or `abandoned`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_status: Option<String>,
+    /// The structure was derived from an old category and may be wrong.
+    pub needs_review: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppliesToResponse {
+    /// `me`, `project` or `general`.
+    pub target: String,
+    /// The project's name, when `target` is `project`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+impl From<&AppliesTo> for AppliesToResponse {
+    fn from(applies_to: &AppliesTo) -> Self {
+        Self {
+            target: applies_to.target().as_str().to_string(),
+            project_name: applies_to.project().map(|project| project.name.clone()),
+        }
+    }
 }
 
 impl From<&Memory> for MemoryResponse {
@@ -128,6 +354,15 @@ impl From<&Memory> for MemoryResponse {
             updated_at: memory.updated_at(),
             expires_at: memory.expires_at(),
             superseded_by: memory.superseded_by().map(|id| id.to_string()),
+            kind: memory.structure().kind().as_str().to_string(),
+            topic: memory.structure().topic().as_str().to_string(),
+            applies_to: memory.structure().applies_to().into(),
+            origin: memory.structure().origin().as_str().to_string(),
+            goal_status: memory
+                .structure()
+                .goal_status()
+                .map(|status| status.as_str().to_string()),
+            needs_review: memory.structure().needs_review(),
         }
     }
 }
@@ -366,9 +601,27 @@ pub struct BulkRequest {
 pub struct BulkSet {
     #[serde(default)]
     pub category: Option<String>,
+    /// A new kind for every memory.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// `{"target": "project", "project_name": "quill"}`: a known project only.
+    #[serde(default)]
+    pub applies_to: Option<BulkAppliesTo>,
+    /// Confirms each memory's structure as it is (the review queue).
+    #[serde(default)]
+    pub reviewed: bool,
     /// `null` clears the sub-label; omitting it leaves it alone.
     #[serde(default, with = "serde_with_double_option")]
     pub subcategory: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkAppliesTo {
+    pub target: String,
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -394,18 +647,19 @@ pub struct MapResponse {
     pub min_weight: f32,
     /// True when the store is too large for similarity edges.
     pub edges_omitted: bool,
-    /// `memories` when `nodes` holds every memory in scope; `categories`
-    /// when the store is above the detail limit and only the category
-    /// summary is sent.
+    /// `memories` when `nodes` holds every memory in scope; `topics` when
+    /// the store is above the detail limit and only the topic summary is
+    /// sent.
     pub detail: &'static str,
     /// Memories in scope, whether or not `nodes` carries them.
     pub total: usize,
-    /// The category this map is limited to, if any.
-    pub category: Option<String>,
+    /// The topic this map is limited to, if any.
+    pub topic: Option<String>,
     pub nodes: Vec<MemoryResponse>,
     pub edges: Vec<MapEdge>,
-    pub categories: Vec<MapCategory>,
-    pub category_edges: Vec<MapCategoryEdge>,
+    /// The topics the memories are grouped by (D13), largest first.
+    pub topics: Vec<MapTopic>,
+    pub topic_edges: Vec<MapTopicEdge>,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,22 +682,22 @@ pub enum MapEdge {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapCategory {
+pub struct MapTopic {
     pub id: String,
     pub label: String,
     pub built_in: bool,
     pub count: usize,
-    pub subcategories: Vec<MapSubcategory>,
+    pub subtopics: Vec<MapSubtopic>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapSubcategory {
+pub struct MapSubtopic {
     pub name: String,
     pub count: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MapCategoryEdge {
+pub struct MapTopicEdge {
     pub source: String,
     pub target: String,
     pub weight: f32,
@@ -463,50 +717,193 @@ mod serde_with_double_option {
     }
 }
 
+/// One topic in `GET /v1/topics` and the answers to adding or relabelling
+/// one (ai-specs/memory-structure-plan.md §3.3).
+#[derive(Debug, Serialize)]
+pub struct TopicResponse {
+    pub id: String,
+    /// What to show: the user's label, else the default wording.
+    pub label: String,
+    pub default_label: String,
+    pub built_in: bool,
+    /// Active memories about it.
+    pub count: usize,
+}
+
+impl From<&TopicView> for TopicResponse {
+    fn from(view: &TopicView) -> Self {
+        Self {
+            id: view.entry.topic.as_str().to_string(),
+            label: view.entry.label(),
+            default_label: view.entry.topic.default_label(),
+            built_in: view.entry.topic.is_built_in(),
+            count: view.count,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TopicsResponse {
+    pub topics: Vec<TopicResponse>,
+}
+
+/// `POST /v1/topics`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateTopicRequest {
+    pub id: String,
+    pub label: Option<String>,
+}
+
+/// `PATCH /v1/topics/{id}`: `null` or blank resets the label.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelabelTopicRequest {
+    pub label: Option<String>,
+}
+
+/// One project in `GET /v1/projects` and the answers to renaming and
+/// merging one (ai-specs/memory-structure-plan.md §6).
+#[derive(Debug, Serialize)]
+pub struct ProjectResponse {
+    pub id: String,
+    pub name: String,
+    /// What else finds it: git remotes, folder names, former names.
+    pub aliases: Vec<String>,
+    /// Active memories filed under it.
+    pub memories: usize,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<&ProjectView> for ProjectResponse {
+    fn from(view: &ProjectView) -> Self {
+        Self {
+            id: view.record.project.id.to_string(),
+            name: view.record.project.name.clone(),
+            aliases: view.record.aliases.clone(),
+            memories: view.memories,
+            created_at: view.record.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectsResponse {
+    pub projects: Vec<ProjectResponse>,
+}
+
+/// `PATCH /v1/projects/{project}`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProjectRequest {
+    pub name: String,
+}
+
+/// `POST /v1/projects/{project}/merge`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeProjectRequest {
+    pub into: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectChangeResponse {
+    pub project: ProjectResponse,
+    pub message: String,
+    /// The name it had before a rename, or the project merged into it.
+    pub previous: String,
+    /// Memories that changed project (a merge; 0 for a rename, which moves
+    /// none: they store the project's id).
+    pub moved: usize,
+    /// Identifiers the rename taught it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub learned: Vec<String>,
+}
+
+impl From<&Renamed> for ProjectChangeResponse {
+    fn from(renamed: &Renamed) -> Self {
+        Self {
+            project: ProjectResponse::from(&renamed.project),
+            message: renamed.message(),
+            previous: renamed.previous.clone(),
+            moved: 0,
+            learned: renamed.learned.clone(),
+        }
+    }
+}
+
+impl From<&Merged> for ProjectChangeResponse {
+    fn from(merged: &Merged) -> Self {
+        Self {
+            project: ProjectResponse::from(&merged.project),
+            message: merged.message(),
+            previous: merged.from.clone(),
+            moved: merged.moved,
+            learned: vec![],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memories::domain::category::Category;
+    use crate::memories::domain::memory::NewMemory;
 
-    #[test]
-    fn a_save_request_defaults_its_optional_fields() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"User prefers pnpm"}"#).unwrap();
+    fn structured(body: &str) -> Result<StructuredSave> {
+        serde_json::from_str::<SaveMemoryRequest>(body)
+            .unwrap()
+            .into_structured(None)
+    }
 
-        assert_eq!(request.confidence, 1.0);
-        assert!(request.tags.is_empty());
-
-        let new = request.into_new_memory(&[]).unwrap();
-        assert_eq!(new.category, Category::FactProject);
+    fn code(result: Result<StructuredSave>) -> String {
+        match result {
+            Err(RaError::Rejected { code, .. }) => code,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
     }
 
     #[test]
-    fn a_save_request_parses_its_category() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"preference.coding","tags":["ts"]}"#)
-                .unwrap();
+    fn a_save_request_carries_its_structure() {
+        let save = structured(
+            r#"{"content":"x","kind":"preference","topic":"coding","origin":"user_said",
+                "applies_to":{"target":"me"},"tags":["ts"],"subtopic":"testing"}"#,
+        )
+        .unwrap();
 
-        let new = request.into_new_memory(&[]).unwrap();
-        assert_eq!(new.category, Category::PreferenceCoding);
-        assert_eq!(new.tags, vec!["ts".to_string()]);
+        assert_eq!(save.kind.as_deref(), Some("preference"));
+        assert_eq!(save.applies_to.unwrap().target.as_deref(), Some("me"));
+        assert_eq!(save.subtopic.as_deref(), Some("testing"));
+        assert_eq!(save.tags, vec!["ts".to_string()]);
     }
 
     #[test]
-    fn an_unknown_category_is_rejected() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"nonsense"}"#).unwrap();
-
-        assert!(request.into_new_memory(&[]).is_err());
+    fn e14_the_old_category_only_shape_is_refused_naming_the_new_fields() {
+        let error = structured(r#"{"content":"x","category":"preference.coding"}"#).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("missing_field"), "{message}");
+        for field in ["kind", "topic", "applies_to", "origin"] {
+            assert!(message.contains(field), "{field}: {message}");
+        }
     }
 
     #[test]
-    fn a_configured_extra_category_is_accepted() {
-        let request: SaveMemoryRequest =
-            serde_json::from_str(r#"{"content":"x","category":"fact.homelab"}"#).unwrap();
-
-        let new = request
-            .into_new_memory(&["fact.homelab".to_string()])
-            .unwrap();
-        assert_eq!(new.category.as_str(), "fact.homelab");
+    fn retired_fields_are_refused_with_their_new_name() {
+        let base = r#""content":"x","kind":"fact","topic":"tech","origin":"user_said""#;
+        assert_eq!(
+            code(structured(&format!(r#"{{{base},"subcategory":"a"}}"#))),
+            "invalid_value"
+        );
+        assert_eq!(
+            code(structured(&format!(r#"{{{base},"confidence":0.4}}"#))),
+            "invalid_value"
+        );
+        assert_eq!(
+            code(structured(&format!(
+                r#"{{{base},"expires_at":"2030-01-01T00:00:00Z"}}"#
+            ))),
+            "invalid_value"
+        );
     }
 
     #[test]
@@ -552,6 +949,15 @@ mod tests {
                 updated_at: Utc::now(),
                 expires_at: None,
                 superseded_by: None,
+                kind: "decision".to_string(),
+                topic: "work".to_string(),
+                applies_to: AppliesToResponse {
+                    target: "general".to_string(),
+                    project_name: None,
+                },
+                origin: "user_said".to_string(),
+                goal_status: None,
+                needs_review: true,
             },
             score: 0.5,
             matched: MatchResponse {

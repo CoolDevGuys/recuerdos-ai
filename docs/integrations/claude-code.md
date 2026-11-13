@@ -69,8 +69,10 @@ Restart Claude Code, then check it connected:
 /mcp
 ```
 
-You should see `recuerdos-ai` with four tools (`memory_save`,
-`memory_recall`, `memory_forget`, `session_distill`). If not, see
+You should see `recuerdos-ai` with its tools: `memory_save`,
+`memory_save_batch`, `memory_update`, `memory_recall`, `memory_forget`,
+`session_distill`, and the project tools `project_list`, `project_rename` and
+`project_merge`. If not, see
 [troubleshooting](../mcp.md#troubleshooting).
 
 ## Verify it works

@@ -6,7 +6,12 @@ export const MAX_BULK = 500;
 
 /** The bulk editor's fields as typed. `""` means "leave as it is". */
 export interface BulkForm {
-  category: string;
+  kind: string;
+  topic: string;
+  /** `me`, `general`, `project:<name>` (a known project), or `""`. */
+  scope: string;
+  /** Confirm each memory's structure as it is: it leaves the review queue. */
+  reviewed: boolean;
   /** `keep`, `set` (to `subcategoryValue`) or `clear`. */
   subcategory: "keep" | "set" | "clear";
   subcategoryValue: string;
@@ -15,7 +20,10 @@ export interface BulkForm {
 }
 
 export const EMPTY_BULK_FORM: BulkForm = {
-  category: "",
+  kind: "",
+  topic: "",
+  scope: "",
+  reviewed: false,
   subcategory: "keep",
   subcategoryValue: "",
   addTags: "",
@@ -27,7 +35,14 @@ export function bulkEditOf(form: BulkForm, selected: number): { edit: BulkEdit }
   if (selected === 0) return { error: "Select some memories first." };
   if (selected > MAX_BULK) return { error: `Edit at most ${MAX_BULK} memories at a time (${selected} are selected).` };
   const edit: BulkEdit = {};
-  if (form.category !== "") edit.category = form.category;
+  if (form.kind !== "") edit.kind = form.kind;
+  if (form.topic !== "") edit.topic = form.topic;
+  if (form.scope.startsWith("project:")) {
+    edit.appliesTo = { target: "project", project_name: form.scope.slice("project:".length) };
+  } else if (form.scope === "me" || form.scope === "general") {
+    edit.appliesTo = { target: form.scope, project_name: null };
+  }
+  if (form.reviewed) edit.reviewed = true;
   if (form.subcategory === "clear") edit.subcategory = null;
   if (form.subcategory === "set") {
     const value = form.subcategoryValue.trim();

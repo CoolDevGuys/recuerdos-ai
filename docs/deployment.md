@@ -191,6 +191,27 @@ docker stop recuerdos-ai && docker rm recuerdos-ai
 The storage format migrates itself forward on start; it has done so
 cleanly across every release so far.
 
+### What `v0.6.0` does on its first start
+
+`v0.6.0` gives every memory a structure: what it is, what it is about and who it is true
+for ([memory-model.md](memory-model.md)). Upgrading from any earlier release:
+
+- **Migrations V11 and V12 run**, forward-only. V11 adds the structure columns and the
+  `projects`, `project_aliases` and `topics` tables; V12 drops the old profile digest
+  cache (it regenerates on its own). Take the backup from step 5 if you might roll back.
+- **Every existing memory is given a structure** derived from its category, in one
+  transaction, before the daemon serves a request. Nothing is lost and nothing is
+  re-embedded. What the mapping could only guess (a coding preference may really be one
+  project's convention; a project fact names no project) is marked `needs_review`:
+  open the web UI's **Needs review** tab to file it, with **Suggest** if a model is
+  configured.
+- **Clients move with it.** Direct saves (`POST /v1/memories:direct`, `memory_save`)
+  must state the structure; an old client's category-only save is refused with a
+  message naming the fields. Update the Python SDK to `0.5.0`, and run the same
+  `recuerdos-ai` version for the stdio MCP shim as for the daemon. Start the shim from
+  the project's folder (your harness does), so project memories land in the right
+  project.
+
 ### What `v0.4.0` does on its first start
 
 Upgrading from `v0.3.x` or earlier, two things happen before the daemon

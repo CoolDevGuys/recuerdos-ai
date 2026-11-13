@@ -25,8 +25,12 @@ pub struct ApiErrorBody {
 
 #[derive(Debug, Serialize)]
 pub struct ApiErrorDetail {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
+    /// Machine-readable context for a refusal: for a `conflict`, the stored
+    /// memories it contradicts. Absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 impl IntoResponse for RaError {
@@ -37,6 +41,20 @@ impl IntoResponse for RaError {
             RaError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, "unauthorized", message),
             RaError::Forbidden(message) => (StatusCode::FORBIDDEN, "forbidden", message),
             RaError::Conflict(message) => (StatusCode::CONFLICT, "conflict", message),
+            RaError::Rejected {
+                code,
+                message,
+                details,
+            } => {
+                let body = Json(ApiErrorBody {
+                    error: ApiErrorDetail {
+                        code,
+                        message,
+                        details,
+                    },
+                });
+                return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+            }
             RaError::PreconditionFailed(message) => (
                 StatusCode::PRECONDITION_FAILED,
                 "precondition_failed",
@@ -74,7 +92,11 @@ impl IntoResponse for RaError {
         };
 
         let body = Json(ApiErrorBody {
-            error: ApiErrorDetail { code, message },
+            error: ApiErrorDetail {
+                code: code.to_string(),
+                message,
+                details: None,
+            },
         });
 
         if status == StatusCode::UNAUTHORIZED {
@@ -132,6 +154,18 @@ mod tests {
                 "conflict",
             ),
         ];
+
+        let rejected = RaError::rejected(
+            "kind_target_mismatch",
+            "a preference cannot apply to project",
+        );
+        let (status, body) = parts(rejected).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "kind_target_mismatch");
+        assert_eq!(
+            body["error"]["message"],
+            "a preference cannot apply to project"
+        );
 
         for (error, expected_status, expected_code) in cases {
             let message = error.to_string();

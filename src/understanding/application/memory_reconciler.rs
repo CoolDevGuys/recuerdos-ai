@@ -26,14 +26,19 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::direct_memory_saver::DirectMemorySaver;
 use crate::memories::application::memory_forgetter::MemoryForgetter;
 use crate::memories::application::memory_recaller::MemoryRecaller;
+use crate::memories::domain::applies_to::{AppliesTo, ProjectRef};
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory::{Memory, MemorySource, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::memory_structure::MemoryStructure;
+use crate::memories::domain::project_registry::{ProjectRegistry, normalize_project_name};
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
 use crate::understanding::domain::candidate::Candidate;
+use crate::understanding::domain::candidate_filing::{Filing, file_candidate};
 use crate::understanding::domain::chat_model::ChatModel;
+use crate::understanding::domain::ingest_job::ProjectHint;
 use crate::understanding::domain::reconciliation::{
     Decision, decisions_array, parse_decision, reconciliation_request,
 };
@@ -46,7 +51,12 @@ use std::sync::Arc;
 /// contradicted — while a longer list measurably increases the chance the
 /// model picks a loosely-related memory and supersedes something it
 /// should have left alone.
-pub const NEIGHBOUR_LIMIT: i64 = 5;
+pub const NEIGHBOUR_LIMIT: usize = 5;
+
+/// How many memories recall is asked for before they are narrowed to the
+/// candidate's scope: recall does not filter by scope yet (plan S4), and a
+/// candidate is only ever compared with memories true for the same thing.
+const NEIGHBOUR_SEARCH: i64 = 20;
 
 #[derive(Clone)]
 pub struct MemoryReconciler {
@@ -54,6 +64,9 @@ pub struct MemoryReconciler {
     saver: Arc<DirectMemorySaver>,
     forgetter: Arc<MemoryForgetter>,
     memories: Arc<dyn MemoryRepository>,
+    /// The user's projects, to file a candidate under the one the caller
+    /// works in. Read only: a job cannot confirm a new project.
+    projects: Arc<dyn ProjectRegistry>,
     model: Arc<dyn ChatModel>,
     /// The entity/relation graph, present only when `[graph].enabled`
     /// (Task 7.3.2). When set, a stored candidate's entities and relations
@@ -73,6 +86,9 @@ pub struct ReconcileOutcome {
     pub stored: Vec<MemoryId>,
     pub superseded: Vec<MemoryId>,
     pub deleted: Vec<MemoryId>,
+    /// Inferences about the user, held back for the agent to ask about
+    /// (plan D5). Never stored.
+    pub suggestions: Vec<String>,
 }
 
 impl ReconcileOutcome {
@@ -80,6 +96,7 @@ impl ReconcileOutcome {
         self.stored.extend(other.stored);
         self.superseded.extend(other.superseded);
         self.deleted.extend(other.deleted);
+        self.suggestions.extend(other.suggestions);
     }
 }
 
@@ -90,6 +107,7 @@ impl MemoryReconciler {
         saver: Arc<DirectMemorySaver>,
         forgetter: Arc<MemoryForgetter>,
         memories: Arc<dyn MemoryRepository>,
+        projects: Arc<dyn ProjectRegistry>,
         model: Arc<dyn ChatModel>,
         graph: Option<Arc<dyn EntityGraph>>,
         enabled: bool,
@@ -99,6 +117,7 @@ impl MemoryReconciler {
             saver,
             forgetter,
             memories,
+            projects,
             model,
             graph,
             enabled,
@@ -116,25 +135,67 @@ impl MemoryReconciler {
         &self,
         context: &UserContext,
         candidates: &[Candidate],
+        project: Option<&ProjectHint>,
         actor: &str,
     ) -> Result<ReconcileOutcome> {
+        let project = match project {
+            Some(hint) => {
+                let this = self.clone();
+                let (context, hint) = (context.clone(), hint.clone());
+                blocking(move || this.known_project(&context, &hint)).await?
+            }
+            None => None,
+        };
+
         let mut outcome = ReconcileOutcome::default();
         for candidate in candidates {
-            outcome.absorb(self.reconcile_one(context, candidate, actor).await?);
+            match file_candidate(candidate, project.as_ref()) {
+                Filing::Store(structure) => outcome.absorb(
+                    self.reconcile_one(context, candidate, structure, actor)
+                        .await?,
+                ),
+                Filing::Suggest => outcome.suggestions.push(candidate.content.clone()),
+                Filing::Drop(reason) => {
+                    tracing::warn!(%reason, "dropping an extracted memory");
+                }
+            }
         }
         Ok(outcome)
+    }
+
+    /// The project the caller names, when the user already has it: by its
+    /// remote first, then by name.
+    fn known_project(
+        &self,
+        context: &UserContext,
+        hint: &ProjectHint,
+    ) -> Result<Option<ProjectRef>> {
+        if let Some(alias) = &hint.alias
+            && let Some(project) = self.projects.resolve(context, alias)?
+        {
+            return Ok(Some(project));
+        }
+        match normalize_project_name(&hint.name) {
+            Ok(name) => self.projects.resolve(context, &name),
+            Err(_) => Ok(None),
+        }
     }
 
     async fn reconcile_one(
         &self,
         context: &UserContext,
         candidate: &Candidate,
+        structure: MemoryStructure,
         actor: &str,
     ) -> Result<ReconcileOutcome> {
         let neighbours = if self.enabled {
             let this = self.clone();
-            let (context, candidate) = (context.clone(), candidate.clone());
-            blocking(move || this.neighbours(&context, &candidate)).await?
+            let (context, candidate, scope) = (
+                context.clone(),
+                candidate.clone(),
+                structure.applies_to().clone(),
+            );
+            blocking(move || this.neighbours(&context, &candidate, &scope)).await?
         } else {
             Vec::new()
         };
@@ -144,7 +205,7 @@ impl MemoryReconciler {
             let this = self.clone();
             let (context, candidate, actor) =
                 (context.clone(), candidate.clone(), actor.to_string());
-            let id = blocking(move || this.store(&context, &candidate, &actor)).await?;
+            let id = blocking(move || this.store(&context, &candidate, structure, &actor)).await?;
             return Ok(ReconcileOutcome {
                 stored: vec![id],
                 ..Default::default()
@@ -159,17 +220,24 @@ impl MemoryReconciler {
 
         let this = self.clone();
         let (context, candidate, actor) = (context.clone(), candidate.clone(), actor.to_string());
-        blocking(move || this.apply(&context, &candidate, &answer, &shown, &actor)).await
+        blocking(move || this.apply(&context, &candidate, structure, &answer, &shown, &actor)).await
     }
 
-    /// The existing memories most similar to this candidate.
+    /// The existing memories most similar to this candidate, among those
+    /// true for the same scope: one project's convention is never reconciled
+    /// against another's, or against the user's own.
     ///
     /// A recall failure is not fatal: reconciliation without neighbours
     /// degrades to ADD, which stores a possible duplicate. Losing the
     /// memory entirely would be the worse outcome, and a duplicate is
     /// something consolidation can clean up later.
-    fn neighbours(&self, context: &UserContext, candidate: &Candidate) -> Result<Vec<Memory>> {
-        let query = match RecallQuery::new(&candidate.content, NEIGHBOUR_LIMIT) {
+    fn neighbours(
+        &self,
+        context: &UserContext,
+        candidate: &Candidate,
+        scope: &AppliesTo,
+    ) -> Result<Vec<Memory>> {
+        let query = match RecallQuery::new(&candidate.content, NEIGHBOUR_SEARCH) {
             Ok(query) => query,
             Err(error) => {
                 // Content longer than a query is allowed to be. Comparing
@@ -180,12 +248,17 @@ impl MemoryReconciler {
                     .chars()
                     .take(crate::memories::domain::recall_query::MAX_QUERY_LEN)
                     .collect();
-                RecallQuery::new(&head, NEIGHBOUR_LIMIT)?
+                RecallQuery::new(&head, NEIGHBOUR_SEARCH)?
             }
         };
 
         match self.recaller.execute(context, &query) {
-            Ok(scored) => Ok(scored.into_iter().map(|scored| scored.memory).collect()),
+            Ok(scored) => Ok(scored
+                .into_iter()
+                .map(|scored| scored.memory)
+                .filter(|memory| memory.structure().applies_to().same_scope(scope))
+                .take(NEIGHBOUR_LIMIT)
+                .collect()),
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -201,6 +274,7 @@ impl MemoryReconciler {
         &self,
         context: &UserContext,
         candidate: &Candidate,
+        structure: MemoryStructure,
         answer: &serde_json::Value,
         shown: &[MemoryId],
         actor: &str,
@@ -208,7 +282,7 @@ impl MemoryReconciler {
         let Some(raw) = decisions_array(answer) else {
             tracing::warn!("reconciliation returned no decisions; storing the candidate");
             return self
-                .store(context, candidate, actor)
+                .store(context, candidate, structure, actor)
                 .map(|id| ReconcileOutcome {
                     stored: vec![id],
                     ..Default::default()
@@ -252,13 +326,14 @@ impl MemoryReconciler {
             .iter()
             .find(|decision| decision.stores_the_candidate())
             .map(|decision| {
-                self.store(context, candidate, actor).inspect(|id| {
-                    tracing::debug!(
-                        memory_id = %id,
-                        reason = decision.reason(),
-                        "reconciliation stored a candidate"
-                    );
-                })
+                self.store(context, candidate, structure.clone(), actor)
+                    .inspect(|id| {
+                        tracing::debug!(
+                            memory_id = %id,
+                            reason = decision.reason(),
+                            "reconciliation stored a candidate"
+                        );
+                    })
             })
             .transpose()?;
 
@@ -277,8 +352,14 @@ impl MemoryReconciler {
         Ok(outcome)
     }
 
-    fn store(&self, context: &UserContext, candidate: &Candidate, actor: &str) -> Result<MemoryId> {
-        let memory = self.saver.execute(
+    fn store(
+        &self,
+        context: &UserContext,
+        candidate: &Candidate,
+        structure: MemoryStructure,
+        actor: &str,
+    ) -> Result<MemoryId> {
+        let memory = self.saver.execute_structured(
             context,
             NewMemory {
                 content: candidate.content.clone(),
@@ -293,6 +374,7 @@ impl MemoryReconciler {
                 },
                 expires_at: None,
             },
+            structure,
             actor,
         )?;
 
@@ -386,6 +468,7 @@ mod tests {
             entities: vec![],
             relations: vec![],
             confidence: 0.9,
+            placement: Default::default(),
         }
     }
 
@@ -410,6 +493,7 @@ mod tests {
                 Arc::new(fixture.saver()),
                 Arc::new(fixture.forgetter()),
                 Arc::clone(&fixture.memories) as Arc<dyn MemoryRepository>,
+                fixture.project_registry(),
                 Arc::clone(&model) as Arc<dyn ChatModel>,
                 graph,
                 enabled,
@@ -517,6 +601,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("The backend runs on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -562,7 +647,7 @@ mod tests {
         }];
 
         reconciler
-            .execute(&fixture.alex, &[candidate], ACTOR)
+            .execute(&fixture.alex, &[candidate], None, ACTOR)
             .await
             .unwrap();
 
@@ -599,6 +684,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("a plain fact with no entities")],
+                None,
                 ACTOR,
             )
             .await
@@ -616,7 +702,7 @@ mod tests {
         // The scenario the whole design exists for: after this, asking
         // "where do we deploy?" must not return Fly.io.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "Backend deploys on Fly.io");
+        let old = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -632,6 +718,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -653,7 +740,7 @@ mod tests {
         // Supersede is not delete. "What did we used to think?" has to
         // stay answerable.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "Backend deploys on Fly.io");
+        let old = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -666,6 +753,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -690,7 +778,7 @@ mod tests {
         // answer, and an automated decision is exactly the case where the
         // user was not there to see it happen.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "Backend deploys on Fly.io");
+        let old = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -705,6 +793,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -727,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn a_duplicate_is_a_noop_and_stores_nothing() {
         let fixture = Fixture::new();
-        fixture.save(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "User prefers pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -738,7 +827,12 @@ mod tests {
         );
 
         let outcome = reconciler
-            .execute(&fixture.alex, &[candidate("User prefers pnpm")], ACTOR)
+            .execute(
+                &fixture.alex,
+                &[candidate("User prefers pnpm")],
+                None,
+                ACTOR,
+            )
             .await
             .unwrap();
 
@@ -751,7 +845,7 @@ mod tests {
         // "I no longer use Docker" should remove the Docker memory, not
         // add a memory recording that the user said so.
         let fixture = Fixture::new();
-        let old = fixture.save(&fixture.alex, "User builds images with Docker");
+        let old = fixture.save_fact(&fixture.alex, "User builds images with Docker");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -767,6 +861,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("User no longer uses Docker")],
+                None,
                 ACTOR,
             )
             .await
@@ -783,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn a_related_but_different_memory_is_added_alongside() {
         let fixture = Fixture::new();
-        fixture.save(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "User prefers pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -794,7 +889,12 @@ mod tests {
         );
 
         reconciler
-            .execute(&fixture.alex, &[candidate("User prefers Vitest")], ACTOR)
+            .execute(
+                &fixture.alex,
+                &[candidate("User prefers Vitest")],
+                None,
+                ACTOR,
+            )
             .await
             .unwrap();
 
@@ -807,7 +907,7 @@ mod tests {
         // Acting on it would delete at random; refusing costs nothing,
         // because the model had no grounds to judge a memory it never saw.
         let fixture = Fixture::new();
-        let real = fixture.save(&fixture.alex, "User prefers pnpm");
+        let real = fixture.save_fact(&fixture.alex, "User prefers pnpm");
         let invented = MemoryId::new();
 
         let (reconciler, _) = reconciler(
@@ -821,7 +921,12 @@ mod tests {
         );
 
         let outcome = reconciler
-            .execute(&fixture.alex, &[candidate("User prefers pnpm")], ACTOR)
+            .execute(
+                &fixture.alex,
+                &[candidate("User prefers pnpm")],
+                None,
+                ACTOR,
+            )
             .await
             .unwrap();
 
@@ -843,8 +948,8 @@ mod tests {
     #[tokio::test]
     async fn several_updates_still_store_the_candidate_only_once() {
         let fixture = Fixture::new();
-        let first = fixture.save(&fixture.alex, "Backend deploys on Fly.io");
-        let second = fixture.save(&fixture.alex, "Backend deploys on Fly.io machines");
+        let first = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
+        let second = fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io machines");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -859,6 +964,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -877,7 +983,7 @@ mod tests {
         // `reconcile = false`: label and store, never let a model remove
         // anything.
         let fixture = Fixture::new();
-        fixture.save(&fixture.alex, "Backend deploys on Fly.io");
+        fixture.save_fact(&fixture.alex, "Backend deploys on Fly.io");
 
         let (reconciler, model) = reconciler(&fixture, ScriptedChatModel::new(), false);
 
@@ -885,6 +991,7 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
+                None,
                 ACTOR,
             )
             .await
@@ -919,6 +1026,7 @@ mod tests {
                     candidate("User prefers pnpm"),
                     candidate("User prefers pnpm as their package manager"),
                 ],
+                None,
                 ACTOR,
             )
             .await
@@ -934,7 +1042,7 @@ mod tests {
     #[tokio::test]
     async fn unusable_decisions_leave_the_store_untouched() {
         let fixture = Fixture::new();
-        fixture.save(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "User prefers pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -945,7 +1053,12 @@ mod tests {
         );
 
         let outcome = reconciler
-            .execute(&fixture.alex, &[candidate("User prefers pnpm")], ACTOR)
+            .execute(
+                &fixture.alex,
+                &[candidate("User prefers pnpm")],
+                None,
+                ACTOR,
+            )
             .await
             .unwrap();
 

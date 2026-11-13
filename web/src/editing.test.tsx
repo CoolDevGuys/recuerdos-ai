@@ -1,10 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api/client";
-import { ALEX_KEY, signedInAsAlex, standardServer } from "./test/renderApp";
+import { memory } from "./api/fake";
+import { ALEX_KEY, ALEX_MEMORIES, signedInAsAlex, standardServer } from "./test/renderApp";
 
-async function openMemory(content: string) {
-  const { server, user } = await signedInAsAlex();
+async function openMemory(content: string, server = standardServer()) {
+  const { user } = await signedInAsAlex(server);
   await user.click(screen.getByRole("button", { name: new RegExp(content) }));
   const dialog = await screen.findByRole("dialog", { name: "Edit memory" });
   return { server, user, dialog };
@@ -30,10 +31,11 @@ describe("editing a memory", () => {
     });
   });
 
-  it("re-categorises and re-tags a memory", async () => {
+  it("changes what a memory is and re-tags it", async () => {
     const { server, user, dialog } = await openMemory("The user prefers pnpm");
 
-    await user.selectOptions(within(dialog).getByLabelText("Category"), "Project fact");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Rule");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Work");
     const tags = within(dialog).getByLabelText(/Tags/);
     await user.clear(tags);
     await user.type(tags, "#Tooling, pnpm, tooling");
@@ -41,7 +43,66 @@ describe("editing a memory", () => {
 
     await screen.findByText("Changes saved.");
     const saved = server.memoriesOf(ALEX_KEY).find((m) => m.id === "a");
-    expect(saved).toMatchObject({ category: "fact.project", tags: ["tooling", "pnpm"] });
+    expect(saved).toMatchObject({ kind: "rule", topic: "work", tags: ["tooling", "pnpm"] });
+    const sent = server.calls.find((c) => c.method === "update")?.patch;
+    expect(sent).toMatchObject({ kind: "rule", topic: "work", origin: "user_said" });
+    expect(sent).not.toHaveProperty("category");
+  });
+
+  it("moves a memory to a project", async () => {
+    const { server, user, dialog } = await openMemory("Testing follows TDD");
+
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Convention");
+    await user.click(within(dialog).getByRole("radio", { name: /One project/ }));
+    await user.type(within(dialog).getByLabelText("Project"), "quill");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+
+    await screen.findByText("Changes saved.");
+    expect(server.memoriesOf(ALEX_KEY).find((m) => m.id === "b")?.applies_to).toEqual({
+      target: "project",
+      project_name: "quill",
+    });
+  });
+
+  it("closes a goal, and says what that means", async () => {
+    const server = standardServer();
+    server.addAccount(
+      ALEX_KEY,
+      { user: "alex", scopes: ["read", "write"] },
+      [
+        ...ALEX_MEMORIES,
+        memory({ id: "g", content: "Run a half marathon in April", kind: "goal", topic: "health", goal_status: "active" }),
+      ],
+    );
+    const { user, dialog } = await openMemory("Run a half marathon in April", server);
+
+    expect(within(dialog).getByText(/Open: you are working towards it/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Mark achieved" }));
+
+    await screen.findByText("Changes saved.");
+    const closed = server.memoriesOf(ALEX_KEY).find((m) => m.id === "g");
+    expect(closed?.goal_status).toBe("achieved");
+    expect(server.calls.find((c) => c.method === "update")?.patch).toEqual({ goal_status: "achieved", origin: "user_said" });
+    // A closed goal leaves the current list, and shows under Closed goals.
+    expect(screen.queryByText("Run a half marathon in April")).not.toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Show"), "closed");
+    expect(await screen.findByText("Run a half marathon in April")).toBeInTheDocument();
+  });
+
+  it("confirms a guessed structure as it is", async () => {
+    const server = standardServer();
+    server.addAccount(
+      ALEX_KEY,
+      { user: "alex", scopes: ["read", "write"] },
+      [...ALEX_MEMORIES, memory({ id: "r", content: "The NAS has 40 TB", kind: "fact", topic: "tech", needs_review: true })],
+    );
+    const { user, dialog } = await openMemory("The NAS has 40 TB", server);
+
+    expect(within(dialog).getByText("Filed by a guess")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "It is right as it is" }));
+
+    await screen.findByText("Changes saved.");
+    expect(server.memoriesOf(ALEX_KEY).find((m) => m.id === "r")?.needs_review).toBe(false);
   });
 
   it("explains an empty memory on blur and does not send it", async () => {
@@ -170,7 +231,10 @@ describe("adding a memory", () => {
     const { server, user, dialog } = await openAdd();
 
     await user.type(within(dialog).getByLabelText("Memory"), "Deploys run on Fridays");
-    await user.selectOptions(within(dialog).getByLabelText("Category"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Work");
+    await user.click(within(dialog).getByRole("radio", { name: /One project/ }));
+    await user.type(within(dialog).getByLabelText("Project"), "Quill");
     await user.type(within(dialog).getByLabelText(/Sub-label/), "release");
     await user.type(within(dialog).getByLabelText(/Tags/), "ops, deploys");
     await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
@@ -179,10 +243,105 @@ describe("adding a memory", () => {
     expect(await screen.findByText("Deploys run on Fridays")).toBeInTheDocument();
     expect(server.memoriesOf(ALEX_KEY).at(-1)).toMatchObject({
       content: "Deploys run on Fridays",
-      category: "decision",
       subcategory: "release",
       tags: ["ops", "deploys"],
     });
+    expect(server.calls.find((call) => call.method === "create")?.structure).toEqual({
+      kind: "decision",
+      topic: "work",
+      applies_to: { target: "project", project_name: "quill", new_project: true },
+      origin: "user_said",
+    });
+  });
+
+  it("asks what the memory is and who it is true for, and rules out what a kind cannot be", async () => {
+    const { server, user, dialog } = await openAdd();
+
+    await user.type(within(dialog).getByLabelText("Memory"), "Prefers pnpm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(within(dialog).getByText("Choose what sort of memory this is.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Choose who or what it is true for.")).toBeInTheDocument();
+    expect(server.calls).toHaveLength(0);
+
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Preference");
+    expect(within(dialog).getByRole("radio", { name: /One project/ })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: /General/ })).toBeDisabled();
+    expect(within(dialog).getByRole("radio", { name: /Me, everywhere/ })).toBeEnabled();
+  });
+
+  it("shows why the daemon refused a save, and keeps what was typed", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "scope_contradiction",
+      message: "This reads as being about one project (\"this repo\").",
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await user.type(within(dialog).getByLabelText("Memory"), "This repo uses pnpm");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Fact");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Coding");
+    await user.click(within(dialog).getByRole("radio", { name: /General/ }));
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("about one project");
+    expect(within(dialog).getByLabelText("Memory")).toHaveValue("This repo uses pnpm");
+  });
+
+  async function fillPreference(user: Awaited<ReturnType<typeof openAdd>>["user"], dialog: HTMLElement, text: string) {
+    await user.type(within(dialog).getByLabelText("Memory"), text);
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Preference");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Coding");
+    await user.click(within(dialog).getByRole("radio", { name: /Me, everywhere/ }));
+  }
+
+  it("lets the user replace a memory a save contradicts", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "conflict",
+      message: "It contradicts what is stored for me.",
+      conflicts: [{ id: "a", content: "The user prefers pnpm" }],
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await fillPreference(user, dialog, "The user now prefers npm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("This may contradict a memory you already have");
+    expect(alert).toHaveTextContent("The user prefers pnpm");
+    await user.click(within(alert).getByRole("button", { name: "Replace it" }));
+
+    expect(await screen.findByText("Memory saved.")).toBeInTheDocument();
+    expect(server.calls.at(-1)).toMatchObject({ method: "create", structure: { replaces: "a" } });
+    expect(server.memoriesOf(ALEX_KEY).some((m) => m.id === "a")).toBe(false);
+  });
+
+  it("lets the user keep both when each holds", async () => {
+    const server = standardServer();
+    server.rejectNextSave = {
+      code: "conflict",
+      message: "It is very close to what is stored for me.",
+      conflicts: [{ id: "a", content: "The user prefers pnpm" }],
+    };
+    const { user, dialog } = await openAdd(server);
+
+    await fillPreference(user, dialog, "The user prefers pnpm for monorepos");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+    await user.click(within(await within(dialog).findByRole("alert")).getByRole("button", { name: "Keep both" }));
+
+    expect(await screen.findByText("Memory saved.")).toBeInTheDocument();
+    expect(server.calls.at(-1)).toMatchObject({ method: "create", structure: { coexists_with: ["a"] } });
+  });
+
+  it("says so when the memory is already stored", async () => {
+    const { server, user, dialog } = await openAdd();
+
+    await fillPreference(user, dialog, "The user prefers pnpm");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(await screen.findByText("You already have this memory, so nothing new was saved.")).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).filter((m) => m.content === "The user prefers pnpm")).toHaveLength(1);
   });
 
   it("requires the text", async () => {

@@ -13,6 +13,7 @@ from typing import Any
 __all__ = [
     "RecuerdosError",
     "ValidationError",
+    "RejectedError",
     "AuthenticationError",
     "PermissionError_",
     "NotFoundError",
@@ -33,11 +34,15 @@ class RecuerdosError(Exception):
         code: str | None = None,
         status: int | None = None,
         request_id: str | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
+        #: Machine-readable context the server sent with the error, when it
+        #: sent any: for a ``conflict``, the stored memories it contradicts.
+        self.details = details
         #: The ``x-request-id`` header. Quote it when reporting a problem:
         #: it ties this exception to the server log line that has the real
         #: cause, which for a 500 is the only place the cause exists.
@@ -51,6 +56,35 @@ class RecuerdosError(Exception):
 
 class ValidationError(RecuerdosError):
     """400 — the request was malformed. Retrying it unchanged will not help."""
+
+
+class RejectedError(RecuerdosError):
+    """422 — a memory rule refused the save (``docs/memory-model.md``).
+
+    ``code`` says which: ``missing_field``, ``invalid_value``,
+    ``kind_target_mismatch``, ``unknown_project``, ``no_project``,
+    ``needs_confirmation``, ``scope_contradiction``, ``secret``,
+    ``unknown_topic`` or ``conflict``. The message says how to fix it — often,
+    by asking the user first.
+
+    A ``conflict`` names the stored memories the save contradicts in
+    :attr:`conflicts`. Ask the user which holds, then save again with
+    ``replaces=`` (they changed their mind), fix the stored one with
+    :meth:`Client.update`, or save with ``coexists_with=`` (both hold).
+    """
+
+    @property
+    def conflicts(self) -> list[dict[str, Any]]:
+        """For a ``conflict``: each stored memory's ``id``, ``content``,
+        ``kind``, ``applies_to`` and the judge's ``reason``. Empty otherwise."""
+        listed = (self.details or {}).get("conflicts")
+        return list(listed) if isinstance(listed, list) else []
+
+    @property
+    def judged(self) -> bool:
+        """For a ``conflict``: whether a language model judged it, or the
+        server only found a near-repeat without one."""
+        return bool((self.details or {}).get("judged", False))
 
 
 class AuthenticationError(RecuerdosError):
@@ -126,6 +160,7 @@ _BY_STATUS: dict[int, type[RecuerdosError]] = {
     403: PermissionError_,
     404: NotFoundError,
     409: ConflictError,
+    422: RejectedError,
 }
 
 
@@ -139,6 +174,7 @@ def from_response(status: int, body: Any, request_id: str | None) -> RecuerdosEr
     """
     code: str | None = None
     message = ""
+    details: dict[str, Any] | None = None
 
     if isinstance(body, dict):
         envelope = body.get("error")
@@ -147,12 +183,23 @@ def from_response(status: int, body: Any, request_id: str | None) -> RecuerdosEr
             code = raw_code if isinstance(raw_code, str) else None
             raw_message = envelope.get("message")
             message = raw_message if isinstance(raw_message, str) else ""
+            raw_details = envelope.get("details")
+            details = raw_details if isinstance(raw_details, dict) else None
 
     if not message:
         message = f"HTTP {status}"
 
-    kind = _BY_CODE.get(code or "") or _BY_STATUS.get(status)
+    # A memory rule's refusal is always a 422, whatever its code: its
+    # ``conflict`` is a contradiction with a stored memory, not the 409
+    # uniqueness error that shares the word.
+    kind = (
+        RejectedError
+        if status == 422
+        else _BY_CODE.get(code or "") or _BY_STATUS.get(status)
+    )
     if kind is None:
         kind = ServerError if status >= 500 else RecuerdosError
 
-    return kind(message, code=code, status=status, request_id=request_id)
+    return kind(
+        message, code=code, status=status, request_id=request_id, details=details
+    )

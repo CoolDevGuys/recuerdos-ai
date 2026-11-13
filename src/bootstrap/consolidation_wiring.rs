@@ -156,6 +156,7 @@ fn session_pipeline(
                 Arc::clone(&memories.saver),
                 Arc::clone(&memories.forgetter),
                 Arc::clone(&memories.repository),
+                Arc::clone(&memories.projects),
                 Arc::clone(model),
                 memories.graph.clone(),
                 config.understanding.reconcile,

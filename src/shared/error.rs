@@ -45,8 +45,35 @@ pub enum RaError {
     #[error("rerank busy: no session free within {} ms", .0.as_millis())]
     RerankBusy(Duration),
 
+    /// A save or edit refused by one of the memory rules
+    /// (ai-specs/memory-structure-plan.md §4), with a stable machine code —
+    /// `kind_target_mismatch`, `needs_confirmation`, `secret`, … — and a
+    /// message that says why and how to fix it. Distinct from `Validation`
+    /// because a caller (an agent, mostly) acts on the code: ask the user,
+    /// pick another kind, name the project.
+    ///
+    /// `details` carries what a caller needs to act without parsing the
+    /// message: for a `conflict`, the stored memories it contradicts.
+    #[error("rejected ({code}): {message}")]
+    Rejected {
+        code: String,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
+}
+
+impl RaError {
+    /// A rule's refusal with no details beyond its code and message.
+    pub fn rejected(code: &str, message: impl Into<String>) -> Self {
+        RaError::Rejected {
+            code: code.to_string(),
+            message: message.into(),
+            details: None,
+        }
+    }
 }
 
 #[allow(dead_code)]

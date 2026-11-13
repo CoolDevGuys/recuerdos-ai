@@ -1,6 +1,6 @@
 # Architecture
 
-**Status: current as of `v0.5.0-rc5`.** It states the rules the code is held
+**Status: current as of `v0.6.0`.** It states the rules the code is held
 to: `scripts/check-boundaries.sh` enforces the layer and naming rules in CI and
 in `just check-native`. `identity` is the worked example.
 
@@ -9,7 +9,7 @@ in `just check-native`. `identity` is the worked example.
 | Context | Responsibility | Key language |
 |---|---|---|
 | `identity` | Users, API keys, authentication, `UserContext` | User, ApiKey, Scope |
-| `memories` | Storing, indexing, searching, exporting memories | Memory, Category, Tag, Recall |
+| `memories` | Storing, indexing, searching, exporting memories; their structure, projects and topics | Memory, Kind, Topic, AppliesTo, Project, Recall |
 | `understanding` | LLM pipeline: extract → reconcile → label | Candidate, Reconciliation, Taxonomy |
 | `providers` | Concrete LLM/embedding implementations | AnthropicChatModel, FastembedEmbedder |
 | `consolidation` | Background jobs: dedup/merge, decay, distillation, profile | ConsolidationRun, Distillation, ProfileDigest |

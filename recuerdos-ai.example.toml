@@ -422,8 +422,8 @@ mode = "api-key"
 # any client, under the key's scopes. Off, /ui is not mounted. See
 # docs/web-ui.md.
 enabled = true
-# Above this many memories the map opens on categories only and loads one
-# category's memories at a time (GET /v1/map?category=).
+# Above this many memories the map opens on topics only and loads one
+# topic's memories at a time (GET /v1/map?topic=).
 map_detail_limit = 5000
 
 [rate_limit]

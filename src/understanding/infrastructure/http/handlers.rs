@@ -2,7 +2,8 @@
 
 use super::dto::{
     AcceptedResponse, BatchAcceptedResponse, BatchIngestRequest, BatchIngestedResponse,
-    BatchItemResult, IngestRequest, IngestedResponse, JobResponse, status_name,
+    BatchItemResult, IngestRequest, IngestedResponse, JobResponse, SuggestRequest, SuggestResponse,
+    SuggestionResponse, status_name,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -10,11 +11,11 @@ use crate::identity::infrastructure::http::authenticated::{ReadAccess, WriteAcce
 use crate::shared::blocking::blocking;
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::{JobId, MemoryId};
-use crate::understanding::domain::ingest_job::{IngestPayload, JobStatus};
+use crate::understanding::domain::ingest_job::{IngestPayload, JobStatus, ProjectHint};
 use crate::understanding::domain::ingest_pipeline::IngestOutcome;
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use std::str::FromStr;
 
@@ -29,6 +30,7 @@ use std::str::FromStr;
 pub async fn ingest(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    headers: HeaderMap,
     Json(request): Json<IngestRequest>,
 ) -> Result<axum::response::Response> {
     if request.content.trim().is_empty() {
@@ -36,7 +38,8 @@ pub async fn ingest(
     }
 
     let wait = request.wait;
-    let payload: IngestPayload = request.into();
+    let mut payload: IngestPayload = request.into();
+    payload.project = project_hint(&headers);
 
     if !wait {
         let job_id = enqueue_only(&state, &context, &payload).await?;
@@ -67,6 +70,7 @@ pub async fn ingest(
                 // it will infer the cheerful option.
                 outcome: outcome.status,
                 understanding: state.understanding.enabled,
+                suggestions: outcome.suggestions,
             }),
         )
             .into_response()),
@@ -95,6 +99,7 @@ const MAX_BATCH_ITEMS: usize = 100;
 pub async fn ingest_batch(
     State(state): State<AppState>,
     WriteAccess(context): WriteAccess,
+    headers: HeaderMap,
     Json(request): Json<BatchIngestRequest>,
 ) -> Result<axum::response::Response> {
     if request.items.is_empty() {
@@ -121,7 +126,10 @@ pub async fn ingest_batch(
     let payloads: Vec<IngestPayload> = request
         .items
         .into_iter()
-        .map(|item| item.into_payload(client.clone()))
+        .map(|item| IngestPayload {
+            project: project_hint(&headers),
+            ..item.into_payload(client.clone())
+        })
         .collect();
 
     if !wait {
@@ -154,6 +162,7 @@ pub async fn ingest_batch(
                 memory_ids: outcome.memory_ids.iter().map(MemoryId::to_string).collect(),
                 outcome: Some(outcome.status),
                 error: None,
+                suggestions: outcome.suggestions,
             },
             Err(error) => BatchItemResult {
                 job_id: job_id.to_string(),
@@ -161,6 +170,7 @@ pub async fn ingest_batch(
                 memory_ids: Vec::new(),
                 outcome: None,
                 error: Some(error.to_string()),
+                suggestions: Vec::new(),
             },
         });
     }
@@ -173,6 +183,13 @@ pub async fn ingest_batch(
         }),
     )
         .into_response())
+}
+
+/// The project the client says it works in, carried on the job so the
+/// pipeline can file that project's rules under it.
+fn project_hint(headers: &HeaderMap) -> Option<ProjectHint> {
+    crate::shared::project_headers::project_from(headers)
+        .map(|(name, alias)| ProjectHint { name, alias })
 }
 
 /// Writes a job row for `payload` and returns its id, without running it.
@@ -249,4 +266,32 @@ pub async fn get_job(
         .ok_or_else(|| RaError::NotFound(format!("job {id} not found")))?;
 
     Ok(Json(JobResponse::from(&record)))
+}
+
+/// `POST /v1/memories:suggest`: what each memory in `ids` may really be,
+/// for the user to accept or change in the review queue (memory-structure-plan.md
+/// §8). Writes nothing. Needs a model: without one, `422 no_model`.
+pub async fn suggest_structures(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+    Json(request): Json<SuggestRequest>,
+) -> Result<Json<SuggestResponse>> {
+    let Some(suggester) = state.understanding.suggester.clone() else {
+        return Err(RaError::rejected(
+            "no_model",
+            "Suggestions need a language model: set [understanding].provider.",
+        ));
+    };
+    let ids = request
+        .ids
+        .iter()
+        .map(|raw| {
+            MemoryId::from_str(raw.trim())
+                .map_err(|_| RaError::Validation(format!("{raw:?} is not a memory id")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let suggestions = suggester.execute(&context, &ids).await?;
+    Ok(Json(SuggestResponse {
+        suggestions: suggestions.iter().map(SuggestionResponse::from).collect(),
+    }))
 }

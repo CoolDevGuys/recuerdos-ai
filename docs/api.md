@@ -52,7 +52,12 @@ Branch on `code`; `message` is for the human reading the log.
 | `forbidden` | 403 | Valid key, missing scope |
 | `not_found` | 404 | No such resource |
 | `conflict` | 409 | Violates a uniqueness rule |
+| *(a memory rule's code)* | 422 | A save or edit refused by a memory rule; see [memory-model.md](memory-model.md#when-a-save-is-refused) |
 | `internal` | 500 | Server fault |
+
+A `422` may carry `details`: for a `conflict` (the memory contradicts one already
+stored), the stored memories it names. A `422 conflict` and a `409 conflict` are
+different things; tell them apart by the status.
 
 `internal` responses always carry the literal message `"internal error"`.
 Details (paths, SQL, driver text) go to the server log with the request id
@@ -87,8 +92,11 @@ curl -H "Authorization: Bearer $KEY" localhost:7070/v1/ping
 ```
 
 ```json
-{"user": "alex", "scopes": ["read", "write"]}
+{"user": "alex", "scopes": ["read", "write"], "understanding": false}
 ```
+
+`understanding` says whether a language model is configured, so a client offers
+only what works (the web UI's review queue shows **Suggest** only with one).
 
 ## Request ids
 
@@ -112,6 +120,36 @@ just decided "this is worth remembering" knows what the memory should
 say. Use `/v1/memories` for raw material: a sentence the user typed, a
 session summary, a paragraph that might contain three durable facts or
 none.
+
+### The structure every memory carries
+
+Every memory the API returns (saves, reads, search hits, edits, the JSON
+export) also says what sort of statement it is, what it is about, and who it
+is true for ([ai-specs/memory-structure-plan.md](../ai-specs/memory-structure-plan.md)):
+
+```json
+{
+  "kind": "preference",
+  "topic": "coding",
+  "applies_to": {"target": "me"},
+  "origin": "user_said",
+  "needs_review": true
+}
+```
+
+| Field | Values |
+|---|---|
+| `kind` | `preference`, `rule`, `convention`, `decision`, `fact`, `experience`, `learning`, `procedure`, `reference`, `goal`, `plan` |
+| `topic` | `coding`, `tech`, `work`, `family`, `people`, `health`, `lifestyle`, `home`, `finance`, `travel`, `food`, or one of your own |
+| `applies_to.target` | `me` (you, everywhere), `project` (one project, named by `applies_to.project_name`), `general` (your world, not tied to a project) |
+| `origin` | `user_said`, `user_confirmed`, `inferred`, `document` |
+| `goal_status` | goals only: `active`, `achieved`, `abandoned` |
+| `needs_review` | `true` when the structure was derived from an old category and may be wrong |
+
+For now the structure is **derived from the category**, by the mapping in the
+plan's §8: every memory saved before this release was given one on the
+daemon's first start, and a new memory gets one from the category it is saved
+with. Saves that state the structure directly arrive in a later release.
 
 ### `POST /v1/memories` — ingest raw content
 
@@ -159,7 +197,16 @@ Runs the pipeline inline and answers `201` with what happened:
 ```
 
 For callers with nowhere to put a job id — the MCP tools use it, because
-an agent has to tell the user what happened in one turn. Everything else
+an agent has to tell the user what happened in one turn.
+
+Extraction gives every memory the same structure a direct save states, under the
+same rules. Send `X-Recuerdos-Project` (and `X-Recuerdos-Project-Remote`) to say
+which project the text is about; only a project you already have is used, since
+a job cannot ask whether a new one is meant. A project memory with no known
+project is filed as `general` and marked `needs_review`. Each memory is reconciled
+only against stored memories for the same scope. What the model only inferred
+about you is never stored as yours: it comes back in `suggestions`, with outcome
+`needs_confirmation` when nothing else was stored, for the agent to ask you about. Everything else
 should take the `202`. `understanding` is `false` when no provider is
 configured, so you can tell "extracted and reconciled" from "stored as
 sent".
@@ -207,27 +254,92 @@ Configuring a provider changes that with no client changes at all. See
 
 ### `POST /v1/memories:direct`
 
-Stores a memory exactly as given. Requires `write`.
+Stores a memory exactly as given, with its structure: what it is, what it is
+about, who it is true for, and where it came from. Requires `write`. Every field
+is explained, with examples, in [memory-model.md](memory-model.md).
 
 ```bash
 curl -X POST localhost:7070/v1/memories:direct \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{
     "content": "User forbids barrel files / index.ts re-exports",
-    "category": "preference.coding",
+    "kind": "preference",
+    "topic": "coding",
+    "applies_to": {"target": "me"},
+    "origin": "user_said",
     "tags": ["typescript", "imports"]
   }'
 ```
 
 | Field | Required | Notes |
 |---|---|---|
-| `content` | yes | 1–4000 characters |
-| `category` | no | Defaults to `fact.project`. See the taxonomy below |
+| `content` | yes | 1–4000 characters; never a secret |
+| `kind` | yes | `preference`, `rule`, `convention`, `decision`, `fact`, `experience`, `learning`, `procedure`, `reference`, `goal`, `plan` |
+| `topic` | yes | `coding`, `tech`, `work`, `family`, `people`, `health`, `lifestyle`, `home`, `finance`, `travel`, `food`, or one of yours |
+| `applies_to` | no | `{"target": "me" \| "project" \| "general", "project_name": …, "new_project": …}`. Defaults to the known project, else `general`; never `me` |
+| `origin` | yes | `user_said`, `user_confirmed`, `inferred`, `document` |
+| `subtopic` | no | A finer label within the topic |
 | `tags` | no | Lowercased and de-duplicated; max 32 |
-| `confidence` | no | `0.0`–`1.0`, default `1.0`; clamped, not rejected |
+| `valid_until` | for a plan | RFC 3339; in the future; not allowed on a goal |
+| `category` | no | The old category to also file it under; derived from kind and topic when left out |
 | `client`, `session_id` | no | Recorded as the memory's source |
-| `expires_at` | no | RFC 3339; must be in the future |
+| `replaces` | no | The id of a stored memory this one replaces: the user changed their mind. It must be yours, active and filed for the same `applies_to`; it is superseded (out of recall, kept in history) |
+| `coexists_with` | no | Ids of stored memories the user said this does not replace: both hold, so they are not reported as conflicts |
 
-Responds `201` with the stored memory.
+The old shape is refused: a body with only `category` gets `missing_field`, and
+`subcategory`, `confidence` and `expires_at` get `invalid_value` naming their
+replacement (`subtopic`, derived from `origin`, `valid_until`).
+
+Headers `X-Recuerdos-Project` (a project name) and `X-Recuerdos-Project-Remote`
+(a normalised git remote, `github.com/acme/quill`) say which project the caller is
+working in; the `recuerdos-ai mcp` shim sends them.
+
+Responds `201` with the memory, plus `status: "stored"`, `message` (how it was
+filed, to repeat to the user), `notes` (`applies_to_defaulted`,
+`filed_from_document`, `project_created`, `replaced`, `overrides`) and, after a
+`replaces`, the superseded ids in `replaced`:
+
+```json
+{
+  "id": "019f7c5a-…",
+  "content": "User forbids barrel files / index.ts re-exports",
+  "kind": "preference", "topic": "coding",
+  "applies_to": {"target": "me"}, "origin": "user_said",
+  "status": "stored",
+  "message": "Saved as your personal coding preference (applies to you everywhere).",
+  "notes": []
+}
+```
+
+When a stored memory for the same scope already says this, nothing is written:
+the answer is `200` with `status: "already_known"` and the memory already stored.
+
+Before anything is written, the save is compared with the nearest stored memories
+for the same `applies_to` (and, for a project memory, with the user's own, which it
+may override). One that contradicts a stored memory is refused:
+
+```json
+{"error": {
+  "code": "conflict",
+  "message": "It contradicts what is stored for me: \"The user prefers mocks…\" (id 019f…). Ask the user which holds. …",
+  "details": {
+    "judged": true,
+    "conflicts": [{"id": "019f…", "content": "The user prefers mocks…", "kind": "preference",
+                   "applies_to": "me", "reason": "…"}]
+  }
+}}
+```
+
+With a language model configured, the model judges it (one call per save, none
+when there is nothing to compare and nothing to check). Without one, only a near
+repeat of a stored memory is stopped, with `judged: false`. Then: save again with
+`replaces` (changed their mind), amend the stored one with `PATCH` (it was wrong),
+or save again with `coexists_with` (both hold).
+
+Any other rule that stops the save also answers `422` with its code:
+`missing_field`, `invalid_value`, `unknown_topic`, `kind_target_mismatch`,
+`needs_confirmation`, `scope_contradiction`, `no_project`, `unknown_project` or
+`secret`. The message says how to fix it. See
+[memory-model.md](memory-model.md#when-a-save-is-refused).
 
 ### `POST /v1/memories/search`
 
@@ -341,6 +453,17 @@ both halves (`queued_ms`, `inference_ms`) for every leg like that.
 | `since` | RFC 3339; excludes memories created before it |
 | `as_of` | RFC 3339. Reads the **graph hop** as of that instant in valid time — "who owned this before the reorg?" Omitted means now. Only the graph leg is affected; the vector and keyword legs ignore it |
 | `include_superseded` | Default `false` |
+| `kinds` | OR-ed: `preference`, `rule`, `convention`, … Unknown → `400` |
+| `topics` | OR-ed topic ids: `coding`, or one of yours |
+| `targets` | OR-ed: `me`, `project`, `general` |
+| `projects` | OR-ed project names, aliases or ids. Unknown → `422 unknown_project` |
+| `project` | The project the caller works in, when not sent as the `X-Recuerdos-Project` headers. Its memories rank with the user's own |
+| `scope` | `context` (default): another project's memories count half in rank and relevance, unless the query names that project. `all`: every scope alike |
+
+Any structure filter, like a category or tag filter, lifts the default relevance
+floor when `min_relevance` is not given. Each hit carries its `kind`, `topic` and
+`applies_to`; its `relevance` is the one the floor compared, demotion included.
+See [memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
 
 `as_of` is *valid* time — when a relation was true in the world — which is
 a different clock from `since` and `created_at`, both of which are
@@ -362,10 +485,24 @@ back as `If-Match` on a `PATCH` to make the edit conditional.
 
 ### `PATCH /v1/memories/{id}`
 
-Requires `write`. Any of `content`, `category`, `subcategory`, `tags`,
-`expires_at`. Omitting a field leaves it alone; sending `null` for
-`subcategory` or `expires_at` clears it. Editing content re-embeds and
-re-indexes; so does editing the labels under `document_text = "enriched"`.
+Requires `write`. Amends a memory in place: it keeps its id, and the audit trail
+keeps what it said before. Any of:
+
+| Field | Notes |
+|---|---|
+| `content` | The corrected sentence |
+| `kind`, `topic`, `applies_to` | A new structure, as a save takes it. Moving a memory to another scope is done here, not with `replaces` |
+| `subtopic` (or `subcategory`), `tags`, `category` | Labels. Re-filing under another category leaves a stated structure alone |
+| `valid_until` (or `expires_at`) | `null` clears it |
+| `goal_status` | `achieved` or `abandoned` closes a goal; `active` reopens it. Closing needs `origin` `user_said` or `user_confirmed`: only the user closes a goal (`inferred` is refused with `needs_confirmation`). A closed goal leaves recall and the profile and stays in history |
+| `origin` | Who asked for the change. It becomes the memory's origin when its wording, kind or scope changes |
+
+Omitting a field leaves it alone. What the memory becomes is held to the same
+rules as a save (no secret, a kind its target allows, a plan keeps its end date…)
+and a refusal is a `422` with its code. An amendment is not checked for conflicts:
+it is how one is resolved. Editing content re-embeds and re-indexes; so does
+editing the labels under `document_text = "enriched"`. The response is the memory
+plus a `message` ("Updated; filed as your personal coding preference.").
 
 **Conditional edits.** With `If-Match: "<updated_at>"` (the `ETag` of a
 `GET`, `PATCH` or restore, or the `updated_at` of any listing), the edit
@@ -398,17 +535,21 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
   "edges_omitted": false,
   "detail": "memories",
   "total": 222,
-  "category": null,
-  "nodes": [{"id": "…", "content": "…", "category": "preference.coding", …}],
+  "topic": null,
+  "nodes": [{"id": "…", "content": "…", "kind": "preference", "topic": "coding", …}],
   "edges": [
     {"kind": "similar", "source": "…", "target": "…", "weight": 0.62},
     {"kind": "relation", "source": "…", "target": "…", "predicate": "deploys_on", "entity": "Hetzner"}
   ],
-  "categories": [{"id": "preference.coding", "label": "Coding preference", "built_in": true,
-                  "count": 72, "subcategories": [{"name": "testing", "count": 9}]}],
-  "category_edges": [{"source": "decision", "target": "fact.project", "weight": 0.41}]
+  "topics": [{"id": "coding", "label": "Coding", "built_in": true,
+              "count": 72, "subtopics": [{"name": "testing", "count": 9}]}],
+  "topic_edges": [{"source": "coding", "target": "work", "weight": 0.41}]
 }
 ```
+
+The map groups memories **by topic** ([memory-structure-plan.md](../ai-specs/memory-structure-plan.md)
+D13); the web UI colours each memory by its kind. A topic's `label` is yours when
+you relabelled it (`PATCH /v1/topics/{id}`).
 
 - **`nodes`**: your active memories, plus superseded ones with
   `?include_superseded=true`.
@@ -420,24 +561,23 @@ Requires `read`. Your memories as a graph, for the web UI's mental map:
     of at least `min_weight` are returned.
 - **`relation` edges** come from the entity graph, and only when `[graph].enabled`
   is on. One memory stated a relation about an entity the other mentions.
-- **`category_edges`** add up the similarity between categories, scaled by
-  their sizes.
+- **`topic_edges`** add up the similarity between topics, scaled by their sizes.
 - **`generation`** changes whenever your memories do. The similarity links are
   cached until it changes.
 - **Above 3 000 memories** the pairwise comparison is skipped and
   `edges_omitted` is `true`.
-- **`?category=<id>`** limits the map to one category's memories, with the
-  similarity links among them. A category nobody uses gives an empty map,
-  not an error. `category` in the answer echoes it.
+- **`?topic=<id>`** limits the map to one topic's memories, with the similarity
+  links among them. A topic nobody uses gives an empty map, not an error.
+  `topic` in the answer echoes it.
 - **Above the detail limit** (`[ui].map_detail_limit`, 5 000 by default), a
-  whole-store map comes back as `"detail": "categories"`:
+  whole-store map comes back as `"detail": "topics"`:
   - `nodes` and `edges` are empty;
-  - `categories` carries every category with its count;
-  - `category_edges` link each category to its 3 most similar, by comparing the
-    categories' mean vectors.
+  - `topics` carries every topic with its count;
+  - `topic_edges` link each topic to its 3 most similar, by comparing the topics'
+    mean vectors.
 
-  Ask with `?category=` for each category's memories. A category map is
-  always `"detail": "memories"`, whatever its size.
+  Ask with `?topic=` for each topic's memories. A topic map is always
+  `"detail": "memories"`, whatever its size.
 - **`total`** is how many memories are in scope, whether or not `nodes`
   carries them.
 
@@ -447,12 +587,22 @@ Requires `write`. One edit applied to many memories:
 
 ```json
 {"ids": ["…", "…"],
- "set": {"category": "skill", "subcategory": null},
+ "set": {"kind": "reference", "topic": "tech", "applies_to": {"target": "general"},
+         "subcategory": null},
  "add_tags": ["rust"], "remove_tags": ["misc"]}
 ```
 
 - **`set`** fields are optional. `subcategory: null` clears the sub-label;
   leaving it out leaves it alone. `category` must be one of yours.
+- **`kind`, `topic` and `applies_to`** file every memory under the same structure,
+  as the review queue does ([memory-model.md](memory-model.md#memories-saved-before-structured-memories)).
+  Each memory must be able to take it under the save rules — a kind its target
+  allows, no project-bound wording ("this repo") filed as yours or general — or
+  nothing changes: `422 invalid_value` names the memories that cannot. A project
+  must already exist (`422 unknown_project`). The memories' origin becomes
+  `user_confirmed`, and they leave the review queue.
+- **`reviewed: true`** confirms each memory's structure as it is: it leaves the
+  review queue. A structure the rules refuse cannot be confirmed.
 - **All or nothing.** Every id must be one of your active memories, or
   nothing changes and the answer is `404` naming the ones that were not.
   Unchanged memories are left alone.
@@ -465,6 +615,50 @@ Requires `write`. One edit applied to many memories:
   (`bulk edit of 2 memories: category → skill; +tags rust`).
 
 Answers `{"memories": [...], "changed": 2, "reembedded": 2}`.
+
+### `POST /v1/memories:suggest`
+
+Requires `read`. `{"ids": ["…", …]}`, at most 25: what each memory may really be,
+for the review queue. One model call; nothing is written.
+
+```json
+{"suggestions": [
+  {"id": "…", "kind": "reference", "topic": "tech",
+   "applies_to": {"target": "general"}, "reason": "a path on the home NAS"}
+]}
+```
+
+A suggestion is kept only when the rules allow it (a kind its target allows, a
+topic and project you have); a memory the model could not place is missing from
+the answer. Without a model: `422 no_model`.
+
+## Topics
+
+What memories are about (memory-model.md, `topic`). The built-ins are fixed; you
+add your own.
+
+### `GET /v1/topics`
+
+Requires `read`. Built-ins in their order, then yours:
+
+```json
+{"topics": [{"id": "coding", "label": "Software", "default_label": "Coding",
+             "built_in": true, "count": 72}]}
+```
+
+`count` is your active memories about it.
+
+### `POST /v1/topics`
+
+Requires `write`. `{"id": "homelab", "label": "Home lab"}` (label optional). The id
+starts with a letter and uses `a–z 0–9 - _`, up to 32 characters. `409` when you have
+it or it is a built-in's. Answers `201` and the topic; saves can use it at once.
+
+### `PATCH /v1/topics/{id}`
+
+Requires `write`. `{"label": "Software"}`; `null` or blank goes back to the default
+wording. Any topic, built-ins included. Display only: memories store the id. To move
+memories between topics, bulk-edit them (`set.topic`).
 
 ## Categories you can change
 
@@ -530,6 +724,54 @@ All category writes and bulk edits are audited per memory moved. The audit
 sends one (the web UI sends `web-ui`), else `rest`. It is informational: any
 client can send any name.
 
+## Projects
+
+What memories with `applies_to.target: "project"` are filed under
+([memory-model.md](memory-model.md#projects)). Wherever a path takes
+`{project}`, it may be the project's id, its name, or one of its aliases (a
+former name, a git remote with `/` encoded as `%2F`, a folder name). An unknown
+one is `422 unknown_project`, listing the known names.
+
+### `GET /v1/projects`
+
+Requires `read`. Your projects, by name:
+
+```json
+{"projects": [
+  {"id": "019f…", "name": "quill", "memories": 12, "created_at": "2026-11-12T08:00:00Z",
+   "aliases": ["github.com/acme/quill", "quill-old"]}
+]}
+```
+
+`aliases` are what else finds the project: remotes, folder names, and the names it
+had before a rename. `memories` counts its active ones. `GET /v1/projects/{project}`
+answers one.
+
+### `PATCH /v1/projects/{project}`
+
+Requires `write`. `{"name": "quill-app"}` renames it. Memories store the project's
+id, so every one follows and nothing is re-embedded; the old name becomes an alias.
+Sent with the `X-Recuerdos-Project` headers of a folder whose project is the new
+name (the local MCP server sends them), that folder's remote is learned too: the fix
+for a repository renamed on its host. `409` when another project has the name (merge
+them instead); `422 invalid_value` for a name that is not lowercase `a–z 0–9 . _ -`.
+
+```json
+{"project": {"id": "019f…", "name": "quill-app", "aliases": ["github.com/acme/quill",
+             "github.com/acme/quill-app", "quill"], "memories": 12, "created_at": "…"},
+ "message": "Renamed quill to quill-app: its 12 memories moved with it, and quill still finds it. It is now also found by github.com/acme/quill-app.",
+ "previous": "quill", "moved": 0, "learned": ["github.com/acme/quill-app"]}
+```
+
+### `POST /v1/projects/{project}/merge`
+
+Requires `write`. `{"into": "quill"}`: every memory of `{project}`, superseded ones
+included, moves to `into` (audited per memory); `{project}`'s name and aliases find
+`into` from then on, and it is deleted. Answers like `PATCH`, with `moved` and
+`previous` (the project that went). Merged memories are not checked against each
+other; consolidation merges duplicates. `422 invalid_value` for a project merged
+into itself.
+
 ### `GET /v1/memories/export`
 
 Requires `read`. `?format=markdown` (default) or `?format=json`, plus
@@ -539,7 +781,9 @@ Markdown is grouped by category, one memory per line, so it stays
 greppable and diffable — a git-versioned backup is a `>` away.
 
 JSON items carry `id`, `content`, `category`, `subcategory` (or `null`),
-`tags`, `confidence`, `created_at`, `updated_at` and `superseded_by`.
+`tags`, `confidence`, `created_at`, `updated_at`, `superseded_by`, and the
+structure: `kind`, `topic`, `applies_to`, `origin`, `goal_status` (or `null`)
+and `needs_review`.
 
 ### `POST /v1/sessions/distill`
 
@@ -585,8 +829,10 @@ than storing nothing.
 ### `GET /v1/profile`
 
 Requires `read`. Returns the markdown digest described in
-[mcp.md](mcp.md#resource-memoryprofile) — the user's standing
-preferences, decisions and durable facts, capped at roughly 1500 tokens.
+[mcp.md](mcp.md#resource-memoryprofile) — about the user, then the current
+project, then their general world — capped at roughly 1500 tokens. The
+project is `?project=<name>`, or the `X-Recuerdos-Project` headers; without
+one, no project's memories are in it.
 
 With a provider configured this is written by a model and cached until
 the memories under it change; without one it is assembled from the

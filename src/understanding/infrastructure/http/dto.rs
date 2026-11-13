@@ -37,6 +37,7 @@ impl From<IngestRequest> for IngestPayload {
             tags: request.tags,
             client: request.client,
             session_id: request.session_id,
+            project: None,
         }
     }
 }
@@ -80,6 +81,7 @@ impl BatchIngestItem {
             tags: self.tags,
             client,
             session_id: self.session_id,
+            project: None,
         }
     }
 }
@@ -117,6 +119,10 @@ pub struct BatchItemResult {
     /// Present only for an item that failed, carrying why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Inferences about the user that were not stored: ask the user, and
+    /// save what they confirm with origin `user_confirmed`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
 }
 
 /// The 202 answer: what to poll.
@@ -142,6 +148,10 @@ pub struct IngestedResponse {
     /// False when no provider is configured, so a caller can tell
     /// "extracted and reconciled" from "stored as sent".
     pub understanding: bool,
+    /// Inferences about the user that were not stored (plan D5): ask the
+    /// user, and save what they confirm with origin `user_confirmed`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,5 +262,53 @@ mod tests {
         let encoded = serde_json::to_value(JobResponse::from(&record)).unwrap();
         assert!(encoded.get("error").is_none(), "{encoded}");
         assert_eq!(encoded["status"], "succeeded");
+    }
+}
+
+/// `POST /v1/memories:suggest`.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuggestRequest {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestResponse {
+    /// One per memory the model could place; one it could not is missing.
+    pub suggestions: Vec<SuggestionResponse>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestionResponse {
+    pub id: String,
+    pub kind: String,
+    pub topic: String,
+    pub applies_to: SuggestedAppliesTo,
+    pub reason: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SuggestedAppliesTo {
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+}
+
+impl From<&crate::understanding::application::structure_suggester::StructureSuggestion>
+    for SuggestionResponse
+{
+    fn from(
+        suggestion: &crate::understanding::application::structure_suggester::StructureSuggestion,
+    ) -> Self {
+        Self {
+            id: suggestion.id.to_string(),
+            kind: suggestion.kind.as_str().to_string(),
+            topic: suggestion.topic.clone(),
+            applies_to: SuggestedAppliesTo {
+                target: suggestion.target.as_str().to_string(),
+                project_name: suggestion.project.clone(),
+            },
+            reason: suggestion.reason.clone(),
+        }
     }
 }

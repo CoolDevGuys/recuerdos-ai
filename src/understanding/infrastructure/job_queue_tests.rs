@@ -64,6 +64,7 @@ fn payload(content: &str) -> IngestPayload {
         tags: vec![],
         client: Some("rest".to_string()),
         session_id: None,
+        project: None,
     }
 }
 

@@ -40,9 +40,9 @@ pub struct UiConfig {
     /// Whether `/ui` is mounted. Off, the routes do not exist (404) — the
     /// API is unaffected either way, and the UI holds no data of its own.
     pub enabled: bool,
-    /// Above this many memories, `GET /v1/map` answers with categories and
-    /// their counts only, and the map loads one category's memories at a
-    /// time (`?category=`). Laying out and drawing every memory of a very
+    /// Above this many memories, `GET /v1/map` answers with topics and
+    /// their counts only, and the map loads one topic's memories at a
+    /// time (`?topic=`). Laying out and drawing every memory of a very
     /// large store at once would stall the browser.
     pub map_detail_limit: usize,
 }

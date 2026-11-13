@@ -62,20 +62,82 @@ const memories = [
   { content: "No screens after 23:00 helps falling asleep", category: "health.sleep", tags: ["sleep"] },
 ];
 
-async function call(method, path, body) {
+async function call(method, path, body, allowed = []) {
   const response = await fetch(`${base}${path}`, {
     method,
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!response.ok && response.status !== 409) {
+  if (!response.ok && response.status !== 409 && !allowed.includes(response.status)) {
     throw new Error(`${method} ${path}: ${response.status} ${await response.text()}`);
   }
   return response;
 }
 
-await call("POST", "/v1/categories", { id: "health.sleep", label: "Sleep" });
-for (const memory of memories) {
-  await call("POST", "/v1/memories:direct", { ...memory, subcategory: memory.subcategory ?? null });
+// The structured save shape (ai-specs/memory-structure-plan.md §3): what each
+// memory is, what it is about and who it is true for. A project fact names its
+// project by tag, so the demo has projects to rename and merge.
+const STRUCTURE = {
+  "preference.coding": ["preference", "coding", "me"],
+  "preference.personal": ["preference", "lifestyle", "me"],
+  decision: ["decision", "work", "general"],
+  "fact.project": ["fact", "coding", "general"],
+  "fact.person": ["fact", "people", "general"],
+  experience: ["experience", "work", "general"],
+  skill: ["procedure", "tech", "general"],
+  reference: ["reference", "coding", "general"],
+  "health.sleep": ["fact", "health", "me"],
+};
+const PROJECTS = ["quill", "fern"];
+
+// Saved as stated; a near-repeat the daemon flags is a second fact here, kept on purpose.
+async function save(body) {
+  let response = await call("POST", "/v1/memories:direct", body, [422]);
+  if (response.status === 422) {
+    const error = (await response.json()).error;
+    const conflicts = error.details?.conflicts ?? [];
+    if (error.code !== "conflict" || conflicts.length === 0) throw new Error(`${body.content}: ${error.message}`);
+    response = await call("POST", "/v1/memories:direct", { ...body, coexists_with: conflicts.map((c) => c.id) });
+  }
 }
-console.log(`Saved ${memories.length} memories.`);
+
+await call("POST", "/v1/categories", { id: "health.sleep", label: "Sleep" });
+for (const { subcategory, ...memory } of memories) {
+  const [kind, topic, target] = STRUCTURE[memory.category];
+  const project = memory.category === "fact.project" ? PROJECTS.find((p) => memory.tags?.includes(p)) : undefined;
+  await save({
+    ...memory,
+    ...(subcategory != null && { subtopic: subcategory }),
+    kind,
+    topic,
+    applies_to: project === undefined ? { target } : { target: "project", project_name: project, new_project: true },
+    origin: "user_said",
+  });
+}
+
+// A project's own way of doing things, and a goal.
+await save({
+  content: "Quill's command handlers are named after the command they run",
+  kind: "convention",
+  topic: "coding",
+  applies_to: { target: "project", project_name: "quill" },
+  origin: "user_said",
+});
+await save({
+  content: "Run a half marathon in April",
+  kind: "goal",
+  topic: "health",
+  applies_to: { target: "me" },
+  origin: "user_said",
+});
+
+// Saved the old way, with no model: filed by a guess, for the review queue.
+const legacy = [
+  ["The home NAS keeps backups in /mnt/tank/backups", "fact.project"],
+  ["Always run the linter before pushing", "preference.coding"],
+  ["Chose Fly.io for the first deploy, moved off it later", "decision"],
+];
+for (const [content, category] of legacy) {
+  await call("POST", "/v1/memories", { content, category, wait: true });
+}
+console.log(`Saved ${memories.length + 2 + legacy.length} memories.`);

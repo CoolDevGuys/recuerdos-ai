@@ -7,10 +7,13 @@
 //!
 //! [`Memory`]: crate::memories::domain::memory::Memory
 
+use crate::memories::domain::applies_to::Target;
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::{Relation, normalise_predicate};
 use crate::memories::domain::entity_key::EntityKey;
+use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::{Entity, MAX_CONTENT_LEN};
+use crate::memories::domain::topic::Topic;
 use serde::Deserialize;
 use std::collections::HashSet;
 
@@ -48,6 +51,18 @@ pub struct RawCandidate {
     pub relations: Vec<RawRelation>,
     #[serde(default)]
     pub confidence: Option<f32>,
+    /// What sort of statement it is, who it is true for, and whether the
+    /// user said it (ai-specs/memory-structure-plan.md §9, "the pipeline").
+    /// Optional: a model that leaves them out still has its memory kept,
+    /// filed from the category and marked for review.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub applies_to: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,6 +102,36 @@ pub struct Candidate {
     /// records them alongside the memory's entities.
     pub relations: Vec<Relation>,
     pub confidence: f32,
+    pub placement: Placement,
+}
+
+/// What the model said a candidate is and who it is true for. Each part is
+/// `None` when the model left it out or gave something unusable; filing
+/// decides what to do about that (`candidate_filing`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Placement {
+    pub kind: Option<Kind>,
+    /// Built-in topics only: a model cannot create a user's topic.
+    pub topic: Option<Topic>,
+    pub target: Option<Target>,
+    /// The model concluded it rather than the user saying it.
+    pub inferred: bool,
+}
+
+impl Placement {
+    fn from_raw(
+        kind: Option<String>,
+        topic: Option<String>,
+        applies_to: Option<String>,
+        origin: Option<String>,
+    ) -> Self {
+        Self {
+            kind: kind.and_then(|raw| raw.parse().ok()),
+            topic: topic.and_then(|raw| Topic::built_in(&raw)),
+            target: applies_to.and_then(|raw| raw.parse().ok()),
+            inferred: origin.is_some_and(|raw| raw.trim().eq_ignore_ascii_case("inferred")),
+        }
+    }
 }
 
 /// Why a candidate was discarded. Reported rather than silently dropped:
@@ -143,6 +188,7 @@ impl RawCandidate {
                 .confidence
                 .unwrap_or(DEFAULT_CONFIDENCE)
                 .clamp(0.0, 1.0),
+            placement: Placement::from_raw(self.kind, self.topic, self.applies_to, self.origin),
         })
     }
 }

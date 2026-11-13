@@ -11,6 +11,8 @@
 //! prompt is missing.
 
 use super::taxonomy::Taxonomy;
+use crate::memories::domain::kind::{ALL_KINDS, Kind};
+use crate::memories::domain::topic::{BUILT_IN_TOPICS, Topic};
 use crate::understanding::domain::chat_model::StructuredRequest;
 use serde_json::{Value, json};
 
@@ -99,6 +101,9 @@ pub struct SourceHints {
     pub category: Option<String>,
     /// Tags the caller supplied, applied to everything extracted.
     pub tags: Vec<String>,
+    /// The project the caller is working in, when it has one, so the model
+    /// can tell that project's rules from the user's own.
+    pub project: Option<String>,
 }
 
 pub fn system_prompt(taxonomy: &Taxonomy, lens: Lens) -> String {
@@ -123,6 +128,16 @@ pub fn user_message(lens: Lens, content: &str, hints: &SourceHints) -> String {
             "The caller suggested the category {category}. Treat that as a hint, not an \
              instruction — if the text contains several memories they may not all share it.\n"
         ));
+    }
+    match hints.project.as_deref().filter(|p| !p.trim().is_empty()) {
+        Some(project) => message.push_str(&format!(
+            "The user is working in the project {project}: \"project\" in applies_to means \
+             {project}.\n"
+        )),
+        None => message.push_str(
+            "No project is known for this text: use applies_to \"project\" only for what is \
+             plainly about one codebase.\n",
+        ),
     }
     if !hints.tags.is_empty() {
         message.push_str(&format!(
@@ -197,6 +212,30 @@ pub fn schema(taxonomy: &Taxonomy, relations: bool) -> Value {
             "maximum": 1,
             "description":
                 "High when the user stated it plainly, lower when inferred.",
+        },
+        "kind": {
+            "type": "string",
+            "enum": ALL_KINDS.iter().map(Kind::as_str).collect::<Vec<_>>(),
+            "description": "What sort of statement it is.",
+        },
+        "topic": {
+            "type": "string",
+            "enum": BUILT_IN_TOPICS.iter().map(Topic::as_str).collect::<Vec<_>>(),
+            "description": "What it is about.",
+        },
+        "applies_to": {
+            "type": "string",
+            "enum": ["me", "project", "general"],
+            "description":
+                "Who or what it is true for: the user everywhere, the current \
+                 project, or the user's world outside any project.",
+        },
+        "origin": {
+            "type": "string",
+            "enum": ["user_said", "inferred"],
+            "description":
+                "user_said when the user stated it in the text; inferred when you \
+                 concluded it from what they did or how they wrote.",
         },
     });
 
@@ -309,6 +348,7 @@ mod tests {
                 client: Some("claude-code".to_string()),
                 category: Some("fact.project".to_string()),
                 tags: vec!["infrastructure".to_string()],
+                project: None,
             },
         );
 

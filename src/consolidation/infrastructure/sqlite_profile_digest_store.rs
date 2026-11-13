@@ -28,7 +28,7 @@ impl ProfileDigestStore for SqliteProfileDigestStore {
             optional(connection.query_row(
                 "SELECT content, fingerprint, generated_at FROM profile_digests
                  WHERE user_id = ?1 AND domain = ?2",
-                rusqlite::params![context.user_id().to_string(), domain.as_str()],
+                rusqlite::params![context.user_id().to_string(), domain.key()],
                 |row| {
                     Ok(build_digest(
                         row.get::<_, String>(0)?,
@@ -56,7 +56,7 @@ impl ProfileDigestStore for SqliteProfileDigestStore {
                         generated_at = excluded.generated_at",
                     rusqlite::params![
                         context.user_id().to_string(),
-                        domain.as_str(),
+                        domain.key(),
                         digest.content,
                         digest.fingerprint,
                         digest.generated_at.to_rfc3339(),
@@ -135,11 +135,11 @@ mod tests {
 
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &written)
+            .save(&fixture.alex, Domain::Me, &written)
             .unwrap();
 
         assert_eq!(
-            fixture.store.find(&fixture.alex, Domain::Coding).unwrap(),
+            fixture.store.find(&fixture.alex, Domain::Me).unwrap(),
             Some(written)
         );
     }
@@ -150,10 +150,7 @@ mod tests {
         // never had a provider configured.
         let fixture = fixture();
 
-        assert_eq!(
-            fixture.store.find(&fixture.alex, Domain::Coding).unwrap(),
-            None
-        );
+        assert_eq!(fixture.store.find(&fixture.alex, Domain::Me).unwrap(), None);
     }
 
     #[test]
@@ -164,17 +161,17 @@ mod tests {
 
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &digest("coding", "a"))
+            .save(&fixture.alex, Domain::Me, &digest("coding", "a"))
             .unwrap();
         fixture
             .store
-            .save(&fixture.alex, Domain::Personal, &digest("personal", "b"))
+            .save(&fixture.alex, Domain::General, &digest("personal", "b"))
             .unwrap();
 
         assert_eq!(
             fixture
                 .store
-                .find(&fixture.alex, Domain::Coding)
+                .find(&fixture.alex, Domain::Me)
                 .unwrap()
                 .unwrap()
                 .content,
@@ -183,7 +180,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .find(&fixture.alex, Domain::Personal)
+                .find(&fixture.alex, Domain::General)
                 .unwrap()
                 .unwrap()
                 .content,
@@ -197,16 +194,16 @@ mod tests {
 
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &digest("old", "a"))
+            .save(&fixture.alex, Domain::Me, &digest("old", "a"))
             .unwrap();
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &digest("new", "b"))
+            .save(&fixture.alex, Domain::Me, &digest("new", "b"))
             .unwrap();
 
         let stored = fixture
             .store
-            .find(&fixture.alex, Domain::Coding)
+            .find(&fixture.alex, Domain::Me)
             .unwrap()
             .unwrap();
         assert_eq!(stored.content, "new");
@@ -221,10 +218,10 @@ mod tests {
 
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &digest("", "a"))
+            .save(&fixture.alex, Domain::Me, &digest("", "a"))
             .unwrap();
 
-        let stored = fixture.store.find(&fixture.alex, Domain::Coding).unwrap();
+        let stored = fixture.store.find(&fixture.alex, Domain::Me).unwrap();
         assert!(stored.is_some(), "an empty digest was not cached");
         assert_eq!(stored.unwrap().content, "");
     }
@@ -236,15 +233,11 @@ mod tests {
 
         fixture
             .store
-            .save(
-                &fixture.alex,
-                Domain::Coding,
-                &digest("alex's profile", "a"),
-            )
+            .save(&fixture.alex, Domain::Me, &digest("alex's profile", "a"))
             .unwrap();
 
         assert_eq!(
-            fixture.store.find(&fixture.sam, Domain::Coding).unwrap(),
+            fixture.store.find(&fixture.sam, Domain::Me).unwrap(),
             None,
             "another user's digest was returned"
         );
@@ -255,18 +248,18 @@ mod tests {
         let fixture = fixture();
         fixture
             .store
-            .save(&fixture.alex, Domain::Coding, &digest("alex's", "a"))
+            .save(&fixture.alex, Domain::Me, &digest("alex's", "a"))
             .unwrap();
 
         fixture
             .store
-            .save(&fixture.sam, Domain::Coding, &digest("sam's", "b"))
+            .save(&fixture.sam, Domain::Me, &digest("sam's", "b"))
             .unwrap();
 
         assert_eq!(
             fixture
                 .store
-                .find(&fixture.alex, Domain::Coding)
+                .find(&fixture.alex, Domain::Me)
                 .unwrap()
                 .unwrap()
                 .content,

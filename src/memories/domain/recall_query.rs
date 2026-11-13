@@ -1,7 +1,10 @@
 //! What a caller is asking for.
 
+use super::applies_to::{ProjectRef, Target};
 use super::category::Category;
+use super::kind::Kind;
 use crate::shared::error::{RaError, Result};
+use crate::shared::ids::ProjectId;
 use chrono::{DateTime, Utc};
 
 /// Hard ceiling on `limit`. Results go into an agent's context window,
@@ -37,6 +40,24 @@ pub struct RecallQuery {
     /// [`memory_forget`](crate::memories::infrastructure::mcp) case
     /// believed results are how the wrong memory gets deleted.
     min_relevance: f32,
+    /// The structure filters (ai-specs/memory-structure-plan.md §9). Each
+    /// is OR-ed within itself and AND-ed with the others: `kinds: [rule,
+    /// convention]` and `targets: [project]` is "rules or conventions, of
+    /// some project".
+    kinds: Vec<Kind>,
+    /// Topic ids, lowercased: a built-in (`coding`) or one of the user's.
+    topics: Vec<String>,
+    targets: Vec<Target>,
+    projects: Vec<ProjectId>,
+    /// The project the caller is working in, when it has one. Recall ranks
+    /// it with the user's own and general memories, and demotes other
+    /// projects' (§9, scope-aware ranking).
+    context_project: Option<ProjectRef>,
+    /// Whether recall should demote memories of projects other than
+    /// `context_project`. On for an agent-facing read; off by default so
+    /// reconciliation, conflict checks and merges, which ask "what is
+    /// related?", see every scope as it is.
+    scoped: bool,
 }
 
 impl RecallQuery {
@@ -76,6 +97,12 @@ impl RecallQuery {
             limit: (limit as usize).min(MAX_LIMIT),
             include_superseded: false,
             min_relevance: 0.0,
+            kinds: Vec::new(),
+            topics: Vec::new(),
+            targets: Vec::new(),
+            projects: Vec::new(),
+            context_project: None,
+            scoped: false,
         })
     }
 
@@ -129,6 +156,62 @@ impl RecallQuery {
     pub fn with_min_relevance(mut self, min_relevance: f32) -> Self {
         self.min_relevance = min_relevance.clamp(0.0, 1.0);
         self
+    }
+
+    pub fn with_kinds(mut self, kinds: Vec<Kind>) -> Self {
+        self.kinds = kinds;
+        self
+    }
+
+    pub fn with_topics(mut self, topics: Vec<String>) -> Self {
+        self.topics = topics
+            .into_iter()
+            .map(|topic| topic.trim().to_ascii_lowercase())
+            .filter(|topic| !topic.is_empty())
+            .collect();
+        self
+    }
+
+    pub fn with_targets(mut self, targets: Vec<Target>) -> Self {
+        self.targets = targets;
+        self
+    }
+
+    pub fn with_projects(mut self, projects: Vec<ProjectId>) -> Self {
+        self.projects = projects;
+        self
+    }
+
+    /// Ranks for a caller working in `project` (or in none), demoting
+    /// other projects' memories. What every agent-facing recall asks for.
+    pub fn in_context(mut self, project: Option<ProjectRef>) -> Self {
+        self.context_project = project;
+        self.scoped = true;
+        self
+    }
+
+    pub fn kinds(&self) -> &[Kind] {
+        &self.kinds
+    }
+
+    pub fn topics(&self) -> &[String] {
+        &self.topics
+    }
+
+    pub fn targets(&self) -> &[Target] {
+        &self.targets
+    }
+
+    pub fn projects(&self) -> &[ProjectId] {
+        &self.projects
+    }
+
+    pub fn context_project(&self) -> Option<&ProjectRef> {
+        self.context_project.as_ref()
+    }
+
+    pub fn scoped(&self) -> bool {
+        self.scoped
     }
 
     pub fn text(&self) -> &str {

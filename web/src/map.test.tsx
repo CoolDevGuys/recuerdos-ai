@@ -25,9 +25,10 @@ describe("the map view", () => {
     expect(window.location.pathname).toBe("/ui/map");
     expect(screen.getByRole("link", { name: "Map" })).toHaveAttribute("aria-current", "page");
     expect(renderer.model?.memories.map((m) => m.id).sort()).toEqual(["a", "b", "c"]);
+    // Grouped by topic (plan D13).
     expect(renderer.model?.categories.map((c) => [c.category, c.count])).toEqual([
-      ["preference.coding", 2],
-      ["fact.project", 1],
+      ["coding", 2],
+      ["work", 1],
     ]);
   });
 
@@ -39,17 +40,24 @@ describe("the map view", () => {
     expect(await screen.findByRole("application", { name: /Map of 3 memories/ })).toBeInTheDocument();
   });
 
-  it("lists each category with its glyph, label and count, and filters it out on click", async () => {
+  it("lists each topic with its label and count, and filters it out on click", async () => {
     const { renderer, user } = await openMap();
-    const legend = screen.getByRole("heading", { name: "Categories" }).parentElement!;
-    const coding = within(legend).getByRole("button", { name: /Coding preference/ });
+    const legend = screen.getByRole("heading", { name: "Topics" }).parentElement!;
+    const coding = within(legend).getByRole("button", { name: /Coding/ });
     expect(coding).toHaveTextContent("2");
     expect(coding).toHaveAttribute("aria-pressed", "true");
 
     await user.click(coding);
 
     expect(coding).toHaveAttribute("aria-pressed", "false");
-    expect(renderer.lastView?.hiddenCategories.has("preference.coding")).toBe(true);
+    expect(renderer.lastView?.hiddenCategories.has("coding")).toBe(true);
+  });
+
+  it("says what each colour means: one kind each", async () => {
+    await openMap();
+    const key = screen.getByRole("region", { name: /Colours/ });
+    expect(within(key).getByText("Preference")).toBeInTheDocument();
+    expect(within(key).getByText("Fact")).toBeInTheDocument();
   });
 
   it("zooms to a level on request and shows which level the camera is on", async () => {
@@ -83,11 +91,11 @@ describe("the map view", () => {
     renderer.clickMemory("c");
     const dialog = await screen.findByRole("dialog", { name: "Edit memory" });
 
-    await user.selectOptions(within(dialog).getByLabelText("Category"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Tech");
     await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => expect(renderer.model).not.toBe(before));
-    expect(renderer.model?.byId.get("c")?.category).toBe("decision");
+    expect(renderer.model?.byId.get("c")?.category).toBe("tech");
   });
 
   it("offers the relations toggle only when there are relations", async () => {
@@ -144,7 +152,7 @@ describe("recall preview", () => {
     await user.click(screen.getByRole("button", { name: "Recall" }));
 
     expect(await screen.findByText(/1\. The user prefers pnpm/)).toBeInTheDocument();
-    expect(screen.getByText(/% relevant · Coding preference · meaning #1 · words #1/)).toBeInTheDocument();
+    expect(screen.getByText(/% relevant · Preference · Coding · you · meaning #1 · words #1/)).toBeInTheDocument();
     expect([...(renderer.lastView?.highlighted ?? [])]).toEqual(["a"]);
     expect(renderer.focused).toEqual([["a"]]);
   });
@@ -223,41 +231,41 @@ describe("a store above the detail limit", () => {
     renderApp({ server, keyStore: memoryKeyStore(ALEX_KEY), renderer });
     const user = userEvent.setup();
     await user.click(await screen.findByRole("link", { name: "Map" }));
-    await screen.findByRole("application", { name: /showing categories only/ });
+    await screen.findByRole("application", { name: /showing topics only/ });
     await waitFor(() => expect(renderer.model?.aggregate).toBe(true));
     return { server, renderer, user };
   }
 
-  it("shows the categories and says why", async () => {
+  it("shows the topics and says why", async () => {
     const { renderer } = await openAggregate();
 
     expect(screen.getByText(/You have 3 memories, more than the map draws at once/)).toBeInTheDocument();
     expect(renderer.model?.categories.map((c) => [c.category, c.count])).toEqual([
-      ["preference.coding", 2],
-      ["fact.project", 1],
+      ["coding", 2],
+      ["work", 1],
     ]);
     expect(screen.queryByRole("group", { name: "Zoom level" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Lasso select" })).not.toBeInTheDocument();
   });
 
-  it("opens one category's map from the list, and comes back", async () => {
+  it("opens one topic's map from the list, and comes back", async () => {
     const { server, renderer, user } = await openAggregate();
 
-    await user.click(screen.getByRole("button", { name: "Open Coding preference, 2 memories" }));
+    await user.click(screen.getByRole("button", { name: "Open Coding, 2 memories" }));
 
-    expect(await screen.findByRole("heading", { name: /Coding preference · 2 memories/ })).toBeInTheDocument();
-    await waitFor(() => expect(renderer.model?.scope).toBe("preference.coding"));
+    expect(await screen.findByRole("heading", { name: /Coding · 2 memories/ })).toBeInTheDocument();
+    await waitFor(() => expect(renderer.model?.scope).toBe("coding"));
     expect(renderer.model?.memories.map((m) => m.id).sort()).toEqual(["a", "b"]);
-    expect(server.calls.filter((c) => c.method === "map").map((c) => c.id ?? "*")).toEqual(["*", "preference.coding"]);
+    expect(server.calls.filter((c) => c.method === "map").map((c) => c.id ?? "*")).toEqual(["*", "coding"]);
 
-    await user.click(screen.getByRole("button", { name: /All categories/ }));
+    await user.click(screen.getByRole("button", { name: /All topics/ }));
     await waitFor(() => expect(renderer.model?.aggregate).toBe(true));
   });
 
-  it("opens a category clicked on the map", async () => {
+  it("opens a topic clicked on the map", async () => {
     const { renderer } = await openAggregate();
 
-    renderer.clickCategory("fact.project");
+    renderer.clickCategory("work");
 
     await waitFor(() => expect(renderer.model?.memories.map((m) => m.id)).toEqual(["c"]));
   });

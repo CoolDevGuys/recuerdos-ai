@@ -24,7 +24,8 @@
 //! capped, and what survives the cap is chosen rather than arbitrary.
 
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::domain::category::Category;
+use crate::memories::domain::applies_to::{AppliesTo, ProjectRef};
+use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::shared::clock::Clock;
@@ -41,23 +42,87 @@ const CHARS_PER_TOKEN: usize = 4;
 /// this is rent paid on every session, forever.
 pub const DEFAULT_TOKEN_BUDGET: usize = 1_500;
 
-/// Cap per category, so one prolific category cannot crowd out the rest.
-/// A profile listing forty coding preferences and no decisions is a worse
+/// Cap per kind within a scope, so one prolific kind cannot crowd out the
+/// rest. A profile listing forty coding preferences and no rules is a worse
 /// profile than one showing eight of each.
-const MAX_PER_CATEGORY: usize = 8;
+const MAX_PER_KIND: usize = 8;
 
-/// Order categories appear in. Preferences first because they are the ones
-/// that change what an agent *does*; references last because they are
-/// lookups, not context.
-const CATEGORY_ORDER: &[Category] = &[
-    Category::PreferenceCoding,
-    Category::PreferencePersonal,
-    Category::Decision,
-    Category::FactProject,
-    Category::FactPerson,
-    Category::Skill,
-    Category::Experience,
-    Category::Reference,
+/// What a profile is made of, in the order it is read
+/// (ai-specs/memory-structure-plan.md §9, D14): who the user is everywhere,
+/// then the project the caller is in, then the user's world outside any
+/// project. Within each, the kinds that change what an agent *does* come
+/// first. Another project's memories are never in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileScope {
+    Me,
+    Project,
+    General,
+}
+
+impl ProfileScope {
+    pub fn kinds(&self) -> &'static [Kind] {
+        match self {
+            ProfileScope::Me => &[
+                Kind::Preference,
+                Kind::Rule,
+                Kind::Goal,
+                Kind::Fact,
+                Kind::Learning,
+                Kind::Experience,
+                Kind::Procedure,
+                Kind::Reference,
+            ],
+            ProfileScope::Project => &[
+                Kind::Convention,
+                Kind::Rule,
+                Kind::Decision,
+                Kind::Goal,
+                Kind::Plan,
+                Kind::Procedure,
+                Kind::Fact,
+                Kind::Learning,
+                Kind::Experience,
+                Kind::Reference,
+            ],
+            ProfileScope::General => &[
+                Kind::Rule,
+                Kind::Procedure,
+                Kind::Plan,
+                Kind::Decision,
+                Kind::Reference,
+                Kind::Fact,
+                Kind::Learning,
+                Kind::Experience,
+            ],
+        }
+    }
+
+    /// Which part of the profile a memory belongs to, for a caller in
+    /// `project`; `None` for another project's memory.
+    pub fn of(memory: &Memory, project: Option<&ProjectRef>) -> Option<ProfileScope> {
+        match memory.structure().applies_to() {
+            AppliesTo::Me => Some(ProfileScope::Me),
+            AppliesTo::General => Some(ProfileScope::General),
+            AppliesTo::Project(theirs) => {
+                (project.map(|p| p.id) == Some(theirs.id)).then_some(ProfileScope::Project)
+            }
+        }
+    }
+
+    pub fn heading(&self, project: Option<&ProjectRef>) -> String {
+        match (self, project) {
+            (ProfileScope::Me, _) => "About you (everywhere)".to_string(),
+            (ProfileScope::Project, Some(project)) => format!("This project: {}", project.name),
+            (ProfileScope::Project, None) => "This project".to_string(),
+            (ProfileScope::General, _) => "Your world (not tied to a project)".to_string(),
+        }
+    }
+}
+
+pub const PROFILE_SCOPES: &[ProfileScope] = &[
+    ProfileScope::Me,
+    ProfileScope::Project,
+    ProfileScope::General,
 ];
 
 pub struct ProfileAssembler {
@@ -75,7 +140,18 @@ impl ProfileAssembler {
         }
     }
 
+    /// The profile for a caller in no project.
+    #[cfg(test)]
     pub fn execute(&self, context: &UserContext) -> Result<String> {
+        self.execute_in(context, None)
+    }
+
+    /// The profile for a caller working in `project`.
+    pub fn execute_in(
+        &self,
+        context: &UserContext,
+        project: Option<&ProjectRef>,
+    ) -> Result<String> {
         let now = self.clock.now();
         let memories = self.memories.list(context, false)?;
         let active: Vec<Memory> = memories
@@ -83,7 +159,13 @@ impl ProfileAssembler {
             .filter(|memory| memory.is_active_at(now))
             .collect();
 
-        Ok(render(context.handle(), &active, now, self.char_budget()))
+        Ok(render(
+            context.handle(),
+            &active,
+            project,
+            now,
+            self.char_budget(),
+        ))
     }
 
     fn char_budget(&self) -> usize {
@@ -91,13 +173,23 @@ impl ProfileAssembler {
     }
 }
 
-fn render(handle: &str, memories: &[Memory], now: DateTime<Utc>, char_budget: usize) -> String {
+fn render(
+    handle: &str,
+    memories: &[Memory],
+    project: Option<&ProjectRef>,
+    now: DateTime<Utc>,
+    char_budget: usize,
+) -> String {
     let mut output = format!(
         "# Memory profile: {handle} (updated {})\n",
         now.format("%Y-%m-%d")
     );
 
-    if memories.is_empty() {
+    let relevant: Vec<(ProfileScope, &Memory)> = memories
+        .iter()
+        .filter_map(|memory| ProfileScope::of(memory, project).map(|scope| (scope, memory)))
+        .collect();
+    if relevant.is_empty() {
         output.push_str(
             "\nNo memories stored yet. Save one with the `memory_save` tool when \
              the user states a durable preference, decision or fact.\n",
@@ -108,54 +200,59 @@ fn render(handle: &str, memories: &[Memory], now: DateTime<Utc>, char_budget: us
     let mut included = 0usize;
     let mut omitted = 0usize;
 
-    for category in CATEGORY_ORDER {
-        let mut group: Vec<&Memory> = memories
+    for scope in PROFILE_SCOPES {
+        let theirs: Vec<&Memory> = relevant
             .iter()
-            .filter(|memory| memory.category() == category)
+            .filter(|(of, _)| of == scope)
+            .map(|(_, memory)| *memory)
             .collect();
-        if group.is_empty() {
+        if theirs.is_empty() {
             continue;
         }
+        let heading = format!("\n## {}\n", scope.heading(project));
+        let mut wrote_heading = false;
 
-        rank_for_profile(&mut group, now);
-        let total = group.len();
-        let shown = group.len().min(MAX_PER_CATEGORY);
-        omitted += total - shown;
-
-        let mut section = format!("\n## {}\n", heading(category));
-        for memory in group.iter().take(shown) {
-            section.push_str(&format!("- {}\n", one_line(memory)));
+        // The scope's own kinds first, in order, then any it does not list
+        // (a stored row the rules have since moved), so none is invisible.
+        let mut kinds: Vec<Kind> = scope.kinds().to_vec();
+        for memory in &theirs {
+            if !kinds.contains(&memory.structure().kind()) {
+                kinds.push(memory.structure().kind());
+            }
         }
 
-        // Stop at the budget rather than truncating mid-section: half a
-        // heading tells an agent nothing.
-        if output.len() + section.len() > char_budget {
-            omitted += total.min(MAX_PER_CATEGORY);
-            continue;
-        }
+        for kind in kinds {
+            let mut group: Vec<&Memory> = theirs
+                .iter()
+                .copied()
+                .filter(|memory| memory.structure().kind() == kind)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            rank_for_profile(&mut group, now);
+            let total = group.len();
+            let shown = total.min(MAX_PER_KIND);
+            omitted += total - shown;
 
-        output.push_str(&section);
-        included += shown;
-    }
+            let mut section = String::new();
+            if !wrote_heading {
+                section.push_str(&heading);
+            }
+            section.push_str(&format!("\n### {}\n", kind_heading(kind)));
+            for memory in group.iter().take(shown) {
+                section.push_str(&format!("- {}\n", one_line(memory)));
+            }
 
-    // Custom categories aren't in CATEGORY_ORDER; gather them last so a
-    // configured extra category is never silently invisible.
-    let mut extras: Vec<&Memory> = memories
-        .iter()
-        .filter(|memory| !CATEGORY_ORDER.contains(memory.category()))
-        .collect();
-    if !extras.is_empty() {
-        rank_for_profile(&mut extras, now);
-        let shown = extras.len().min(MAX_PER_CATEGORY);
-        let mut section = String::from("\n## other\n");
-        for memory in extras.iter().take(shown) {
-            section.push_str(&format!("- {}\n", one_line(memory)));
-        }
-        if output.len() + section.len() <= char_budget {
+            // Stop at the budget rather than truncating mid-section: half a
+            // heading tells an agent nothing.
+            if output.len() + section.len() > char_budget {
+                omitted += shown;
+                continue;
+            }
             output.push_str(&section);
+            wrote_heading = true;
             included += shown;
-        } else {
-            omitted += shown;
         }
     }
 
@@ -169,7 +266,23 @@ fn render(handle: &str, memories: &[Memory], now: DateTime<Utc>, char_budget: us
     output
 }
 
-/// Orders a category's memories by what deserves the budget.
+fn kind_heading(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Preference => "Preferences",
+        Kind::Rule => "Rules",
+        Kind::Convention => "Conventions",
+        Kind::Decision => "Decisions",
+        Kind::Fact => "Facts",
+        Kind::Experience => "Experiences",
+        Kind::Learning => "Learnings",
+        Kind::Procedure => "Procedures",
+        Kind::Reference => "References",
+        Kind::Goal => "Goals",
+        Kind::Plan => "Plans",
+    }
+}
+
+/// Orders a kind's memories by what deserves the budget.
 ///
 /// Confidence first (an uncertain memory is a poor thing to assert at
 /// session start), then recency. Access count would be the better signal
@@ -195,24 +308,11 @@ fn one_line(memory: &Memory) -> String {
     }
 }
 
-fn heading(category: &Category) -> &str {
-    match category {
-        Category::PreferenceCoding => "Coding preferences",
-        Category::PreferencePersonal => "Personal preferences",
-        Category::Decision => "Decisions",
-        Category::FactProject => "Project facts",
-        Category::FactPerson => "People",
-        Category::Skill => "Skills",
-        Category::Experience => "Experiences",
-        Category::Reference => "References",
-        Category::Custom(name) => name,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::memories::application::test_doubles::{Fixture, new_memory, now};
+    use crate::memories::domain::category::Category;
 
     fn assembler(fixture: &Fixture) -> ProfileAssembler {
         ProfileAssembler::new(
@@ -247,9 +347,10 @@ mod tests {
         let profile = assembler(&fixture).execute(&fixture.alex).unwrap();
 
         assert!(profile.starts_with("# Memory profile: alex"), "{profile}");
-        assert!(profile.contains("## Coding preferences"), "{profile}");
+        assert!(profile.contains("## About you (everywhere)"), "{profile}");
+        assert!(profile.contains("### Preferences"), "{profile}");
         assert!(profile.contains("- Prefers pnpm; never npm"), "{profile}");
-        assert!(profile.contains("## Decisions"), "{profile}");
+        assert!(profile.contains("### Decisions"), "{profile}");
     }
 
     #[test]
@@ -265,8 +366,8 @@ mod tests {
 
         let profile = assembler(&fixture).execute(&fixture.alex).unwrap();
 
-        let preferences = profile.find("## Coding preferences").unwrap();
-        let facts = profile.find("## Project facts").unwrap();
+        let preferences = profile.find("### Preferences").unwrap();
+        let facts = profile.find("### Facts").unwrap();
         assert!(preferences < facts, "{profile}");
     }
 
@@ -359,15 +460,15 @@ mod tests {
         );
         assert_eq!(
             profile.matches("- coding preference").count(),
-            MAX_PER_CATEGORY,
-            "per-category cap not applied: {profile}"
+            MAX_PER_KIND,
+            "per-kind cap not applied: {profile}"
         );
     }
 
     #[test]
     fn higher_confidence_memories_are_preferred() {
         let fixture = Fixture::new();
-        for index in 0..MAX_PER_CATEGORY {
+        for index in 0..MAX_PER_KIND {
             let mut memory = new_memory(&format!("uncertain guess {index}"));
             memory.confidence = 0.2;
             fixture
@@ -442,5 +543,100 @@ mod tests {
         let profile = assembler(&fixture).execute(&fixture.alex).unwrap();
 
         assert!(profile.contains("the nas has 40tb"), "{profile}");
+    }
+
+    fn in_project(fixture: &Fixture, project: &ProjectRef, kind: Kind, content: &str) {
+        use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
+        use crate::memories::domain::topic::Topic;
+        let structure = MemoryStructure::new(
+            kind,
+            Topic::Coding,
+            AppliesTo::Project(project.clone()),
+            Origin::UserSaid,
+            None,
+        )
+        .unwrap();
+        fixture
+            .saver()
+            .execute_structured(&fixture.alex, new_memory(content), structure, "test")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_current_projects_memories_follow_yours_and_other_projects_are_left_out() {
+        let fixture = Fixture::new();
+        let registry = fixture.project_registry();
+        let quill = registry.create(&fixture.alex, "quill", &[]).unwrap();
+        let fern = registry.create(&fixture.alex, "fern", &[]).unwrap();
+        save_in(&fixture, Category::PreferenceCoding, "prefers pnpm");
+        save_in(
+            &fixture,
+            Category::Reference,
+            "the nas backups are in /mnt/tank",
+        );
+        in_project(
+            &fixture,
+            &quill,
+            Kind::Convention,
+            "use cases are named by intent",
+        );
+        in_project(
+            &fixture,
+            &fern,
+            Kind::Convention,
+            "fern names handlers after commands",
+        );
+
+        let profile = assembler(&fixture)
+            .execute_in(&fixture.alex, Some(&quill))
+            .unwrap();
+
+        let you = profile.find("## About you").unwrap();
+        let here = profile.find("## This project: quill").unwrap();
+        let general = profile.find("## Your world").unwrap();
+        assert!(you < here && here < general, "{profile}");
+        assert!(
+            profile.contains("use cases are named by intent"),
+            "{profile}"
+        );
+        assert!(
+            !profile.contains("fern names handlers"),
+            "another project's convention is in the profile: {profile}"
+        );
+
+        let nowhere = assembler(&fixture).execute(&fixture.alex).unwrap();
+        assert!(!nowhere.contains("This project"), "{nowhere}");
+        assert!(!nowhere.contains("named by intent"), "{nowhere}");
+        assert!(nowhere.contains("prefers pnpm"), "{nowhere}");
+    }
+
+    #[test]
+    fn a_closed_goal_is_not_in_the_profile() {
+        use crate::memories::domain::memory_structure::{GoalStatus, MemoryStructure, Origin};
+        use crate::memories::domain::topic::Topic;
+        let fixture = Fixture::new();
+        for (content, status) in [
+            ("run a half marathon in april", GoalStatus::Active),
+            ("learn the cello", GoalStatus::Abandoned),
+        ] {
+            let structure = MemoryStructure::new(
+                Kind::Goal,
+                Topic::Health,
+                AppliesTo::Me,
+                Origin::UserSaid,
+                Some(status),
+            )
+            .unwrap();
+            fixture
+                .saver()
+                .execute_structured(&fixture.alex, new_memory(content), structure, "test")
+                .unwrap();
+        }
+
+        let profile = assembler(&fixture).execute(&fixture.alex).unwrap();
+
+        assert!(profile.contains("### Goals"), "{profile}");
+        assert!(profile.contains("half marathon"), "{profile}");
+        assert!(!profile.contains("cello"), "{profile}");
     }
 }

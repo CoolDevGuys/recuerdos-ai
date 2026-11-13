@@ -14,6 +14,7 @@ export function MemoryFieldset({
   categories,
   readOnly,
   categoryOptional = false,
+  showCategory = true,
   onChange,
   onBlur,
 }: {
@@ -23,6 +24,8 @@ export function MemoryFieldset({
   readOnly: boolean;
   /** With AI classification the category is only a hint, and may be left to the model. */
   categoryOptional?: boolean;
+  /** A structured save derives the category from what the memory is, so it does not ask. */
+  showCategory?: boolean;
   onChange: (field: keyof FormValues, value: string) => void;
   onBlur: (field: keyof FormValues) => void;
 }) {
@@ -58,6 +61,7 @@ export function MemoryFieldset({
         <FieldError id={`${ids.content}-error`} message={errors.content} />
       </div>
 
+      {showCategory && (
       <div>
         <label htmlFor={ids.category} className={styles.label}>
           Category{categoryOptional && <span className="font-normal text-slate-500"> (a hint for the AI)</span>}
@@ -82,6 +86,7 @@ export function MemoryFieldset({
         </select>
         <FieldError id={`${ids.category}-error`} message={errors.category} />
       </div>
+      )}
 
       {!categoryOptional && (
         <div>
@@ -100,7 +105,7 @@ export function MemoryFieldset({
             className={styles.field}
           />
           <p id={`${ids.subcategory}-hint`} className={styles.hint}>
-            A narrower topic inside the category, such as “testing”.
+            A narrower label, such as “testing”.
           </p>
           <FieldError id={`${ids.subcategory}-error`} message={errors.subcategory} />
         </div>

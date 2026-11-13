@@ -758,6 +758,68 @@ pub fn apply_expansion(
 /// number", which is the least of everything, so it is pinned to the bottom —
 /// and pinning it keeps the order total, since every pair is answered the same
 /// way no matter what the sort asks in between.
+/// What a memory of another project is worth, against the user's own, the
+/// general ones and the current project's (ai-specs/memory-structure-plan.md
+/// §9, scope-aware ranking). Applied to the score and to the relevance, so a
+/// weak match from another project falls under the agent-facing floor
+/// (E16) while a strong one is still shown, lower down (E17).
+pub const OTHER_PROJECT_WEIGHT: f32 = 0.5;
+
+/// Whether the query names a project, so its memories are what is being
+/// asked about: "how did quill handle handlers?", "quill's conventions",
+/// "the quill-app release". Word-bounded and case-insensitive, with
+/// `-`, `_` and `.` read as spaces on both sides.
+pub fn names_project(query: &str, name: &str) -> bool {
+    fn words(text: &str) -> String {
+        let spaced: String = text
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+            .collect();
+        format!(
+            " {} ",
+            spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+        )
+    }
+    let name = words(name);
+    name.trim().len() > 1 && words(query).contains(&name)
+}
+
+/// Demotes memories that belong to a project the caller is not working in
+/// and did not ask about, then restores the order. Only for a scoped
+/// query ([`RecallQuery::in_context`]); returns how many it demoted.
+///
+/// [`RecallQuery::in_context`]: super::recall_query::RecallQuery::in_context
+pub fn demote_out_of_scope(
+    ranked: &mut [ScoredMemory],
+    query: &super::recall_query::RecallQuery,
+) -> usize {
+    if !query.scoped() {
+        return 0;
+    }
+    let current = query.context_project().map(|project| project.id);
+    let mut demoted = 0;
+    for scored in ranked.iter_mut() {
+        let Some(project) = scored.memory.structure().applies_to().project() else {
+            continue;
+        };
+        let wanted = current == Some(project.id)
+            || query.projects().contains(&project.id)
+            || names_project(query.text(), &project.name);
+        if !wanted {
+            scored.score *= OTHER_PROJECT_WEIGHT;
+            scored.relevance *= OTHER_PROJECT_WEIGHT;
+            demoted += 1;
+        }
+    }
+    if demoted > 0 {
+        // The relevance tiebreak `apply_relevance` sorts with, so memories
+        // nothing demoted keep the order they had among themselves.
+        sort_ranked_with_relevance(ranked);
+    }
+    demoted
+}
+
 fn highest_first(a: f32, b: f32) -> std::cmp::Ordering {
     match (a.is_nan(), b.is_nan()) {
         (true, true) => std::cmp::Ordering::Equal,

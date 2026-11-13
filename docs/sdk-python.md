@@ -87,21 +87,61 @@ memories = ra.save_and_wait("User is vegetarian now")
 An empty list is a legitimate outcome — most text contains nothing that
 stays true beyond the conversation.
 
-### `save_direct(content, *, category, tags, confidence, expires_at, …) -> Memory`
+### `save_direct(content, *, kind, topic, origin, applies_to, subtopic, tags, valid_until, replaces, coexists_with, …) -> SavedMemory`
 
-Stores one memory verbatim. Synchronous, cheap, no model.
-
-It also cannot supersede a contradiction, because nothing read the
-content. Use it when you have already decided what the memory should say;
-prefer `save` for raw material.
+Stores one memory as given, with its structure. Synchronous, cheap, no model.
+Every field is explained in [memory-model.md](memory-model.md).
 
 ```python
-ra.save_direct(
+from recuerdos_ai import AppliesTo, RejectedError
+
+saved = ra.save_direct(
     "User forbids barrel files / index.ts re-exports",
-    category="preference.coding",
+    kind="preference",
+    topic="coding",
+    applies_to="me",
+    origin="user_said",
     tags=["typescript", "imports"],
 )
+print(saved.message)  # Saved as your personal coding preference (applies to you everywhere).
+
+ra.save_direct(
+    "Quill forbids mocking the database",
+    kind="rule",
+    topic="coding",
+    applies_to=AppliesTo(target="project", project_name="quill", new_project=True),
+    origin="user_said",
+)
 ```
+
+A memory rule that stops the save raises `RejectedError`, whose `code` says which
+(`needs_confirmation`, `kind_target_mismatch`, `secret`, …) and whose message says
+how to fix it. `Memory` carries the structure too: `kind`, `topic`, `applies_to`,
+`origin`, `goal_status` and `needs_review`.
+
+Before storing, the daemon compares it with the nearest stored memories for the
+same scope. One that contradicts a stored memory (judged by the model when one is
+configured; without one, only a near repeat) raises `RejectedError` with
+`code == "conflict"`, and `error.conflicts` lists the stored memories (`id`,
+`content`, `kind`, `applies_to`, `reason`). Ask the user which holds:
+
+```python
+try:
+    saved = ra.save_direct("The user now avoids mocks in unit tests", **structure)
+except RejectedError as refused:
+    if refused.code != "conflict":
+        raise
+    old = refused.conflicts[0]["id"]
+    # They changed their mind: replace it (kept in history) …
+    saved = ra.save_direct("The user now avoids mocks in unit tests", replaces=old, **structure)
+    # … or both hold: ra.save_direct(..., coexists_with=[old], **structure)
+    # … or the stored one was wrong: ra.update(old, content=...)
+```
+
+`saved.status` is `"already_known"` when a stored memory already says this:
+nothing was written, and the memory returned is that one. Use `save_direct` when
+you have already decided what the memory should say; prefer `save` for raw
+material.
 
 ### `distill_session(content, *, session_id, client, tags) -> Distillation`
 
@@ -122,7 +162,12 @@ unrecallable memory.
 
 ## Reading
 
-### `search(query, *, limit, categories, tags, since, as_of, include_superseded) -> list[SearchHit]`
+### `search(query, *, limit, categories, tags, since, as_of, include_superseded, kinds, topics, targets, projects, project, scope) -> list[SearchHit]`
+
+`kinds`, `topics`, `targets` and `projects` filter by structure (each OR-ed).
+`project` is the project the caller works in: its memories rank with the user's
+own, and other projects' count half unless the query names them. `scope="all"`
+ranks every project alike. Each hit carries `relevance`.
 
 Hybrid recall — semantic, keyword, and a graph-hop leg fused by reciprocal
 rank.
@@ -208,14 +253,25 @@ Every memory as markdown (grouped by category, greppable) or JSON.
 
 ## Modifying
 
-### `update(memory_id, *, content, category, tags, expires_at, clear_expiry) -> Memory`
+### `update(memory_id, *, content, kind, topic, applies_to, subtopic, tags, valid_until, clear_valid_until, goal_status, origin, …) -> UpdatedMemory`
 
-Omitted fields are left alone. Editing `content` re-embeds and re-indexes.
+Amends a memory in place; omitted fields are left alone. The same rules as a save
+apply to what it becomes, and a refusal raises `RejectedError`. Editing `content`
+re-embeds and re-indexes, and the audit trail keeps the old text. The result
+carries the server's `message`.
 
-`clear_expiry=True` removes an existing expiry — distinct from
-`expires_at=None`, which means "leave it alone". JSON cannot express the
-difference between an absent field and an explicit null, so the SDK gives
-it two call shapes.
+```python
+ra.update(memory_id, content="The user prefers mocks in unit tests")  # a typo fixed
+ra.update(goal_id, goal_status="achieved", origin="user_confirmed")    # a goal closed
+```
+
+Only the user closes a goal: `origin` must be `user_said` or `user_confirmed`, and
+`inferred` raises `RejectedError` with `needs_confirmation`.
+
+`clear_valid_until=True` removes an existing end date — distinct from
+`valid_until=None`, which means "leave it alone". JSON cannot express the
+difference between an absent field and an explicit null, so the SDK gives it two
+call shapes. `expires_at` and `clear_expiry` still work, as the older names.
 
 ### `forget(memory_id) -> None`
 
@@ -226,6 +282,46 @@ Only do this when the user asked. They cannot see what you removed, and a
 memory deleted by mistake is gone from every future session. If a memory
 is merely out of date, `save` the correction and let reconciliation
 supersede it.
+
+## Projects
+
+### `projects() -> list[Project]` · `project(project) -> Project`
+
+The user's projects, each with `id`, `name`, `aliases` (remotes, folder names,
+former names) and `memories` (its active ones). `project()` takes an id, a name or
+an alias; an unknown one raises `RejectedError` with code `unknown_project`.
+
+### `rename_project(project, new_name) -> ProjectChange` · `merge_project(project, into) -> ProjectChange`
+
+Renaming keeps every memory (they store the project's id) and leaves the old name as
+an alias; `ConflictError` when another project has the name. Merging moves every
+memory of `project` into `into`. A `ProjectChange` carries the `project` as it is
+now, the server's `message`, `previous` (the old name, or the project merged away)
+and `moved`.
+
+```python
+ra.rename_project("quill", "quill-app")
+ra.merge_project("me-quill", into="quill-app")
+```
+
+## Topics and the review queue
+
+### `topics() -> list[Topic]` · `create_topic(id, *, label) -> Topic` · `relabel_topic(id, label) -> Topic`
+
+The built-in topics and the user's own, with `count`. A new topic can be used at
+once; a label is display only (`None` resets it).
+
+### `bulk_edit(memory_ids, *, kind, topic, applies_to, reviewed, add_tags, remove_tags) -> BulkResult`
+
+One edit to many memories, all or nothing, under the save rules: a memory that
+cannot take the structure raises `RejectedError` (`invalid_value`) and nothing
+changes. `reviewed=True` confirms each memory's structure as it is.
+
+### `suggest(memory_ids) -> list[Suggestion]`
+
+What each memory (up to 25) may really be, from the model: `kind`, `topic`,
+`applies_to` and a `reason`. Writes nothing. Without a model, `RejectedError`
+with code `no_model`.
 
 ## Jobs
 
@@ -252,6 +348,7 @@ error `code` rather than its message:
 | `AuthenticationError` | `unauthorized` | 401 |
 | `PermissionError_` | `forbidden` | 403 |
 | `NotFoundError` | `not_found` | 404 |
+| `RejectedError` | a memory rule's code (`needs_confirmation`, `conflict`, …) | 422 |
 | `ConflictError` | `conflict` | 409 |
 | `ServerError` | `internal` | 5xx |
 | `TimeoutError_` | — | local |
@@ -328,6 +425,11 @@ client is additive rather than a breaking change.
 Models ignore unknown response fields, so an SDK pinned to an older
 version keeps working against a newer daemon. Adding a response field is
 not a breaking change.
+
+**0.5.0 needs daemon 0.6.0 or later**: structured memories changed what a
+save sends and what a refusal returns, and the projects, topics and review
+calls do not exist on an older daemon. Against a 0.5.x daemon, stay on SDK
+0.4.0.
 
 ## Developing
 

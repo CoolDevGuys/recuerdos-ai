@@ -137,6 +137,225 @@ fn round_trips_a_memory_with_every_field() {
     assert!(!found.is_superseded());
 }
 
+/// Turns stored rows back into what a pre-V11 store holds: no structure.
+fn strip_structure(fixture: &Fixture) {
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE memories SET kind = NULL, topic = NULL, target = NULL,
+                            project_id = NULL, origin = NULL, goal_status = NULL,
+                            needs_review = 0",
+                    [],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn stored_structure(
+    fixture: &Fixture,
+    id: MemoryId,
+) -> (Option<String>, Option<String>, Option<String>, bool, String) {
+    fixture
+        .database
+        .with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT kind, topic, target, needs_review, updated_at FROM memories WHERE id = ?1",
+                    [id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .unwrap())
+        })
+        .unwrap()
+}
+
+fn custom_memory(context: &UserContext, content: &str, category: &str) -> Memory {
+    let new = NewMemory {
+        content: content.to_string(),
+        category: Category::Custom(category.to_string()),
+        subcategory: None,
+        tags: vec![],
+        entities: vec![],
+        confidence: 0.9,
+        source: MemorySource::default(),
+        expires_at: None,
+    };
+    Memory::create(context.user_id(), new, now()).unwrap()
+}
+
+#[test]
+fn a_memory_keeps_its_structure_through_storage() {
+    use crate::memories::domain::applies_to::AppliesTo;
+    use crate::memories::domain::kind::Kind;
+
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "User forbids barrel files");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+
+    let found = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(found.structure(), memory.structure());
+    assert_eq!(found.structure().kind(), Kind::Preference);
+    assert_eq!(found.structure().applies_to(), &AppliesTo::Me);
+    assert!(found.structure().needs_review());
+}
+
+#[test]
+fn the_backfill_structures_every_old_memory_once_without_touching_updated_at() {
+    use crate::memories::domain::topic::Topic;
+
+    let fixture = fixture();
+    let preference = memory_for(&fixture.alex, "User forbids barrel files");
+    let homelab = custom_memory(
+        &fixture.alex,
+        "The NAS sits in the hall cupboard",
+        "fact.homelab",
+    );
+    let forgotten = custom_memory(&fixture.sam, "Sleeps best with seven hours", "health.sleep");
+    for (context, memory) in [
+        (&fixture.alex, &preference),
+        (&fixture.alex, &homelab),
+        (&fixture.sam, &forgotten),
+    ] {
+        fixture.memories.insert(context, memory, "test").unwrap();
+    }
+    fixture
+        .memories
+        .delete(&fixture.sam, forgotten.id(), "test", "test")
+        .unwrap();
+    strip_structure(&fixture);
+    let before = stored_structure(&fixture, preference.id());
+    assert_eq!(before.0, None, "a pre-V11 row has no kind");
+
+    assert_eq!(
+        fixture.memories.backfill_structure().unwrap(),
+        3,
+        "forgotten rows too"
+    );
+
+    let after = stored_structure(&fixture, preference.id());
+    assert_eq!(after.0.as_deref(), Some("preference"));
+    assert_eq!(after.1.as_deref(), Some("coding"));
+    assert_eq!(after.2.as_deref(), Some("me"));
+    assert!(after.3, "flagged: it may be one project's convention");
+    assert_eq!(after.4, before.4, "deriving a structure is not an edit");
+
+    let homelab_after = stored_structure(&fixture, homelab.id());
+    assert_eq!(homelab_after.1.as_deref(), Some("homelab"));
+    assert_eq!(homelab_after.2.as_deref(), Some("general"));
+    let topics: Vec<(String, String)> = fixture
+        .database
+        .with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT user_id, id FROM topics ORDER BY id")
+                .unwrap();
+            Ok(statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(
+        topics,
+        vec![(fixture.alex.user_id().to_string(), "homelab".to_string())],
+        "the user's own topic is in their list; built-ins (health) are not stored"
+    );
+
+    assert_eq!(
+        fixture.memories.backfill_structure().unwrap(),
+        0,
+        "idempotent"
+    );
+    let found = fixture
+        .memories
+        .find(&fixture.alex, homelab.id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        found.structure().topic(),
+        &Topic::Custom("homelab".to_string())
+    );
+}
+
+#[test]
+fn a_memory_the_backfill_has_not_reached_reads_through_the_same_mapping() {
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "User forbids barrel files");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+    strip_structure(&fixture);
+
+    let found = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(found.structure(), memory.structure());
+}
+
+#[test]
+fn a_project_memory_reads_its_project_by_name() {
+    use crate::memories::domain::applies_to::Target;
+
+    let fixture = fixture();
+    let memory = memory_for(&fixture.alex, "Quill forbids mocking the database");
+    fixture
+        .memories
+        .insert(&fixture.alex, &memory, "test")
+        .unwrap();
+    let project = crate::shared::ids::ProjectId::new();
+    fixture
+        .database
+        .with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO projects (id, user_id, name, created_at, updated_at)
+                     VALUES (?1, ?2, 'quill', ?3, ?3)",
+                    rusqlite::params![
+                        project.to_string(),
+                        fixture.alex.user_id().to_string(),
+                        now().to_rfc3339()
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE memories SET kind = 'rule', target = 'project', project_id = ?1",
+                    [project.to_string()],
+                )
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+    let found = fixture
+        .memories
+        .find(&fixture.alex, memory.id())
+        .unwrap()
+        .unwrap();
+
+    let applies_to = found.structure().applies_to();
+    assert_eq!(applies_to.target(), Target::Project);
+    let project_ref = applies_to.project().unwrap();
+    assert_eq!(project_ref.id, project);
+    assert_eq!(project_ref.name, "quill");
+}
+
 #[test]
 fn a_missing_memory_is_none_not_an_error() {
     let fixture = fixture();

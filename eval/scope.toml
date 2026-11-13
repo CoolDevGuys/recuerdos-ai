@@ -1,0 +1,218 @@
+# Scope eval set (ai-specs/memory-structure-plan.md §9, examples E16–E18).
+#
+# Recall that knows where the caller is: the user's own memories and the
+# current project's rank as they always did, other projects' are demoted
+# unless the question names them, and a question about the user is never
+# answered by one project's stack.
+#
+# Its own file and its own corpus, so the main set (eval/cases.toml) and its
+# committed baseline measure exactly what they did before scopes existed.
+#
+#     recuerdos-ai eval --cases eval/scope.toml
+#
+# A case's `context` is where the agent is: a project's name, or `none`. A
+# scoped case is held to the agent-facing floor, like the read it imitates.
+# `forbid` lists memories that must not come back.
+
+# ── the user, everywhere ─────────────────────────────────────────────
+
+[[memory]]
+content = "The user prefers Vitest over Jest for unit tests"
+category = "preference.coding"
+applies_to = "me"
+
+[[memory]]
+content = "The user always writes table-driven tests"
+category = "preference.coding"
+applies_to = "me"
+kind = "rule"
+
+[[memory]]
+content = "The user indents with two spaces, never tabs"
+category = "preference.coding"
+applies_to = "me"
+
+[[memory]]
+content = "The user prefers small pull requests that do one thing"
+category = "preference.coding"
+applies_to = "me"
+
+[[memory]]
+content = "The user is vegetarian"
+category = "preference.personal"
+applies_to = "me"
+
+# ── the user's world, not tied to a project ─────────────────────────
+
+[[memory]]
+content = "The NAS backups are in /mnt/tank/backups"
+category = "reference"
+applies_to = "general"
+
+[[memory]]
+content = "The home router is a UniFi Dream Machine at 10.0.0.1"
+category = "reference"
+applies_to = "general"
+
+# ── quill ────────────────────────────────────────────────────────────
+
+[[memory]]
+content = "Command handlers are named after the command they run, like CreateInvoiceHandler"
+category = "fact.project"
+applies_to = "project:quill"
+kind = "convention"
+
+[[memory]]
+content = "Use cases are named by intent, with no Service suffix"
+category = "fact.project"
+applies_to = "project:quill"
+kind = "convention"
+
+[[memory]]
+content = "The frontend is built with React and Vite"
+category = "fact.project"
+applies_to = "project:quill"
+kind = "fact"
+
+[[memory]]
+content = "Integration tests run against a real Postgres in Docker, never mocks"
+category = "fact.project"
+applies_to = "project:quill"
+kind = "rule"
+
+[[memory]]
+content = "Migrations are forward-only; a mistake is fixed by a new migration"
+category = "fact.project"
+applies_to = "project:quill"
+kind = "rule"
+
+# ── fern ─────────────────────────────────────────────────────────────
+
+[[memory]]
+content = "Errors are returned as Result values and never thrown"
+category = "fact.project"
+applies_to = "project:fern"
+kind = "convention"
+
+[[memory]]
+content = "The CLI is written in Go with cobra"
+category = "fact.project"
+applies_to = "project:fern"
+kind = "fact"
+
+[[memory]]
+content = "Golden files under testdata are updated with the -update flag"
+category = "fact.project"
+applies_to = "project:fern"
+kind = "procedure"
+
+# ── ledger ───────────────────────────────────────────────────────────
+
+[[memory]]
+content = "Errors are thrown as typed exceptions and caught at the HTTP boundary"
+category = "fact.project"
+applies_to = "project:ledger"
+kind = "convention"
+
+[[memory]]
+content = "The ledger UI uses Svelte"
+category = "fact.project"
+applies_to = "project:ledger"
+kind = "fact"
+
+# ── cases ────────────────────────────────────────────────────────────
+
+[[case]]
+name = "E16: in fern, my coding preferences are mine"
+kind = "scope-mine"
+context = "fern"
+query = "What are my coding preferences?"
+expect = [
+  "The user prefers Vitest over Jest for unit tests",
+  "The user always writes table-driven tests",
+  "The user indents with two spaces, never tabs",
+  "The user prefers small pull requests that do one thing",
+]
+forbid = [
+  "Command handlers are named after the command they run, like CreateInvoiceHandler",
+  "Use cases are named by intent, with no Service suffix",
+  "Integration tests run against a real Postgres in Docker, never mocks",
+]
+
+[[case]]
+name = "in quill, how I like tests written is mine"
+kind = "scope-mine"
+context = "quill"
+query = "how do I like my tests written"
+expect = ["The user always writes table-driven tests"]
+forbid = ["Golden files under testdata are updated with the -update flag"]
+
+[[case]]
+name = "anywhere, my indentation is mine"
+kind = "scope-mine"
+context = "ledger"
+query = "tabs or spaces?"
+expect = ["The user indents with two spaces, never tabs"]
+
+[[case]]
+name = "E17: in fern, a question naming quill finds quill's convention"
+kind = "scope-named"
+context = "fern"
+query = "How did quill handle command handlers?"
+expect = ["Command handlers are named after the command they run, like CreateInvoiceHandler"]
+
+[[case]]
+name = "in quill, asking about fern's CLI"
+kind = "scope-named"
+context = "quill"
+query = "what is fern's CLI written in"
+expect = ["The CLI is written in Go with cobra"]
+
+[[case]]
+name = "in quill, how use cases are named here"
+kind = "scope-current"
+context = "quill"
+query = "how should I name a use case"
+expect = ["Use cases are named by intent, with no Service suffix"]
+
+[[case]]
+name = "in ledger, its own error convention wins over fern's"
+kind = "scope-current"
+context = "ledger"
+query = "how are errors handled"
+expect = ["Errors are thrown as typed exceptions and caught at the HTTP boundary"]
+
+[[case]]
+name = "in fern, its own error convention wins over ledger's"
+kind = "scope-current"
+context = "fern"
+query = "how are errors handled"
+expect = ["Errors are returned as Result values and never thrown"]
+
+[[case]]
+name = "in quill, whether to mock the database"
+kind = "scope-current"
+context = "quill"
+query = "should tests mock the database"
+expect = ["Integration tests run against a real Postgres in Docker, never mocks"]
+
+[[case]]
+name = "E18: outside any project, one project's stack is not my favourite"
+kind = "scope-none"
+context = "none"
+query = "What's my favourite frontend framework?"
+expect_empty = true
+
+[[case]]
+name = "outside any project, where the backups are"
+kind = "scope-none"
+context = "none"
+query = "where are the NAS backups"
+expect = ["The NAS backups are in /mnt/tank/backups"]
+
+[[case]]
+name = "outside any project, which test runner I prefer"
+kind = "scope-none"
+context = "none"
+query = "which test runner do I prefer"
+expect = ["The user prefers Vitest over Jest for unit tests"]

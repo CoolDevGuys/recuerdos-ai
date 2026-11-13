@@ -6,8 +6,8 @@ Actionable, phased breakdown of the build. Every phase lives on its own git bran
 ends in a **shippable, usable** state, and every task has a goal, step-by-step
 procedure, examples where they apply, and a Definition of Done (DoD).
 
-> **Status (2026-11-10): Phases 0–7 are ✅ SHIPPED; `v0.5.0-rc5` is the current
-> release candidate.** Phases 0–6 were released as `v0.1.0` and `v0.1.1`; Phase 7
+> **Status (2026-11-13): Phases 0–7 are ✅ SHIPPED; `v0.6.0` is the current
+> release.** Phases 0–6 were released as `v0.1.0` and `v0.1.1`; Phase 7
 > (budgeted consolidation, sub-labels, the graph layer, recall quality and the optional
 > reranker) across `v0.2.0`–`v0.4.0`. Those phase sections are kept as the **build
 > record** — a faithful account of what was designed and delivered, not a to-do list.
@@ -15,7 +15,9 @@ procedure, examples where they apply, and a Definition of Done (DoD).
 > [recall-quality-plan.md](ai-specs/recall-quality-plan.md) and
 > [concept-recall-plan.md](ai-specs/concept-recall-plan.md) (`v0.5.0-rc1`–`rc4`: recall
 > measured on a real store, enriched vectors by default and the graph made opt-in), and
-> [web-ui-plan.md](ai-specs/web-ui-plan.md) (`v0.5.0-rc5`: the browser UI at `/ui`).
+> [web-ui-plan.md](ai-specs/web-ui-plan.md) (`v0.5.0-rc5`: the browser UI at `/ui`), and
+> [memory-structure-plan.md](ai-specs/memory-structure-plan.md) (`v0.6.0`: structured
+> memories — kind, topic and scope on every memory, projects, conflicts, scope-aware recall).
 >
 > **Why this file and [project-plan.md](ai-specs/project-plan.md) both exist.** They are not
 > merged on purpose: `ai-specs/project-plan.md` is the *product & architecture reference*

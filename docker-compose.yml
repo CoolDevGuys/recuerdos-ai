@@ -65,6 +65,11 @@ services:
     environment:
       RECUERDOS_AI_AUTH__MODE: none
       RECUERDOS_AI_SERVER__HOST: 0.0.0.0
+      # The whole suite — unit, integration and both examples — is one caller
+      # (auth `none`, one container), and it outgrows the 60-request burst. The
+      # limiter has its own tests in the Rust suite; here it would only make
+      # the SDK's tests flaky.
+      RECUERDOS_AI_RATE_LIMIT__ENABLED: "false"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7070/healthz"]
       interval: 2s

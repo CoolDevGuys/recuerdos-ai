@@ -125,7 +125,20 @@ impl MemoryMerger {
         // save fails, the cluster is untouched and the next run tries
         // again; the reverse order would leave the memories superseded by
         // an id that does not exist.
-        let replacement = self.saver.execute(
+        // The members share a scope (the runner only links those), so the
+        // replacement keeps it: a merge of quill's conventions is quill's.
+        // The structure is the most trusted member's, marked for review if
+        // any member's was a guess.
+        let lead = cluster
+            .iter()
+            .max_by(|a, b| a.confidence().total_cmp(&b.confidence()))
+            .expect("a mergeable cluster has members");
+        let review = cluster
+            .iter()
+            .any(|memory| memory.structure().needs_review());
+        let structure = lead.structure().clone().flagged_for_review(review);
+
+        let replacement = self.saver.execute_structured(
             context,
             NewMemory {
                 content,
@@ -147,6 +160,7 @@ impl MemoryMerger {
                 // durable one wins — the merge asserts it is still true.
                 expires_at: None,
             },
+            structure,
             ACTOR,
         )?;
 

@@ -7,6 +7,7 @@ pub mod blocking;
 pub mod clock;
 pub mod error;
 pub mod ids;
+pub mod project_headers;
 pub mod rate_limit;
 pub mod sqlite;
 

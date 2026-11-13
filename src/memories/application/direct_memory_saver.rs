@@ -25,6 +25,7 @@ use crate::memories::domain::document_text::DocumentText;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
 use crate::memories::domain::memory::{Memory, NewMemory};
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::memory_structure::MemoryStructure;
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
@@ -67,7 +68,25 @@ impl DirectMemorySaver {
 
     pub fn execute(&self, context: &UserContext, new: NewMemory, actor: &str) -> Result<Memory> {
         let memory = Memory::create(context.user_id(), new, self.clock.now())?;
+        self.store(context, memory, actor)
+    }
 
+    /// Stores a memory whose structure the caller stated rather than one
+    /// derived from its category (`StructuredMemorySaver`, which has already
+    /// applied the memory rules).
+    pub fn execute_structured(
+        &self,
+        context: &UserContext,
+        new: NewMemory,
+        structure: MemoryStructure,
+        actor: &str,
+    ) -> Result<Memory> {
+        let memory =
+            Memory::create(context.user_id(), new, self.clock.now())?.with_structure(structure);
+        self.store(context, memory, actor)
+    }
+
+    fn store(&self, context: &UserContext, memory: Memory, actor: &str) -> Result<Memory> {
         let embedding = self
             .embedder
             .embed_one(&self.document_text.of(&memory), EmbeddingTask::Document)?;

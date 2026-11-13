@@ -21,6 +21,8 @@ use crate::understanding::application::catalog_taxonomy::CatalogTaxonomy;
 use crate::understanding::application::intent_first_ingestor::IntentFirstIngestor;
 use crate::understanding::application::memory_ingestor::MemoryIngestor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
+use crate::understanding::application::model_conflict_judge::ModelConflictJudge;
+use crate::understanding::application::structure_suggester::StructureSuggester;
 use crate::understanding::application::verbatim_ingestor::VerbatimIngestor;
 use crate::understanding::domain::chat_model::ChatModel;
 use crate::understanding::domain::ingest_job::JobQueue;
@@ -147,6 +149,9 @@ pub struct Understanding {
     pub model: Option<Arc<dyn ChatModel>>,
     /// Each user's categories, read per call (V10).
     pub taxonomy: Arc<dyn TaxonomySource>,
+    /// Proposes structures for the review queue (`POST /v1/memories:suggest`);
+    /// `None` without a model.
+    pub suggester: Option<Arc<StructureSuggester>>,
 }
 
 impl Understanding {
@@ -183,6 +188,7 @@ impl Understanding {
                         Arc::clone(&memories.saver),
                         Arc::clone(&memories.forgetter),
                         Arc::clone(&memories.repository),
+                        Arc::clone(&memories.projects),
                         Arc::clone(model),
                         memories.graph.clone(),
                         config.understanding.reconcile,
@@ -193,6 +199,15 @@ impl Understanding {
             None => verbatim,
         };
 
+        // The save's conflict check (plan §5) judges with the same model, so
+        // a contradiction is caught before it is stored, not reconciled
+        // after.
+        if let Some(model) = &model {
+            memories
+                .structured_saver
+                .set_judge(Arc::new(ModelConflictJudge::new(Arc::clone(model))));
+        }
+
         let enabled = config.understanding.provider != "none";
         if !enabled {
             tracing::info!(
@@ -201,6 +216,15 @@ impl Understanding {
             );
         }
 
+        let suggester = model.as_ref().map(|model| {
+            Arc::new(StructureSuggester::new(
+                Arc::clone(model),
+                Arc::clone(&memories.repository),
+                Arc::clone(&memories.projects),
+                Arc::clone(&memories.topics),
+            ))
+        });
+
         Ok(Self {
             queue: Arc::new(SqliteJobQueue::new(database)),
             pipeline,
@@ -208,6 +232,7 @@ impl Understanding {
             wake: Arc::new(Notify::new()),
             model,
             taxonomy,
+            suggester,
         })
     }
 }
@@ -312,5 +337,108 @@ mod tests {
             error.to_string().contains("RECUERDOS_AI_TEST_CHAT_KEY"),
             "the message must name the variable to set: {error}"
         );
+    }
+
+    /// The extraction structure set (eval/extraction-structure.toml): a real
+    /// model files raw text the way the plan says. Ignored by default — it
+    /// needs a provider; see the file for how to run it.
+    #[tokio::test]
+    #[ignore = "needs a configured language model"]
+    async fn extraction_structure_set() {
+        use crate::memories::application::test_doubles::Fixture;
+        use crate::memories::domain::applies_to::Target;
+        use crate::memories::domain::kind::Kind;
+        use crate::understanding::application::candidate_extractor::CandidateExtractor;
+        use crate::understanding::domain::candidate_filing::{Filing, file_candidate};
+        use crate::understanding::domain::extraction_prompt::SourceHints;
+        use crate::understanding::domain::taxonomy::Taxonomy;
+
+        #[derive(serde::Deserialize)]
+        struct Set {
+            case: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            id: String,
+            text: String,
+            project: Option<String>,
+            target: Option<String>,
+            kind: Option<String>,
+            #[serde(default)]
+            suggest: bool,
+        }
+
+        let config = AppConfig::load(None).expect("config");
+        let model = build_chat_model(&config)
+            .expect("a provider")
+            .expect("set [understanding].provider to run the set");
+        let set: Set = toml::from_str(
+            &std::fs::read_to_string("eval/extraction-structure.toml").expect("the set"),
+        )
+        .expect("a valid set");
+
+        let fixture = Fixture::new();
+        let registry = fixture.project_registry();
+        let extractor = CandidateExtractor::new(model, Arc::new(Taxonomy::new(vec![])), false);
+
+        let mut passed = 0;
+        for case in &set.case {
+            let project = case.project.as_ref().map(|name| {
+                registry
+                    .resolve(&fixture.alex, name)
+                    .unwrap()
+                    .unwrap_or_else(|| registry.create(&fixture.alex, name, &[]).unwrap())
+            });
+            let candidates = extractor
+                .execute(
+                    &fixture.alex,
+                    &case.text,
+                    &SourceHints {
+                        project: case.project.clone(),
+                        ..SourceHints::default()
+                    },
+                )
+                .await
+                .expect("extraction");
+            let filings: Vec<Filing> = candidates
+                .iter()
+                .map(|candidate| file_candidate(candidate, project.as_ref()))
+                .collect();
+
+            let ok = if case.suggest {
+                filings.contains(&Filing::Suggest)
+                    && !filings.iter().any(|filing| {
+                        matches!(filing, Filing::Store(s) if s.applies_to().target() == Target::Me)
+                    })
+            } else {
+                let target: Target = case.target.as_deref().unwrap().parse().unwrap();
+                let kind: Option<Kind> = case.kind.as_deref().map(|raw| raw.parse().unwrap());
+                filings.iter().any(|filing| match filing {
+                    Filing::Store(structure) => {
+                        structure.applies_to().target() == target
+                            && kind.is_none_or(|kind| structure.kind() == kind)
+                    }
+                    _ => false,
+                })
+            };
+            let summary: Vec<String> = filings
+                .iter()
+                .map(|filing| match filing {
+                    Filing::Store(s) => format!("{} · {}", s.kind(), s.applies_to().label()),
+                    Filing::Suggest => "suggest".to_string(),
+                    Filing::Drop(reason) => format!("drop ({reason})"),
+                })
+                .collect();
+            println!(
+                "{} {:<40} {summary:?}",
+                if ok { "ok  " } else { "FAIL" },
+                case.id
+            );
+            passed += usize::from(ok);
+        }
+
+        let share = passed as f32 / set.case.len() as f32;
+        println!("{passed}/{} cases ({:.0}%)", set.case.len(), share * 100.0);
+        assert!(share >= 0.9, "the extraction structure set is below 90%");
     }
 }

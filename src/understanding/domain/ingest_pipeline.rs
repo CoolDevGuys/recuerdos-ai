@@ -36,6 +36,9 @@ pub enum IngestStatus {
     /// deleted, or a candidate superseded something. Nothing to show the
     /// user, and emphatically not a no-op.
     ChangedWithoutStoring,
+    /// Nothing was stored because what was found is about the user and was
+    /// inferred: `suggestions` lists it, for the agent to ask about (plan D5).
+    NeedsConfirmation,
 }
 
 /// What a pipeline run did.
@@ -46,6 +49,9 @@ pub enum IngestStatus {
 pub struct IngestOutcome {
     pub memory_ids: Vec<MemoryId>,
     pub status: IngestStatus,
+    /// Inferences about the user that were not stored, for the agent to ask
+    /// the user about and save, if they agree, with origin `user_confirmed`.
+    pub suggestions: Vec<String>,
 }
 
 impl IngestOutcome {
@@ -54,6 +60,7 @@ impl IngestOutcome {
         Self {
             memory_ids,
             status: IngestStatus::Stored,
+            suggestions: Vec::new(),
         }
     }
 
@@ -65,19 +72,31 @@ impl IngestOutcome {
         Self {
             memory_ids: Vec::new(),
             status: reason,
+            suggestions: Vec::new(),
         }
     }
 
     /// Wraps a reconciler's answer, which knows whether it changed anything
     /// even when it stored nothing.
-    pub fn from_reconciled(memory_ids: Vec<MemoryId>, superseded_or_deleted: usize) -> Self {
-        if !memory_ids.is_empty() {
-            return Self::stored(memory_ids);
+    pub fn from_reconciled(
+        memory_ids: Vec<MemoryId>,
+        superseded_or_deleted: usize,
+        suggestions: Vec<String>,
+    ) -> Self {
+        let status = if !memory_ids.is_empty() {
+            IngestStatus::Stored
+        } else if superseded_or_deleted > 0 {
+            IngestStatus::ChangedWithoutStoring
+        } else if !suggestions.is_empty() {
+            IngestStatus::NeedsConfirmation
+        } else {
+            IngestStatus::AlreadyKnown
+        };
+        Self {
+            memory_ids,
+            status,
+            suggestions,
         }
-        if superseded_or_deleted > 0 {
-            return Self::empty(IngestStatus::ChangedWithoutStoring);
-        }
-        Self::empty(IngestStatus::AlreadyKnown)
     }
 }
 

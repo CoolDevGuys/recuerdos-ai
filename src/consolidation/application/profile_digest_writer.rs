@@ -47,10 +47,13 @@
 
 use crate::consolidation::domain::digest_prompt::{digest_request, parse_digest, select};
 use crate::consolidation::domain::profile_digest::{
-    DOMAINS, Domain, Fingerprint, ProfileDigestStore, StoredDigest,
+    Domain, Fingerprint, ProfileDigestStore, StoredDigest,
 };
 use crate::identity::domain::user_context::UserContext;
-use crate::memories::application::profile_assembler::{DEFAULT_TOKEN_BUDGET, ProfileAssembler};
+use crate::memories::application::profile_assembler::{
+    DEFAULT_TOKEN_BUDGET, PROFILE_SCOPES, ProfileAssembler, ProfileScope,
+};
+use crate::memories::domain::applies_to::ProjectRef;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_change_observer::MemoryChangeObserver;
 use crate::memories::domain::memory_repository::MemoryRepository;
@@ -113,11 +116,23 @@ impl ProfileDigestWriter {
     /// rather than a blank page.
     ///
     /// [`refresh`]: Self::refresh
+    #[cfg(test)]
     pub async fn execute(&self, context: &UserContext) -> Result<String> {
+        self.execute_in(context, None).await
+    }
+
+    /// The profile for a caller working in `project`: the user's own
+    /// digest, that project's, then the general one. Another project's is
+    /// never included.
+    pub async fn execute_in(
+        &self,
+        context: &UserContext,
+        project: Option<&ProjectRef>,
+    ) -> Result<String> {
         // Without a model there is no digest cache to serve from — the
         // assembler is the whole profile, not a fallback.
         if self.model.is_none() {
-            return self.assembler.execute(context);
+            return self.assembler.execute_in(context, project);
         }
 
         let now = self.clock.now();
@@ -127,44 +142,45 @@ impl ProfileDigestWriter {
             .filter(|memory| memory.is_active_at(now))
             .collect();
 
-        if active.is_empty() {
-            // The assembler's empty-profile text tells an agent what to
-            // do about it, which is more useful than a blank page.
-            return self.assembler.execute(context);
+        let mut wanted = vec![(ProfileScope::Me, Domain::Me)];
+        if let Some(project) = project {
+            wanted.push((ProfileScope::Project, Domain::Project(project.id)));
         }
+        wanted.push((ProfileScope::General, Domain::General));
 
-        let mut sections: Vec<(Domain, String)> = Vec::new();
-        for domain in DOMAINS {
-            let has_memories = active
-                .iter()
-                .any(|memory| Domain::of(memory.category()) == *domain);
+        let mut has_any = false;
+        let mut sections: Vec<(String, String)> = Vec::new();
+        for (scope, domain) in wanted {
+            let has_memories = active.iter().any(|memory| Domain::of(memory) == domain);
             if !has_memories {
                 continue;
             }
+            has_any = true;
 
-            match self.digests.find(context, *domain) {
+            match self.digests.find(context, domain) {
                 // A cached digest, current or stale. An empty one is the
                 // model having said there was nothing worth an assistant's
-                // attention here; that is an answer, so the domain is
+                // attention here; that is an answer, so the section is
                 // simply omitted rather than assembled.
                 Ok(Some(cached)) if !cached.content.is_empty() => {
-                    sections.push((*domain, cached.content));
+                    sections.push((scope.heading(project), cached.content));
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    // A broken cache should cost this domain its section,
-                    // not fail the whole read.
-                    tracing::warn!(%error, domain = domain.as_str(), "could not read a cached digest");
+                    // A broken cache should cost this section, not fail the
+                    // whole read.
+                    tracing::warn!(%error, domain = domain.key(), "could not read a cached digest");
                 }
             }
         }
 
-        if sections.is_empty() {
-            // The cache is cold — no domain has been generated yet, or a
-            // read raced ahead of the first background refresh. Assembly
-            // at least shows the user their memories until it lands.
+        if !has_any || sections.is_empty() {
+            // Nothing stored that this caller sees — the assembler's empty
+            // profile says what to do about it — or the cache is cold: no
+            // digest generated yet, or a read raced ahead of the first
+            // background refresh. Assembly shows the memories until it lands.
             tracing::debug!("no cached digest to serve; falling back to assembly");
-            return self.assembler.execute(context);
+            return self.assembler.execute_in(context, project);
         }
 
         Ok(render(context.handle(), &sections, now, self.char_budget()))
@@ -175,11 +191,12 @@ impl ProfileDigestWriter {
     ///
     /// Called off to the side — by the ingest worker after it stores
     /// memories, and by the nightly consolidation run for every user it
-    /// touches — never on the read. A domain whose fingerprint still
+    /// touches — never on the read. A digest whose fingerprint still
     /// matches is left alone and costs no model call, so refreshing a user
-    /// nothing changed for is cheap; only stale domains are regenerated.
+    /// nothing changed for is cheap; only stale ones are regenerated: a new
+    /// project convention costs that project's digest, nothing else.
     ///
-    /// Errors are swallowed per domain exactly as on the old read path: a
+    /// Errors are swallowed per digest exactly as on the old read path: a
     /// provider outage should leave the last good digest in place, not
     /// propagate out of a background task.
     pub async fn refresh(&self, context: &UserContext) -> Result<()> {
@@ -194,14 +211,22 @@ impl ProfileDigestWriter {
             .filter(|memory| memory.is_active_at(now))
             .collect();
 
-        if active.is_empty() {
-            return Ok(());
-        }
+        // The user's own first, then general, then each project with
+        // memories, in a stable order.
+        let mut domains = vec![Domain::Me, Domain::General];
+        let mut projects: Vec<Domain> = active
+            .iter()
+            .map(|memory| Domain::of(memory))
+            .filter(|domain| matches!(domain, Domain::Project(_)))
+            .collect();
+        projects.sort_by_key(Domain::key);
+        projects.dedup();
+        domains.extend(projects);
 
-        for domain in DOMAINS {
+        for domain in domains {
             let theirs: Vec<&Memory> = active
                 .iter()
-                .filter(|memory| Domain::of(memory.category()) == *domain)
+                .filter(|memory| Domain::of(memory) == domain)
                 .copied()
                 .collect();
             if theirs.is_empty() {
@@ -212,7 +237,7 @@ impl ProfileDigestWriter {
             // moved, and returns the cached digest untouched otherwise. We
             // want the caching side effect; the returned content is the
             // read path's business, so it is dropped here.
-            let _ = self.digest_for(context, *domain, &theirs, model, now).await;
+            let _ = self.digest_for(context, domain, &theirs, model, now).await;
         }
 
         Ok(())
@@ -232,7 +257,7 @@ impl ProfileDigestWriter {
 
         match self.digests.find(context, domain) {
             Ok(Some(cached)) if cached.covers(&fingerprint) => {
-                tracing::debug!(domain = domain.as_str(), "reusing a cached digest");
+                tracing::debug!(domain = domain.key(), "reusing a cached digest");
                 return Some(cached.content);
             }
             Ok(_) => {}
@@ -247,7 +272,7 @@ impl ProfileDigestWriter {
         let answer = match model.complete_structured(&request).await {
             Ok(answer) => answer,
             Err(error) => {
-                tracing::warn!(%error, domain = domain.as_str(), "could not generate a digest");
+                tracing::warn!(%error, domain = domain.key(), "could not generate a digest");
                 // Better a stale digest than none: the memories it was
                 // built from are mostly still true.
                 return self.stale(context, domain);
@@ -275,7 +300,7 @@ impl ProfileDigestWriter {
         };
         self.store(context, domain, &digest);
 
-        tracing::info!(domain = domain.as_str(), "regenerated a profile digest");
+        tracing::info!(domain = domain.key(), "regenerated a profile digest");
         Some(digest.content)
     }
 
@@ -283,7 +308,7 @@ impl ProfileDigestWriter {
     fn stale(&self, context: &UserContext, domain: Domain) -> Option<String> {
         match self.digests.find(context, domain) {
             Ok(Some(cached)) if !cached.content.is_empty() => {
-                tracing::debug!(domain = domain.as_str(), "serving a stale digest");
+                tracing::debug!(domain = domain.key(), "serving a stale digest");
                 Some(cached.content)
             }
             _ => None,
@@ -295,7 +320,7 @@ impl ProfileDigestWriter {
     /// happened anyway.
     fn store(&self, context: &UserContext, domain: Domain, digest: &StoredDigest) {
         if let Err(error) = self.digests.save(context, domain, digest) {
-            tracing::warn!(%error, domain = domain.as_str(), "could not cache a digest");
+            tracing::warn!(%error, domain = domain.key(), "could not cache a digest");
         }
     }
 
@@ -303,10 +328,10 @@ impl ProfileDigestWriter {
         self.token_budget * CHARS_PER_TOKEN
     }
 
-    /// Split across the domains, so two full-length sections cannot
-    /// together blow the budget the resource promises.
+    /// Split across the three sections a profile shows, so full-length
+    /// sections cannot together blow the budget the resource promises.
     fn word_budget(&self) -> usize {
-        self.token_budget / TOKENS_PER_WORD / DOMAINS.len()
+        self.token_budget / TOKENS_PER_WORD / PROFILE_SCOPES.len()
     }
 }
 
@@ -328,7 +353,7 @@ impl MemoryChangeObserver for ProfileDigestWriter {
 
 fn render(
     handle: &str,
-    sections: &[(Domain, String)],
+    sections: &[(String, String)],
     now: DateTime<Utc>,
     char_budget: usize,
 ) -> String {
@@ -337,15 +362,15 @@ fn render(
         now.format("%Y-%m-%d")
     );
 
-    for (domain, content) in sections {
-        let section = format!("\n## {}\n\n{}\n", domain.heading(), content.trim());
+    for (heading, content) in sections {
+        let section = format!("\n## {heading}\n\n{}\n", content.trim());
 
         // Whole sections or nothing. Truncating mid-sentence produces a
         // profile that reads as though the model was cut off, which an
         // agent has no way to tell from the model being wrong.
         if output.len() + section.len() > char_budget {
             tracing::debug!(
-                domain = domain.as_str(),
+                section = heading.as_str(),
                 "dropping a digest section to stay inside the profile budget"
             );
             continue;
@@ -410,7 +435,11 @@ mod tests {
     async fn the_digest_replaces_the_listing_but_not_the_contract() {
         let fixture = Fixture::new();
         save(&fixture, Category::PreferenceCoding, "prefers pnpm");
-        save(&fixture, Category::PreferencePersonal, "is vegetarian");
+        save(
+            &fixture,
+            Category::Reference,
+            "the nas backups are in /mnt/tank",
+        );
 
         let (writer, _) = writer(
             &fixture,
@@ -427,12 +456,12 @@ mod tests {
 
         // Same shape the assembler produced, so no client notices.
         assert!(profile.starts_with("# Memory profile: alex"), "{profile}");
-        assert!(profile.contains("## How they work"), "{profile}");
+        assert!(profile.contains("## About you (everywhere)"), "{profile}");
         assert!(
             profile.contains("Uses pnpm, never npm or yarn"),
             "{profile}"
         );
-        assert!(profile.contains("## About them"), "{profile}");
+        assert!(profile.contains("## Your world"), "{profile}");
         assert!(profile.contains("Vegetarian"), "{profile}");
     }
 
@@ -529,7 +558,11 @@ mod tests {
         // preference must not cost a rewrite of the personal profile.
         let fixture = Fixture::new();
         save(&fixture, Category::PreferenceCoding, "prefers pnpm");
-        save(&fixture, Category::PreferencePersonal, "is vegetarian");
+        save(
+            &fixture,
+            Category::Reference,
+            "the nas backups are in /mnt/tank",
+        );
 
         let (writer, model) = writer(
             &fixture,
@@ -645,7 +678,11 @@ mod tests {
         // the word limit must not be able to spend it.
         let fixture = Fixture::new();
         save(&fixture, Category::PreferenceCoding, "prefers pnpm");
-        save(&fixture, Category::PreferencePersonal, "is vegetarian");
+        save(
+            &fixture,
+            Category::Reference,
+            "the nas backups are in /mnt/tank",
+        );
 
         let essay = "word ".repeat(5_000);
         let (writer, _) = writer(
@@ -727,5 +764,72 @@ mod tests {
             !prompt.contains("flyio"),
             "a superseded memory reached the digest prompt: {prompt}"
         );
+    }
+
+    #[tokio::test]
+    async fn each_project_has_its_own_digest_and_only_the_current_one_is_shown() {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::kind::Kind;
+        use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
+        use crate::memories::domain::topic::Topic;
+
+        let fixture = Fixture::new();
+        let registry = fixture.project_registry();
+        let quill = registry.create(&fixture.alex, "quill", &[]).unwrap();
+        let fern = registry.create(&fixture.alex, "fern", &[]).unwrap();
+        save(&fixture, Category::PreferenceCoding, "prefers pnpm");
+        let convention = |project: &ProjectRef, content: &str| {
+            let structure = MemoryStructure::new(
+                Kind::Convention,
+                Topic::Coding,
+                AppliesTo::Project(project.clone()),
+                Origin::UserSaid,
+                None,
+            )
+            .unwrap();
+            fixture
+                .saver()
+                .execute_structured(&fixture.alex, new_memory(content), structure, "test")
+                .unwrap();
+        };
+        convention(&quill, "use cases are named by intent");
+        convention(&fern, "handlers are named after commands");
+
+        // Me, then the two projects in id order; then one more for the
+        // project whose memories change.
+        let (writer, model) = writer(
+            &fixture,
+            Some(
+                ScriptedChatModel::new()
+                    .queue(coding_reply())
+                    .queue(json!({"digest": "- project digest one"}))
+                    .queue(json!({"digest": "- project digest two"}))
+                    .queue(json!({"digest": "- quill names use cases by intent, tests first"})),
+            ),
+        );
+        let model = model.unwrap();
+        writer.refresh(&fixture.alex).await.unwrap();
+        assert_eq!(model.call_count(), 3);
+
+        convention(&quill, "tests come before the code");
+        writer.refresh(&fixture.alex).await.unwrap();
+        assert_eq!(model.call_count(), 4, "only quill's digest was regenerated");
+
+        let in_quill = writer
+            .execute_in(&fixture.alex, Some(&quill))
+            .await
+            .unwrap();
+        assert!(in_quill.contains("## This project: quill"), "{in_quill}");
+        assert!(in_quill.contains("tests first"), "{in_quill}");
+        assert!(in_quill.contains("Uses pnpm"), "{in_quill}");
+        let fern_digest = if quill.id.to_string() < fern.id.to_string() {
+            "project digest two"
+        } else {
+            "project digest one"
+        };
+        assert!(!in_quill.contains(fern_digest), "{in_quill}");
+
+        let nowhere = writer.execute_in(&fixture.alex, None).await.unwrap();
+        assert!(!nowhere.contains("This project"), "{nowhere}");
     }
 }

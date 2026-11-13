@@ -234,6 +234,7 @@ mod tests {
             entities: vec![],
             relations: vec![],
             confidence: 0.9,
+            placement: Default::default(),
         }
     }
 

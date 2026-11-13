@@ -111,52 +111,132 @@ healthy and refuses all work.
 
 ### `memory_save`
 
-Stores a durable fact, preference, or decision.
+Stores one memory with its structure: what it is, what it is about, who it is
+true for, and where it came from. Every field is explained in
+[memory-model.md](memory-model.md); the tool's own description carries the same
+guidance, so an agent reads it on every call.
 
 ```json
 {"content": "User forbids barrel files and index.ts re-exports",
- "category": "preference.coding", "tags": ["typescript"]}
+ "kind": "preference", "topic": "coding",
+ "applies_to": {"target": "me"}, "origin": "user_said",
+ "tags": ["typescript"]}
 ```
 
 ```
-Saved as [preference.coding] (id 019f7c5a-…): User forbids barrel files and index.ts re-exports
+Saved as your personal coding preference (applies to you everywhere). (id 019f7c5a-…): User forbids barrel files and index.ts re-exports
 It will be available in future sessions.
 ```
 
-`category` is optional; see the [taxonomy](api.md#categories). It is a
-hint rather than an instruction — with a provider configured, extraction
-may find several memories in one submission and they need not all share it.
+The reply says how it was filed, so the agent can repeat it and you can correct
+it on the spot. `applies_to` is what keeps one project's rule out of your
+preferences, so an agent should choose it from what you said, and ask when it is
+unclear. Left out, it defaults to the current project, else `general`, never
+`me`, and the reply asks the agent to confirm it.
 
-**What the tool actually does depends on `[understanding].provider`.**
-With one configured, `memory_save` runs the full pipeline synchronously
-(it uses `wait: true` on [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)),
-which means it can answer with more than one memory:
+**Inside a project.** `recuerdos-ai mcp` runs in the folder your harness works in
+and sends that folder's project (from its git remote) with every call, so "in this
+repo we never mock the database" is filed under it without the agent naming it.
+The first save to a project the daemon does not know is refused until you confirm
+it is new; the agent then saves again with `"new_project": true`.
+
+**When a rule refuses the save**, the tool answers with a result beginning
+`Not saved (code):` and says what to change: ask you before saving an inferred
+preference, use `convention` for a project's way of doing things, name the
+project, leave the secret out. An agent should follow it, usually by asking you,
+rather than rewording to get past it. The codes are listed in
+[memory-model.md](memory-model.md#when-a-save-is-refused).
+
+**When it contradicts a stored memory** for the same scope, the save is refused as
+`Not saved (conflict):`, naming the stored memory and its id. The agent asks you
+which holds, then:
+
+- you changed your mind: it saves again with `"replaces": "<id>"`, and the old one
+  leaves recall but stays in history;
+- the stored one was wrong: it fixes it with `memory_update`;
+- both hold: it saves again with `"coexists_with": ["<id>"]`.
+
+With a language model configured, the model judges the contradiction, and also
+whether text filed as yours or as general is really about one project. Without
+one, only a near repeat of a stored memory is stopped. Saying something the store
+already knows stores nothing, and the reply says `Already known: …`.
+
+A project memory that contradicts one of your own is not a conflict: a project may
+make an exception, and the reply says it overrides your preference there.
+
+`memory_save` always stores as given. Raw text for the service to split and
+classify goes through [`POST /v1/memories`](api.md#post-v1memories--ingest-raw-content)
+or `session_distill`.
+
+### `memory_save_batch`
+
+Several memories in one call, each with its own structure, exactly as
+`memory_save` takes one. Items are saved one by one through the same rules, so a
+refused item does not stop the rest, and the reply reports each:
 
 ```
-Saved 2 memories:
+Saved 1 memory from 2 items.
 
-- [fact.project] The backend runs on Hetzner (id 019f7c61-…)
-- [preference.coding] User requires table-driven tests in Go (id 019f7c62-…)
+- Saved as a coding rule of quill. In this repo migrations are forward-only (id 019f…)
 
 They will be available in future sessions.
+
+1 item was not saved:
+- item 1: not saved (needs_confirmation): This is about the user, and it was inferred. …
 ```
 
-…or with none:
+An item the store already knew is listed under "added nothing new".
+
+### `memory_update`
+
+Amends one stored memory: its wording, its structure, or whether a goal is still
+open. It keeps its id, and the audit trail keeps what it said before. The same
+rules as a save apply to what it becomes; a refusal begins `Not updated (code):`.
+
+```json
+{"id": "019f7c5a-…", "content": "The user prefers mocks in unit tests"}
+```
 
 ```
-Nothing new was stored — either this is already known, or there was nothing
-in it that stays true beyond this conversation. Do not tell the user it was
-saved.
+Updated; filed as your personal coding preference. (id 019f7c5a-…): The user prefers mocks in unit tests
 ```
 
-That last one is why the tool does not simply return "saved". A model told
-"saved" after a no-op goes on to tell the user something untrue, and the
-user only finds out much later when the memory isn't there.
+Every field but `id` is optional: `content`, `kind`, `topic`, `applies_to` (to move
+it to another scope), `subtopic` and `valid_until` (an empty string clears them),
+`tags`, `goal_status` and `origin`.
 
-It is also where reconciliation earns its keep: if what the agent saves
-contradicts something already stored, the old memory is superseded rather
-than kept alongside it. Without a provider the tool stores content
-verbatim and this section reduces to the single-memory case.
+**Closing a goal** is `{"id": …, "goal_status": "achieved", "origin":
+"user_confirmed"}` (or `"abandoned"`, or `"user_said"` when you said so yourself).
+Only you close a goal: an agent that only noticed it was reached is refused with
+`needs_confirmation` and should ask you first. A closed goal leaves recall and the
+profile, and stays in history.
+
+Amend when the stored memory is wrong; when you changed your mind, the new memory
+is saved with `replaces`, so the old one remains as what you used to think.
+
+### `project_list`, `project_rename`, `project_merge`
+
+The user's projects ([memory-model.md](memory-model.md#projects)).
+
+- **`project_list`** takes nothing and lists each project, its memory count and what
+  else finds it:
+
+  ```
+  2 projects:
+  - fern — 4 memories; also found by github.com/acme/fern
+  - quill — 12 memories; also found by github.com/acme/quill, quill-old
+  ```
+- **`project_rename`** `{"name": "quill", "new_name": "quill-app"}`: the memories
+  follow and the old name keeps finding it. Called from the stdio shim inside a
+  folder whose project is the new name, that folder's remote is learned too. This is
+  the answer when a save in a renamed repository is refused with *"Is it a rename of
+  quill (github.com/acme/quill)?"* and the user says yes.
+- **`project_merge`** `{"name": "me-quill", "into": "quill"}`: every memory of
+  `me-quill` moves to `quill`, whose aliases gain `me-quill`'s name and remotes.
+
+Each answers with one sentence (`Renamed quill to quill-app: …`, `Merged me-quill into
+quill: 1 memory moved, …`); a refusal begins `Not renamed:` or `Not merged:`. The tool
+descriptions tell the agent to rename or merge only when the user agrees.
 
 ### `memory_recall`
 
@@ -168,14 +248,21 @@ graph — over this user's memories.
 ```
 
 ```
-1. [preference.coding] User forbids barrel files and index.ts re-exports (saved 2026-06-02, score 0.03, typescript)
+1. [preference · coding · me] User forbids barrel files and index.ts re-exports (saved 2026-06-02, relevance 0.71, typescript)
+2. [convention · coding · quill] Use cases are named by intent, no Service suffix (saved 2026-09-14, relevance 0.48)
 ```
 
 Results are numbered plain text, not JSON: tool output is spent from the
 agent's context window, and JSON would spend a chunk of it on
-punctuation. The category comes first because it is the strongest signal
-for how much weight a line deserves — a `preference.coding` is an
-instruction, a `fact.project` is background.
+punctuation. The scope comes first because it is the strongest signal
+for how much weight a line deserves — your `preference` is an instruction
+everywhere, a project's `convention` only in that project.
+
+Optional filters: `kinds`, `topics`, `targets` (`me`, `project`, `general`) and
+`projects`, each a list. The stdio shim's folder is the project the recall ranks with
+your own memories; other projects' rank lower unless the question names them. Over
+HTTP MCP, which has no folder, pass `project`. See
+[memory-model.md](memory-model.md#recall-and-the-profile-know-where-you-are).
 
 The graph leg is what lets a question reach a memory it shares no words
 with: "who owns the billing service's data?" surfaces the memory naming
@@ -266,28 +353,36 @@ one yet still needs to know you forbid barrel files.
 ```markdown
 # Memory profile: alex (updated 2026-07-20)
 
-## How they work
+## About you (everywhere)
 
 - Uses pnpm; never npm or yarn
 - No barrel files or index.ts re-exports
+
+## This project: quill
+
+- Use cases are named by intent, no Service suffix
 - SQLite over Postgres, chosen for installer size
 
-## About them
+## Your world (not tied to a project)
 
-- Vegetarian
+- NAS backups are in /mnt/tank/backups
 ```
+
+The project part is the one the stdio shim's folder is in; read without one (over
+HTTP MCP, or `GET /v1/profile` with no `?project=`), the profile has no project part,
+and another project's memories are never in it.
 
 With a provider configured, this is **written by a model** from the
 user's memories and cached until those memories change — so it
 compresses ("uses pnpm, Vitest and Biome" in one line) rather than
-listing forty preferences and truncating at eight. Regeneration happens
-per half: saving a coding preference does not rewrite the personal
-section.
+listing forty preferences and truncating at eight. There is one cached
+digest per scope — yours, the general one, one per project — so saving a
+project convention regenerates only that project's.
 
 Without a provider it is **assembled** instead: the highest-value
-memories per category, grouped under category headings. Same route, same
-media type, same shape — a client cannot tell which it got, and does not
-need to.
+memories per kind within each part, preferences, rules and conventions
+first. Same route, same media type — a client cannot tell which it got,
+and does not need to.
 
 Capped at roughly 1500 tokens either way. Whatever it returns is rent
 paid on every session forever, which is why it is bounded rather than

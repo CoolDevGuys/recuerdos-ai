@@ -28,8 +28,8 @@ use crate::identity::domain::user_context::UserContext;
 use crate::memories::domain::entity_graph::{EntityGraph, MemoryLink};
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_map::{
-    CategoryEdge, CategorySummary, SimilarityEdge, category_edges, category_summary,
-    centroid_category_edges, mutual_knn,
+    SimilarityEdge, TopicEdge, TopicSummary, centroid_topic_edges, mutual_knn, topic_edges,
+    topic_summary,
 };
 use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::vector_index::VectorIndex;
@@ -62,7 +62,7 @@ pub struct MapQuery {
     pub include_superseded: bool,
     /// Only this category's memories. A category nobody uses is an empty map,
     /// not an error: it may have just been emptied.
-    pub category: Option<String>,
+    pub topic: Option<String>,
 }
 
 impl MapQuery {
@@ -76,19 +76,19 @@ impl MapQuery {
         Ok(Self {
             k,
             include_superseded,
-            category: None,
+            topic: None,
         })
     }
 
-    pub fn in_category(mut self, category: Option<String>) -> Result<Self> {
-        if let Some(id) = &category
+    pub fn in_topic(mut self, topic: Option<String>) -> Result<Self> {
+        if let Some(id) = &topic
             && (id.trim().is_empty() || id.len() > MAX_CATEGORY_PARAM)
         {
             return Err(RaError::Validation(format!(
-                "category must be a category id of 1 to {MAX_CATEGORY_PARAM} characters"
+                "topic must be a topic id of 1 to {MAX_CATEGORY_PARAM} characters"
             )));
         }
-        self.category = category;
+        self.topic = topic;
         Ok(self)
     }
 }
@@ -100,7 +100,7 @@ pub enum MapDetail {
     Memories,
     /// The store is above the detail limit: categories and their links
     /// only. Ask for a category to see its memories.
-    Categories,
+    Topics,
 }
 
 #[derive(Debug, Clone)]
@@ -111,8 +111,8 @@ pub struct MemoryMap {
     pub memories: Vec<Memory>,
     pub similar: Arc<Vec<SimilarityEdge>>,
     pub links: Vec<MemoryLink>,
-    pub categories: Vec<CategorySummary>,
-    pub category_edges: Vec<CategoryEdge>,
+    pub topics: Vec<TopicSummary>,
+    pub topic_edges: Vec<TopicEdge>,
     /// The store is too big for the pairwise comparison; no similarity edges.
     pub edges_omitted: bool,
     pub detail: MapDetail,
@@ -128,7 +128,7 @@ struct Cached {
     query: MapQuery,
     similar: Arc<Vec<SimilarityEdge>>,
     /// Centroid links between categories, for an aggregate answer.
-    category_edges: Option<Arc<Vec<CategoryEdge>>>,
+    topic_edges: Option<Arc<Vec<TopicEdge>>>,
 }
 
 pub struct MemoryMapper {
@@ -171,12 +171,12 @@ impl MemoryMapper {
         // recomputed next time — never the reverse.
         let generation = self.memories.generation(context)?;
         let mut memories = self.memories.list(context, query.include_superseded)?;
-        if let Some(category) = &query.category {
-            memories.retain(|m| m.category().as_str() == category);
+        if let Some(category) = &query.topic {
+            memories.retain(|m| m.structure().topic().as_str() == category);
         }
         let total = memories.len();
 
-        if query.category.is_none() && total > self.detail_limit {
+        if query.topic.is_none() && total > self.detail_limit {
             return self.aggregate(context, query, generation, memories);
         }
 
@@ -201,8 +201,8 @@ impl MemoryMapper {
             generation,
             k: query.k,
             min_weight: MIN_EDGE_WEIGHT,
-            categories: category_summary(&memories),
-            category_edges: category_edges(&memories, &similar),
+            topics: topic_summary(&memories),
+            topic_edges: topic_edges(&memories, &similar),
             memories,
             similar,
             links,
@@ -223,15 +223,15 @@ impl MemoryMapper {
         let key = (context.user_id(), None);
         let cached = self.cache.lock().unwrap().get(&key).and_then(|cached| {
             (cached.generation == generation && cached.query == query)
-                .then(|| cached.category_edges.clone())
+                .then(|| cached.topic_edges.clone())
                 .flatten()
         });
-        let category_edges = match cached {
+        let topic_edges = match cached {
             Some(edges) => edges,
             None => {
                 let vectors: HashMap<MemoryId, Vec<f32>> =
                     self.vectors.all(context)?.into_iter().collect();
-                let edges = Arc::new(centroid_category_edges(
+                let edges = Arc::new(centroid_topic_edges(
                     &memories,
                     &vectors,
                     CATEGORY_NEIGHBOURS,
@@ -243,7 +243,7 @@ impl MemoryMapper {
                         generation,
                         query: query.clone(),
                         similar: Arc::new(Vec::new()),
-                        category_edges: Some(Arc::clone(&edges)),
+                        topic_edges: Some(Arc::clone(&edges)),
                     },
                 );
                 edges
@@ -254,14 +254,14 @@ impl MemoryMapper {
             generation,
             k: query.k,
             min_weight: MIN_EDGE_WEIGHT,
-            categories: category_summary(&memories),
-            category_edges: category_edges.as_ref().clone(),
+            topics: topic_summary(&memories),
+            topic_edges: topic_edges.as_ref().clone(),
             total: memories.len(),
             memories: Vec::new(),
             similar: Arc::new(Vec::new()),
             links: Vec::new(),
             edges_omitted: false,
-            detail: MapDetail::Categories,
+            detail: MapDetail::Topics,
         })
     }
 
@@ -280,7 +280,7 @@ impl MemoryMapper {
         generation: i64,
         present: &HashSet<MemoryId>,
     ) -> Result<Arc<Vec<SimilarityEdge>>> {
-        let key = (context.user_id(), query.category.clone());
+        let key = (context.user_id(), query.topic.clone());
         if let Some(cached) = self.cache.lock().unwrap().get(&key)
             && cached.generation == generation
             && cached.query == *query
@@ -307,7 +307,7 @@ impl MemoryMapper {
                 generation,
                 query: query.clone(),
                 similar: Arc::clone(&similar),
-                category_edges: None,
+                topic_edges: None,
             },
         );
         Ok(similar)
@@ -427,39 +427,51 @@ mod tests {
     }
 
     #[test]
-    fn above_the_detail_limit_the_map_is_categories_only() {
+    fn above_the_detail_limit_the_map_is_topics_only() {
         let fixture = Fixture::new();
-        save_in(&fixture, Category::Skill, "writes rust daily");
-        save_in(&fixture, Category::Skill, "writes rust and go");
-        save_in(&fixture, Category::Decision, "chose sqlite for storage");
+        save_in(&fixture, Category::PreferencePersonal, "writes rust daily");
+        save_in(&fixture, Category::PreferencePersonal, "writes rust and go");
+        save_in(
+            &fixture,
+            Category::PreferenceCoding,
+            "chose sqlite for storage",
+        );
         let mapper = mapper(&fixture).with_detail_limit(2);
 
         let map = mapper
             .execute(&fixture.alex, MapQuery::new(None, false).unwrap())
             .unwrap();
 
-        assert_eq!(map.detail, MapDetail::Categories);
+        assert_eq!(map.detail, MapDetail::Topics);
         assert!(map.memories.is_empty() && map.similar.is_empty());
         assert_eq!(map.total, 3);
         let counts: Vec<(&str, usize)> = map
-            .categories
+            .topics
             .iter()
             .map(|c| (c.id.as_str(), c.count))
             .collect();
-        assert_eq!(counts, vec![("skill", 2), ("decision", 1)]);
-        assert_eq!(map.category_edges.len(), 1, "two categories, one link");
+        assert_eq!(counts, vec![("lifestyle", 2), ("coding", 1)]);
+        assert_eq!(map.topic_edges.len(), 1, "two topics, one link");
     }
 
     #[test]
-    fn a_category_query_maps_only_that_category_whatever_the_size() {
+    fn a_topic_query_maps_only_that_topic_whatever_the_size() {
         let fixture = Fixture::new();
-        let a = save_in(&fixture, Category::Skill, "deploys on hetzner");
-        let b = save_in(&fixture, Category::Skill, "deploys on hetzner too");
-        save_in(&fixture, Category::Decision, "deploys on hetzner, decided");
+        let a = save_in(&fixture, Category::PreferencePersonal, "deploys on hetzner");
+        let b = save_in(
+            &fixture,
+            Category::PreferencePersonal,
+            "deploys on hetzner too",
+        );
+        save_in(
+            &fixture,
+            Category::PreferenceCoding,
+            "deploys on hetzner, decided",
+        );
         let mapper = mapper(&fixture).with_detail_limit(1);
         let query = MapQuery::new(Some(1), false)
             .unwrap()
-            .in_category(Some("skill".to_string()))
+            .in_topic(Some("lifestyle".to_string()))
             .unwrap();
 
         let map = mapper.execute(&fixture.alex, query).unwrap();
@@ -469,17 +481,21 @@ mod tests {
         let ids: HashSet<MemoryId> = map.memories.iter().map(Memory::id).collect();
         assert_eq!(ids, [a.id(), b.id()].into_iter().collect());
         assert_eq!(map.similar.len(), 1);
-        assert_eq!(map.categories.len(), 1);
+        assert_eq!(map.topics.len(), 1);
     }
 
     #[test]
-    fn whole_store_and_category_maps_are_cached_side_by_side() {
+    fn whole_store_and_topic_maps_are_cached_side_by_side() {
         let fixture = Fixture::new();
-        save_in(&fixture, Category::Skill, "deploys on hetzner");
-        save_in(&fixture, Category::Skill, "deploys on hetzner too");
+        save_in(&fixture, Category::PreferencePersonal, "deploys on hetzner");
+        save_in(
+            &fixture,
+            Category::PreferencePersonal,
+            "deploys on hetzner too",
+        );
         let mapper = mapper(&fixture);
         let whole = MapQuery::new(Some(1), false).unwrap();
-        let skill = whole.clone().in_category(Some("skill".into())).unwrap();
+        let skill = whole.clone().in_topic(Some("lifestyle".into())).unwrap();
 
         let first = mapper.execute(&fixture.alex, whole.clone()).unwrap();
         mapper.execute(&fixture.alex, skill.clone()).unwrap();
@@ -489,14 +505,14 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_category_is_a_validation_error() {
+    fn a_blank_topic_is_a_validation_error() {
         let query = MapQuery::new(None, false).unwrap();
         assert!(matches!(
-            query.clone().in_category(Some(" ".into())),
+            query.clone().in_topic(Some(" ".into())),
             Err(RaError::Validation(_))
         ));
         assert!(matches!(
-            query.in_category(Some("x".repeat(200))),
+            query.in_topic(Some("x".repeat(200))),
             Err(RaError::Validation(_))
         ));
     }

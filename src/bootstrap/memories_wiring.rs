@@ -13,20 +13,28 @@ use crate::memories::application::memory_recaller::MemoryRecaller;
 use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
+use crate::memories::application::project_curator::ProjectCurator;
+use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
+use crate::memories::application::structured_memory_updater::StructuredMemoryUpdater;
+use crate::memories::application::topic_curator::TopicCurator;
 use crate::memories::domain::category_catalog::CategoryCatalog;
 use crate::memories::domain::embedder::Embedder;
 use crate::memories::domain::entity_graph::EntityGraph;
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::project_registry::ProjectRegistry;
 use crate::memories::domain::recall_ranker::{
     DEFAULT_SIMILARITY_BASELINE, RecallRanker, RelevanceCalibration, RerankStrategy,
     default_similarity_baseline_for,
 };
 use crate::memories::domain::reranker::{RerankMode, Reranker};
 use crate::memories::domain::text_index::TextIndex;
+use crate::memories::domain::topic_catalog::TopicCatalog;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCatalog;
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
+use crate::memories::infrastructure::sqlite_project_registry::SqliteProjectRegistry;
+use crate::memories::infrastructure::sqlite_topic_catalog::SqliteTopicCatalog;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
 use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
 use crate::providers::infrastructure::chat::transport;
@@ -47,9 +55,25 @@ const TEXT_INDEX_DIR: &str = "text-index";
 
 pub struct Memories {
     pub saver: Arc<DirectMemorySaver>,
+    /// The save whose structure the caller states, with every memory rule
+    /// applied (ai-specs/memory-structure-plan.md §4): what `:direct` and
+    /// the MCP save tools use.
+    pub structured_saver: Arc<StructuredMemorySaver>,
+    /// Amends a memory under the same rules, and closes goals (plan §5.2,
+    /// R12): what `PATCH /v1/memories/{id}` and `memory_update` use.
+    pub structured_updater: Arc<StructuredMemoryUpdater>,
+    /// Each user's projects: the pipeline files a job's memories under the
+    /// one its client works in.
+    pub projects: Arc<dyn ProjectRegistry>,
+    /// Listing, renaming and merging projects (plan §6): `/v1/projects`
+    /// and the MCP project tools.
+    pub project_curator: Arc<ProjectCurator>,
+    /// Listing, adding and relabelling topics: `/v1/topics`.
+    pub topic_curator: Arc<TopicCurator>,
+    /// Each user's topics, for the review queue's suggestions.
+    pub topics: Arc<dyn TopicCatalog>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
-    pub updater: Arc<MemoryUpdater>,
     pub forgetter: Arc<MemoryForgetter>,
     pub restorer: Arc<MemoryRestorer>,
     pub mapper: Arc<MemoryMapper>,
@@ -253,33 +277,71 @@ impl Memories {
             Arc::clone(&bulk_editor),
         ));
 
+        let saver = Arc::new(
+            DirectMemorySaver::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                Arc::clone(&text),
+                Arc::clone(&embedder),
+                Arc::clone(&clock),
+            )
+            .with_document_text(config.document_text()),
+        );
+        let updater = Arc::new(
+            MemoryUpdater::new(
+                Arc::clone(&repository),
+                Arc::clone(&vectors),
+                Arc::clone(&text),
+                Arc::clone(&embedder),
+                Arc::clone(&clock),
+            )
+            .with_document_text(config.document_text()),
+        );
+        let recaller = Arc::new(recaller);
+        let projects: Arc<dyn ProjectRegistry> =
+            Arc::new(SqliteProjectRegistry::new(Arc::clone(&database)));
+        let topics: Arc<dyn TopicCatalog> =
+            Arc::new(SqliteTopicCatalog::new(Arc::clone(&database)));
+        let structured_saver = Arc::new(StructuredMemorySaver::new(
+            Arc::clone(&saver),
+            Arc::clone(&repository),
+            Arc::clone(&recaller),
+            Arc::clone(&projects),
+            Arc::clone(&topics),
+            Arc::clone(&clock),
+        ));
+        let topic_curator = Arc::new(TopicCurator::new(
+            Arc::clone(&topics),
+            Arc::clone(&repository),
+            Arc::clone(&clock),
+        ));
+
+        let project_curator = Arc::new(ProjectCurator::new(
+            Arc::clone(&projects),
+            Arc::clone(&repository),
+            Arc::clone(&clock),
+        ));
+
+        let structured_updater = Arc::new(StructuredMemoryUpdater::new(
+            Arc::clone(&updater),
+            Arc::clone(&repository),
+            Arc::clone(&structured_saver),
+        ));
+
         Ok(Self {
             mapper,
             catalog,
             bulk_editor,
             category_curator,
-            saver: Arc::new(
-                DirectMemorySaver::new(
-                    Arc::clone(&repository),
-                    Arc::clone(&vectors),
-                    Arc::clone(&text),
-                    Arc::clone(&embedder),
-                    Arc::clone(&clock),
-                )
-                .with_document_text(config.document_text()),
-            ),
-            recaller: Arc::new(recaller),
+            saver,
+            structured_saver,
+            recaller,
             finder: Arc::new(MemoryFinder::new(Arc::clone(&repository))),
-            updater: Arc::new(
-                MemoryUpdater::new(
-                    Arc::clone(&repository),
-                    Arc::clone(&vectors),
-                    Arc::clone(&text),
-                    Arc::clone(&embedder),
-                    Arc::clone(&clock),
-                )
-                .with_document_text(config.document_text()),
-            ),
+            structured_updater,
+            projects,
+            project_curator,
+            topic_curator,
+            topics,
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),
@@ -354,6 +416,20 @@ impl RecallCore {
         // `reindex` with a clear message, not surface later as a raw
         // dimension-mismatch on the first recall.
         concrete_repository.verify_pin()?;
+        // Memories stored before V11 get their structure derived from their
+        // category, once (ai-specs/memory-structure-plan.md §8). Skipped by
+        // read-only openers — a command reading a store another process
+        // serves — which read unfilled rows through the same mapping anyway.
+        if !read_only_text {
+            let filled = concrete_repository.backfill_structure()?;
+            if filled > 0 {
+                tracing::info!(
+                    memories = filled,
+                    "gave memories saved before structured memories a kind, topic and scope; \
+                     the ones it could not place are flagged for review"
+                );
+            }
+        }
         let repository: Arc<dyn MemoryRepository> = Arc::new(concrete_repository);
         let vectors: Arc<dyn VectorIndex> = Arc::new(SqliteVectorIndex::open(
             Arc::clone(database),

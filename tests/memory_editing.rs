@@ -35,7 +35,7 @@ impl Session {
             .http
             .post(self.url("/v1/memories:direct"))
             .bearer_auth(&self.key)
-            .json(&json!({"content": content}))
+            .json(&common::structured(json!({"content": content})))
             .send()
             .await
             .unwrap();
@@ -255,7 +255,9 @@ async fn categories_list_every_built_in_with_the_callers_counts() {
         .http
         .post(session.url("/v1/memories:direct"))
         .bearer_auth(&session.key)
-        .json(&json!({"content": "prefers pnpm", "category": "preference.coding"}))
+        .json(&common::structured(
+            json!({"content": "prefers pnpm", "category": "preference.coding"}),
+        ))
         .send()
         .await
         .unwrap();
@@ -288,4 +290,77 @@ async fn categories_list_every_built_in_with_the_callers_counts() {
             .sum::<u64>(),
         1
     );
+}
+
+/// Structured memories (ai-specs/memory-structure-plan.md §3, §8): a save
+/// states its kind, topic, scope and origin, the reply says how it was filed,
+/// and re-filing it under a category re-derives the structure (until edits can
+/// set it, S5).
+#[tokio::test]
+async fn every_memory_carries_its_structure() {
+    let session = Session::spawn().await;
+    let response = session
+        .http
+        .post(session.url("/v1/memories:direct"))
+        .bearer_auth(&session.key)
+        .json(&json!({
+            "content": "User prefers pnpm",
+            "kind": "preference",
+            "topic": "coding",
+            "applies_to": {"target": "me"},
+            "origin": "user_said"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let saved: Value = response.json().await.unwrap();
+
+    assert_eq!(saved["kind"], "preference");
+    assert_eq!(saved["topic"], "coding");
+    assert_eq!(saved["applies_to"], json!({"target": "me"}));
+    assert_eq!(saved["origin"], "user_said");
+    assert_eq!(saved["needs_review"], false, "stated, not derived");
+    assert_eq!(
+        saved["message"],
+        "Saved as your personal coding preference (applies to you everywhere)."
+    );
+    assert!(saved.get("goal_status").is_none(), "only goals have one");
+
+    let id = saved["id"].as_str().unwrap();
+    let response = session
+        .patch(id, None, json!({"category": "skill", "tags": ["docker"]}))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let refiled: Value = response.json().await.unwrap();
+
+    // A stated structure outlives a re-filing: moving it to another
+    // category does not make the user's preference something else.
+    assert_eq!(refiled["category"], "skill");
+    assert_eq!(refiled["kind"], "preference");
+    assert_eq!(refiled["applies_to"], json!({"target": "me"}));
+
+    // The structure is edited by naming it, under the same rules.
+    let response = session
+        .patch(
+            id,
+            None,
+            json!({"kind": "rule", "applies_to": {"target": "general"}, "origin": "user_said"}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let rescoped: Value = response.json().await.unwrap();
+    assert_eq!(rescoped["kind"], "rule");
+    assert_eq!(rescoped["applies_to"], json!({"target": "general"}));
+    assert_eq!(
+        rescoped["message"],
+        "Updated; filed as a general coding rule."
+    );
+
+    let response = session
+        .patch(id, None, json!({"applies_to": {"target": "project"}}))
+        .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: Value = response.json().await.unwrap();
+    assert_eq!(refused["error"]["code"], "no_project");
 }

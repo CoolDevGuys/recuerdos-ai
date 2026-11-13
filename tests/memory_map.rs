@@ -18,7 +18,18 @@ async fn save(
     let response = reqwest::Client::new()
         .post(format!("{}/v1/memories:direct", app.base_url))
         .bearer_auth(key)
-        .json(&json!({"content": content, "category": category, "subcategory": subcategory}))
+        .json(&{
+            let mut body = common::structured(
+                json!({"content": content, "category": category, "subcategory": subcategory}),
+            );
+            // The map groups by topic: give each category its own.
+            body["topic"] = json!(match category {
+                "preference.coding" => "coding",
+                "preference.personal" => "food",
+                _ => "work",
+            });
+            body
+        })
         .send()
         .await
         .unwrap();
@@ -47,7 +58,7 @@ fn linked(body: &Value, a: &str, b: &str) -> bool {
 }
 
 #[tokio::test]
-async fn related_memories_link_and_the_categories_are_summarised() {
+async fn related_memories_link_and_the_topics_are_summarised() {
     let app = TestApp::spawn().await;
     let key = app.create_user_with_key("alex", "read,write");
     let vitest = save(
@@ -95,16 +106,17 @@ async fn related_memories_link_and_the_categories_are_summarised() {
         assert!((0.15..=1.0).contains(&weight), "{edge}");
     }
 
-    let coding = body["categories"]
+    // Grouped by topic (memory-structure-plan.md D13).
+    let coding = body["topics"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["id"] == "preference.coding")
+        .find(|c| c["id"] == "coding")
         .unwrap();
-    assert_eq!(coding["label"], "Coding preference");
+    assert_eq!(coding["label"], "Coding");
     assert_eq!(coding["count"], 2);
     assert_eq!(
-        coding["subcategories"],
+        coding["subtopics"],
         json!([{"name": "testing", "count": 2}])
     );
     assert!(body["generation"].as_str().is_some());
@@ -163,7 +175,7 @@ async fn k_out_of_range_is_rejected_and_a_write_only_key_cannot_read_the_map() {
 }
 
 #[tokio::test]
-async fn a_store_above_the_detail_limit_maps_categories_then_one_category_at_a_time() {
+async fn a_store_above_the_detail_limit_maps_topics_then_one_topic_at_a_time() {
     let app = TestApp::spawn_with(&[("RECUERDOS_AI_UI__MAP_DETAIL_LIMIT", "2")]).await;
     let key = app.create_user_with_key("alex", "read,write");
     let vitest = save(
@@ -187,24 +199,24 @@ async fn a_store_above_the_detail_limit_maps_categories_then_one_category_at_a_t
     let whole = map(&app, &key, "").await;
     assert_eq!(whole.status(), StatusCode::OK);
     let whole: Value = whole.json().await.unwrap();
-    assert_eq!(whole["detail"], "categories");
+    assert_eq!(whole["detail"], "topics");
     assert_eq!(whole["total"], 3);
     assert!(whole["nodes"].as_array().unwrap().is_empty());
-    assert_eq!(whole["categories"][0]["id"], "preference.coding");
-    assert_eq!(whole["categories"][0]["count"], 2);
-    assert_eq!(whole["category_edges"].as_array().unwrap().len(), 1);
+    assert_eq!(whole["topics"][0]["id"], "coding");
+    assert_eq!(whole["topics"][0]["count"], 2);
+    assert_eq!(whole["topic_edges"].as_array().unwrap().len(), 1);
 
-    let coding: Value = map(&app, &key, "?category=preference.coding&k=1")
+    let coding: Value = map(&app, &key, "?topic=coding&k=1")
         .await
         .json()
         .await
         .unwrap();
     assert_eq!(coding["detail"], "memories");
-    assert_eq!(coding["category"], "preference.coding");
+    assert_eq!(coding["topic"], "coding");
     assert_eq!(coding["total"], 2);
     assert_eq!(coding["nodes"].as_array().unwrap().len(), 2);
     assert!(linked(&coding, &vitest, &jest), "{coding}");
 
-    let blank = map(&app, &key, "?category=").await;
+    let blank = map(&app, &key, "?topic=").await;
     assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
 }

@@ -153,26 +153,27 @@ Supersession needs `[understanding].provider` configured. Without it,
 content is stored verbatim and contradictions sit side by side — see
 [configuration.md](../configuration.md).
 
-## Categories worth knowing
+## Topics and scopes worth knowing
 
-The taxonomy leans coding by default, but two categories carry most of a
-life agent's weight:
+Every memory says what it is about (its **topic**) and who it is true for (its
+**scope**: the user everywhere, one project, or their world in general). A life agent
+mostly wants the user's own memories, and a few topics:
 
-| category | for |
+| topic | for |
 |---|---|
-| `preference.personal` | diet, routines, how they like things done |
-| `fact.person` | people in their life and what matters about them |
-| `experience` | what was tried and what happened |
-| `reference` | lookups — account details, addresses, links |
+| `food`, `health`, `lifestyle` | diet, routines, how they like things done |
+| `people`, `family` | the people in their life and what matters about them |
+| `home`, `finance`, `travel` | their world outside work |
 
-Filter on them to keep a dinner-booking prompt free of the user's
-TypeScript opinions:
+Filter on them to keep a dinner-booking prompt free of the user's TypeScript opinions:
 
 ```bash
--d '{"query": "dietary restrictions", "categories": ["preference.personal"]}'
+-d '{"query": "dietary restrictions", "topics": ["food", "health"], "targets": ["me"]}'
 ```
 
-Add your own with `[understanding.taxonomy].extra_categories`.
+Hermes works in no project, so recall already ranks project memories below the user's
+own. Add a topic of your own with `POST /v1/topics` (or the web UI's **Topics** tab).
+See [memory-model.md](../memory-model.md).
 
 ## Sharing memory with your coding agents
 

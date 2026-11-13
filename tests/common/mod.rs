@@ -261,3 +261,33 @@ async fn wait_until_healthy(base_url: &str) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// A `POST /v1/memories:direct` body in the structured shape
+/// (ai-specs/memory-structure-plan.md §3.1), from one written in the old one.
+///
+/// Suites that test something other than the structure (recall, categories,
+/// the map, isolation) save memories in passing; this gives each the required
+/// `kind`, `topic`, `applies_to` and `origin` unless the body states them, and
+/// renames the fields the old shape called otherwise. A body's `category` is
+/// kept: it is still accepted alongside the structure.
+pub fn structured(mut body: serde_json::Value) -> serde_json::Value {
+    let object = body.as_object_mut().expect("a JSON object body");
+    for (old, new) in [("subcategory", "subtopic"), ("expires_at", "valid_until")] {
+        if let Some(value) = object.remove(old)
+            && !value.is_null()
+        {
+            object.insert(new.to_string(), value);
+        }
+    }
+    object.remove("confidence");
+    let defaults = [
+        ("kind", serde_json::json!("fact")),
+        ("topic", serde_json::json!("coding")),
+        ("applies_to", serde_json::json!({"target": "general"})),
+        ("origin", serde_json::json!("user_said")),
+    ];
+    for (field, value) in defaults {
+        object.entry(field).or_insert(value);
+    }
+    body
+}

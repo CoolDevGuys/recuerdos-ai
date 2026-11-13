@@ -45,7 +45,7 @@ try {
   let page = await signedIn(browser, desktop);
   await page.screenshot({ path: `${out}/list.png` });
   await openMap(page);
-  await page.screenshot({ path: `${out}/map-categories.png` });
+  await page.screenshot({ path: `${out}/map-topics.png` });
   const map = page.getByRole("application", { name: /Map of/ });
   await map.focus();
   await page.keyboard.press("2");
@@ -54,6 +54,15 @@ try {
   await page.keyboard.press("3");
   await page.waitForTimeout(900);
   await page.screenshot({ path: `${out}/map-memories.png` });
+  await page.getByRole("link", { name: /Needs review/ }).click();
+  await page.getByRole("heading", { name: /Needs review/ }).waitFor();
+  await page.screenshot({ path: `${out}/review.png` });
+  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("heading", { name: "quill" }).waitFor();
+  await page.screenshot({ path: `${out}/projects.png` });
+  await page.getByRole("link", { name: "Topics" }).click();
+  await page.getByRole("button", { name: "Add topic" }).waitFor();
+  await page.screenshot({ path: `${out}/topics.png` });
   await page.getByRole("link", { name: "Categories" }).click();
   await page.getByRole("table").waitFor();
   await page.screenshot({ path: `${out}/categories.png` });

@@ -17,7 +17,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "AppliesTo",
     "Memory",
+    "SavedMemory",
     "MatchDetail",
     "SearchHit",
     "SearchReport",
@@ -38,6 +40,20 @@ class _Model(BaseModel):
     model_config = ConfigDict(extra="allow", frozen=True)
 
 
+class AppliesTo(_Model):
+    """Who or what a memory is true for (``docs/memory-model.md``).
+
+    ``target`` is ``me`` (the user, everywhere), ``project`` (one project,
+    named by ``project_name``) or ``general`` (the user's world, not tied to
+    a project). ``new_project`` creates an unknown project, once the user has
+    confirmed it is a new one.
+    """
+
+    target: Literal["me", "project", "general"]
+    project_name: str | None = None
+    new_project: bool | None = None
+
+
 class Memory(_Model):
     """One atomic thing worth remembering."""
 
@@ -52,9 +68,43 @@ class Memory(_Model):
     #: Set when a later memory replaced this one. Superseded memories are
     #: retained and excluded from ordinary recall.
     superseded_by: str | None = None
+    #: The structure (``docs/memory-model.md``). Defaults keep the model
+    #: readable against a server older than structured memories.
+    kind: str | None = None
+    topic: str | None = None
+    applies_to: AppliesTo | None = None
+    origin: str | None = None
+    goal_status: str | None = None
+    #: True when the structure was derived from an old category and may be
+    #: wrong; the web UI lists these for review.
+    needs_review: bool = False
 
     def __str__(self) -> str:
         return f"[{self.category}] {self.content}"
+
+
+class SavedMemory(Memory):
+    """A memory just saved, with what the server says about how it filed it."""
+
+    #: ``stored``, or ``already_known``: a stored memory already says this,
+    #: nothing was written, and this is that memory.
+    status: str = "stored"
+    #: The sentence to repeat to the user: "Saved as your personal coding
+    #: preference (applies to you everywhere)."
+    message: str = ""
+    #: ``applies_to_defaulted``, ``filed_from_document``, ``project_created``,
+    #: ``replaced``, ``overrides``.
+    notes: list[str] = Field(default_factory=list)
+    #: The ids this save superseded (``replaces``).
+    replaced: list[str] = Field(default_factory=list)
+
+
+class UpdatedMemory(Memory):
+    """A memory just amended, with the server's sentence about it."""
+
+    #: "Updated; filed as your personal coding preference." — and, for a
+    #: goal just closed, that it leaves recall.
+    message: str = ""
 
 
 class MatchDetail(_Model):
@@ -85,6 +135,10 @@ class MatchDetail(_Model):
 class SearchHit(Memory):
     """A memory, plus why it came back."""
 
+    #: How well it answers the query, ``0.0``–``1.0``: the number to read. A
+    #: memory of a project the caller is not in counts half, unless the query
+    #: names that project.
+    relevance: float = 0.0
     score: float = 0.0
     matched: MatchDetail = Field(default_factory=MatchDetail)
 
@@ -202,3 +256,64 @@ class Distillation(_Model):
     #: How many memories survived the session. Zero is the ordinary
     #: outcome and is a success, not a failure.
     distilled: int = 0
+
+
+class Project(_Model):
+    """One of the user's projects: what project memories are filed under."""
+
+    id: str
+    #: What it is shown and typed as: ``quill``.
+    name: str
+    #: What else finds it: git remotes (``github.com/acme/quill``), folder
+    #: names, and the names it had before a rename.
+    aliases: list[str] = Field(default_factory=list)
+    #: Active memories filed under it.
+    memories: int = 0
+    created_at: datetime | None = None
+
+
+class ProjectChange(_Model):
+    """What renaming or merging a project did."""
+
+    #: The project as it is now: renamed, or the one merged into.
+    project: Project
+    #: "Renamed quill to quill-app: its 3 memories moved with it, …"
+    message: str = ""
+    #: The name before a rename, or the project that was merged away.
+    previous: str = ""
+    #: Memories that changed project (a merge; a rename moves none).
+    moved: int = 0
+    #: Identifiers a rename learned: the remote of the folder it came from.
+    learned: list[str] = Field(default_factory=list)
+
+
+class Topic(_Model):
+    """A topic memories can be about: a built-in or one of the user's."""
+
+    id: str
+    #: The user's label, else the default wording.
+    label: str
+    default_label: str = ""
+    built_in: bool = False
+    #: Active memories about it.
+    count: int = 0
+
+
+class Suggestion(_Model):
+    """What a memory may really be, proposed by the model for the review queue."""
+
+    id: str
+    kind: str
+    topic: str
+    applies_to: AppliesTo
+    #: One sentence a person reads to accept or change it.
+    reason: str = ""
+
+
+class BulkResult(_Model):
+    """What a bulk edit did."""
+
+    memories: list[Memory] = Field(default_factory=list)
+    #: How many actually changed.
+    changed: int = 0
+    reembedded: int = 0

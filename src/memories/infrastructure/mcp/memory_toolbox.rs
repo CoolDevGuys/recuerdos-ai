@@ -45,15 +45,89 @@ pub struct ToolMemory {
     /// noise. Relevance is measured from the matches themselves, so a low
     /// one means "nothing here is about your question".
     pub relevance: Option<f32>,
+    /// What it is and who it is for, as one label: `preference · coding ·
+    /// me`, `convention · coding · quill` (memory-structure-plan.md §9).
+    /// `None` from a daemon that predates structured memories.
+    pub scope: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl ToolMemory {
+    /// What a rendered line leads with: the scope label, else the category.
+    pub fn label(&self) -> &str {
+        self.scope.as_deref().unwrap_or(&self.category)
+    }
+}
+
+/// A project as the project tools show it (plan §6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolProject {
+    pub id: String,
+    pub name: String,
+    /// Git remotes, folder names and former names that also find it.
+    pub aliases: Vec<String>,
+    /// Active memories filed under it.
+    pub memories: usize,
+}
+
+/// What renaming or merging a project did, in the daemon's words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectChange {
+    pub project: ToolProject,
+    pub message: String,
+}
+
+/// Who or what a memory is true for, as the agent stated it.
+#[derive(Debug, Clone, Default)]
+pub struct SaveAppliesTo {
+    pub target: String,
+    pub project_name: Option<String>,
+    pub new_project: bool,
+}
+
+/// A structured save (ai-specs/memory-structure-plan.md §3.1), as the tool
+/// received it. The daemon applies the memory rules; this layer only
+/// carries the fields.
+#[derive(Debug, Clone, Default)]
 pub struct SaveRequest {
     pub content: String,
-    pub category: Option<String>,
+    pub kind: String,
+    pub topic: String,
+    pub applies_to: Option<SaveAppliesTo>,
+    pub origin: String,
+    pub subtopic: Option<String>,
     pub tags: Vec<String>,
+    pub valid_until: Option<DateTime<Utc>>,
+    /// The id of a stored memory this one replaces (the user changed their
+    /// mind).
+    pub replaces: Option<String>,
+    /// Ids of stored memories the user said this does not replace.
+    pub coexists_with: Vec<String>,
     /// Which client stored it, for the audit trail.
     pub client: Option<String>,
+}
+
+/// An amendment to a stored memory (`memory_update`). `None` leaves a field
+/// alone; `Some(None)` on `subtopic` or `valid_until` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateRequest {
+    pub id: String,
+    pub content: Option<String>,
+    pub kind: Option<String>,
+    pub topic: Option<String>,
+    pub applies_to: Option<SaveAppliesTo>,
+    pub subtopic: Option<Option<String>>,
+    pub tags: Option<Vec<String>>,
+    pub valid_until: Option<Option<DateTime<Utc>>>,
+    pub goal_status: Option<String>,
+    pub origin: Option<String>,
+}
+
+/// What an amendment did: the memory as it now is, and the daemon's
+/// sentence about it.
+#[derive(Debug, Clone)]
+pub struct UpdateOutcome {
+    pub memory: ToolMemory,
+    pub message: Option<String>,
 }
 
 /// What a save did, in the daemon's own words.
@@ -67,30 +141,22 @@ pub struct SaveRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SaveStatus {
-    /// At least one memory was written.
+    /// The memory was written.
     Stored,
-    /// Nothing in the content was durable — small talk, an acknowledgement, a
-    /// step in the task.
-    NothingDurable,
-    /// The store already knew it, so nothing new was written.
+    /// A stored memory in the same scope already says this, so nothing new
+    /// was written.
     AlreadyKnown,
-    /// The store changed without a memory being written — a retraction
-    /// deleted, a candidate superseded something. Not a no-op.
-    ChangedWithoutStoring,
     /// The daemon did not say, or said something this client does not know.
     Unknown,
 }
 
 impl SaveStatus {
-    /// Parses the daemon's `outcome` field. Anything unrecognised — including
-    /// its absence, from a daemon predating the field — is
-    /// [`SaveStatus::Unknown`] rather than a guess.
+    /// Parses the daemon's `status` field. Anything unrecognised — including
+    /// its absence — is [`SaveStatus::Unknown`] rather than a guess.
     pub fn from_wire(value: &serde_json::Value) -> Self {
         match value.as_str() {
             Some("stored") => Self::Stored,
-            Some("nothing_durable") => Self::NothingDurable,
             Some("already_known") => Self::AlreadyKnown,
-            Some("changed_without_storing") => Self::ChangedWithoutStoring,
             _ => Self::Unknown,
         }
     }
@@ -115,6 +181,9 @@ pub struct SaveOutcome {
     /// was left inferring — inferring "saved", because that is what it was
     /// hoping for.
     pub status: SaveStatus,
+    /// The daemon's own sentence about how it was filed ("Saved as your
+    /// personal coding preference …"), to repeat to the user.
+    pub message: Option<String>,
 }
 
 /// One item's result inside a batch save.
@@ -128,6 +197,8 @@ pub struct BatchItemOutcome {
     pub error: Option<String>,
     /// What the item did, or `None` when it failed and `error` explains.
     pub status: Option<SaveStatus>,
+    /// The daemon's sentence about how the item was filed.
+    pub message: Option<String>,
 }
 
 /// What a batch save did, one entry per submitted item, in order.
@@ -140,10 +211,21 @@ pub struct BatchSaveOutcome {
     pub understanding: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RecallRequest {
     pub query: String,
     pub categories: Vec<String>,
+    /// Structure filters, each OR-ed within itself.
+    pub kinds: Vec<String>,
+    pub topics: Vec<String>,
+    pub targets: Vec<String>,
+    pub projects: Vec<String>,
+    /// The project the caller works in, when the transport has no folder to
+    /// detect it from (HTTP MCP). The stdio shim sends its folder's instead.
+    pub project: Option<String>,
+    /// Rank every scope alike rather than demoting other projects: what a
+    /// search for a memory to delete wants, since the user described it.
+    pub all_scopes: bool,
     /// Signed to match the domain: a caller passing `-5` should meet the
     /// explanation of the allowed range, not a deserializer's.
     pub limit: Option<i64>,
@@ -204,6 +286,9 @@ pub trait MemoryToolbox: Send + Sync {
     /// would be telling the user something untrue.
     async fn save_batch(&self, requests: Vec<SaveRequest>) -> Result<BatchSaveOutcome>;
 
+    /// Amends a stored memory, under the same rules as a save.
+    async fn update(&self, request: UpdateRequest) -> Result<UpdateOutcome>;
+
     async fn recall(&self, request: RecallRequest) -> Result<Vec<ToolMemory>>;
 
     /// Distils a finished session. Returns what survived it — commonly
@@ -223,4 +308,14 @@ pub trait MemoryToolbox: Send + Sync {
     async fn forget(&self, ids: &[String]) -> Result<usize>;
 
     async fn profile(&self) -> Result<String>;
+
+    /// The user's projects.
+    async fn list_projects(&self) -> Result<Vec<ToolProject>>;
+
+    /// Renames a project; asked from inside its folder, the folder's remote
+    /// is learned too.
+    async fn rename_project(&self, name: &str, new_name: &str) -> Result<ProjectChange>;
+
+    /// Folds project `name` into `into`.
+    async fn merge_project(&self, name: &str, into: &str) -> Result<ProjectChange>;
 }

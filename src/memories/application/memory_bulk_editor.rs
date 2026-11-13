@@ -16,12 +16,17 @@
 //! category, sub-label and tags are part of the vector's text, so it does.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::domain::applies_to::{AppliesTo, Target};
 use crate::memories::domain::category::Category;
+use crate::memories::domain::content_checks::project_phrase;
 use crate::memories::domain::document_text::DocumentText;
 use crate::memories::domain::embedder::{Embedder, EmbeddingTask};
+use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::{Memory, MemoryEdit};
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
 use crate::memories::domain::text_index::TextIndex;
+use crate::memories::domain::topic::Topic;
 use crate::memories::domain::vector_index::VectorIndex;
 use crate::shared::clock::Clock;
 use crate::shared::error::{RaError, Result};
@@ -42,6 +47,65 @@ pub struct BulkEdit {
     pub subcategory: Option<Option<String>>,
     pub add_tags: Vec<String>,
     pub remove_tags: Vec<String>,
+    /// What each memory is, what it is about and who it is for.
+    pub structure: StructureChange,
+}
+
+/// A structure edit for many memories at once (ai-specs/memory-structure-plan.md
+/// §8, the Needs review queue): what the user decided they are. Applied to each
+/// memory under the same rules as a save, and refused for all of them when it
+/// does not fit one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StructureChange {
+    pub kind: Option<Kind>,
+    pub topic: Option<Topic>,
+    pub applies_to: Option<AppliesTo>,
+    /// Confirms the structure as it is: the memory leaves the review queue.
+    pub reviewed: bool,
+}
+
+impl StructureChange {
+    fn is_empty(&self) -> bool {
+        self.kind.is_none() && self.topic.is_none() && self.applies_to.is_none() && !self.reviewed
+    }
+
+    /// The structure `memory` ends up with, or why it cannot have it.
+    fn applied_to(&self, memory: &Memory) -> std::result::Result<MemoryStructure, String> {
+        let current = memory.structure();
+        let kind = self.kind.unwrap_or(current.kind());
+        let topic = self
+            .topic
+            .clone()
+            .unwrap_or_else(|| current.topic().clone());
+        let applies_to = self
+            .applies_to
+            .clone()
+            .unwrap_or_else(|| current.applies_to().clone());
+        let goal_status = (kind == Kind::Goal)
+            .then(|| current.goal_status())
+            .flatten();
+        // The user decided it, here: what was stated stays stated.
+        let restated = self.kind.is_some() || self.topic.is_some() || self.applies_to.is_some();
+        let origin = if restated {
+            Origin::UserConfirmed
+        } else {
+            current.origin()
+        };
+        if applies_to.target() != Target::Project
+            && let Some(found) = project_phrase(memory.content())
+        {
+            return Err(format!(
+                "it reads as one project's (\"{found}\"), so it cannot apply to {}",
+                applies_to.target()
+            ));
+        }
+        MemoryStructure::new(kind, topic, applies_to, origin, goal_status).map_err(|error| {
+            match error {
+                RaError::Validation(message) => message,
+                other => other.to_string(),
+            }
+        })
+    }
 }
 
 impl BulkEdit {
@@ -50,6 +114,7 @@ impl BulkEdit {
             && self.subcategory.is_none()
             && self.add_tags.is_empty()
             && self.remove_tags.is_empty()
+            && self.structure.is_empty()
     }
 
     fn as_memory_edit(&self, memory: &Memory) -> MemoryEdit {
@@ -71,6 +136,10 @@ impl BulkEdit {
             category: self.category.clone(),
             subcategory: self.subcategory.clone(),
             tags,
+            // Checked for every memory before anything is written (`execute`).
+            structure: (!self.structure.is_empty())
+                .then(|| self.structure.applied_to(memory).ok())
+                .flatten(),
             ..Default::default()
         }
     }
@@ -162,6 +231,30 @@ impl MemoryBulkEditor {
             )));
         }
 
+        // Every memory must be able to take the structure, or none does.
+        if !edit.structure.is_empty() {
+            let refused: Vec<String> = found
+                .iter()
+                .filter_map(|memory| {
+                    edit.structure.applied_to(memory).err().map(|why| {
+                        let content: String = memory.content().chars().take(60).collect();
+                        format!("\"{content}\": {why}")
+                    })
+                })
+                .collect();
+            if !refused.is_empty() {
+                return Err(RaError::rejected(
+                    "invalid_value",
+                    format!(
+                        "Nothing was changed: {} of the {} memories cannot take that. {}",
+                        refused.len(),
+                        found.len(),
+                        refused.join("; ")
+                    ),
+                ));
+            }
+        }
+
         let detail = describe(edit, unique.len());
         self.apply(
             context,
@@ -197,7 +290,8 @@ impl MemoryBulkEditor {
             let unchanged = after.category() == before.category()
                 && after.subcategory() == before.subcategory()
                 && after.tags() == before.tags()
-                && after.content() == before.content();
+                && after.content() == before.content()
+                && after.structure() == before.structure();
             if unchanged {
                 result.push(before);
                 continue;
@@ -267,6 +361,18 @@ fn describe(edit: &BulkEdit, count: usize) -> String {
     }
     if !edit.remove_tags.is_empty() {
         parts.push(format!("-tags {}", edit.remove_tags.join(", ")));
+    }
+    if let Some(kind) = edit.structure.kind {
+        parts.push(format!("kind → {kind}"));
+    }
+    if let Some(topic) = &edit.structure.topic {
+        parts.push(format!("topic → {topic}"));
+    }
+    if let Some(applies_to) = &edit.structure.applies_to {
+        parts.push(format!("applies to → {}", applies_to.label()));
+    }
+    if edit.structure.reviewed {
+        parts.push("reviewed".to_string());
     }
     format!(
         "bulk edit of {count} {}: {}",
@@ -436,5 +542,121 @@ mod tests {
                 Err(RaError::Validation(_))
             ));
         }
+    }
+
+    fn flagged(fixture: &Fixture, content: &str) -> Memory {
+        // A project fact files as general and needs review (plan §8).
+        fixture.save_fact(&fixture.alex, content)
+    }
+
+    #[test]
+    fn a_reviewed_structure_is_set_on_every_memory_and_leaves_the_queue() {
+        let fixture = Fixture::new();
+        let a = flagged(&fixture, "The NAS has 40 TB");
+        let b = flagged(&fixture, "The router is at 10.0.0.1");
+        assert!(a.structure().needs_review());
+
+        let outcome = editor(&fixture, DocumentText::Content)
+            .execute(
+                &fixture.alex,
+                &[a.id(), b.id()],
+                &BulkEdit {
+                    structure: StructureChange {
+                        kind: Some(Kind::Reference),
+                        topic: Some(Topic::Tech),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap();
+
+        assert_eq!(outcome.changed, 2);
+        for memory in &outcome.memories {
+            assert_eq!(memory.structure().kind(), Kind::Reference);
+            assert_eq!(memory.structure().topic(), &Topic::Tech);
+            assert_eq!(memory.structure().origin(), Origin::UserConfirmed);
+            assert!(!memory.structure().needs_review());
+        }
+    }
+
+    #[test]
+    fn marking_reviewed_keeps_the_structure_and_clears_the_flag() {
+        let fixture = Fixture::new();
+        let memory = flagged(&fixture, "The NAS has 40 TB");
+        let before = memory.structure().clone();
+
+        let outcome = editor(&fixture, DocumentText::Content)
+            .execute(
+                &fixture.alex,
+                &[memory.id()],
+                &BulkEdit {
+                    structure: StructureChange {
+                        reviewed: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap();
+
+        let after = outcome.memories[0].structure();
+        assert_eq!(outcome.changed, 1);
+        assert!(!after.needs_review());
+        assert_eq!(after.kind(), before.kind());
+        assert_eq!(after.origin(), before.origin());
+    }
+
+    #[test]
+    fn a_structure_one_memory_cannot_take_changes_none_of_them() {
+        let fixture = Fixture::new();
+        let fine = flagged(&fixture, "The NAS has 40 TB");
+        let tied = flagged(&fixture, "In this repo we never mock the database");
+
+        let error = editor(&fixture, DocumentText::Content)
+            .execute(
+                &fixture.alex,
+                &[fine.id(), tied.id()],
+                &BulkEdit {
+                    structure: StructureChange {
+                        kind: Some(Kind::Rule),
+                        applies_to: Some(AppliesTo::Me),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, RaError::Rejected { code, message, .. }
+                if code == "invalid_value" && message.contains("1 of the 2") && message.contains("this repo")),
+            "{error}"
+        );
+        let untouched = fixture
+            .memories
+            .find(&fixture.alex, fine.id())
+            .unwrap()
+            .unwrap();
+        assert!(untouched.structure().needs_review(), "nothing was written");
+
+        let error = editor(&fixture, DocumentText::Content)
+            .execute(
+                &fixture.alex,
+                &[fine.id()],
+                &BulkEdit {
+                    structure: StructureChange {
+                        kind: Some(Kind::Preference),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                "test",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("preference"), "{error}");
     }
 }

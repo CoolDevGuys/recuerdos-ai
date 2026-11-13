@@ -25,10 +25,15 @@ use crate::bootstrap::wiring::Identity;
 use crate::identity::domain::scope::Scope;
 use crate::identity::domain::user_context::UserContext;
 use crate::memories::application::memory_recaller::{MemoryRecaller, RerankSkip, RerankTrace};
+use crate::memories::domain::applies_to::{AppliesTo, ProjectRef};
 use crate::memories::domain::category::Category;
 use crate::memories::domain::entity_graph::Relation;
 use crate::memories::domain::entity_key::EntityKey;
+use crate::memories::domain::kind::Kind;
+use crate::memories::domain::legacy_structure::legacy_structure;
 use crate::memories::domain::memory::{Entity, MemorySource, NewMemory};
+use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
+use crate::memories::domain::project_registry::ProjectRegistry;
 use crate::memories::domain::recall_query::RecallQuery;
 use crate::shared::clock::FixedClock;
 use crate::shared::error::{RaError, Result};
@@ -144,6 +149,15 @@ pub(crate) struct SeedMemory {
     /// case about relevance into a case about an accident (Task 0.2).
     #[serde(default)]
     age_days: Option<f32>,
+    /// Who the memory is for (ai-specs/memory-structure-plan.md §3): `me`,
+    /// `general` or `project:<name>`. Left out, the structure is the one the
+    /// category maps to (§8), which files nothing under a project — so the
+    /// main corpus measures recall exactly as it did before scopes existed.
+    #[serde(default)]
+    applies_to: Option<String>,
+    /// The kind, with `applies_to`; else the category's.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +204,18 @@ pub(crate) struct Case {
     /// flag once the defects are fixed and the baseline re-recorded.
     #[serde(default)]
     informational: bool,
+    /// Where the caller is (plan §9): a project's name, or `none` for an
+    /// agent working in no project. Set, the recall is scoped as an agent's
+    /// is — other projects demoted — and held to the agent-facing floor, so
+    /// the case measures what an agent would see. Left out, the recall is
+    /// unscoped and floorless, as every case before scopes was.
+    #[serde(default)]
+    context: Option<String>,
+    /// Memories that must not be in what comes back: another project's
+    /// convention answering a question about the user (E16). One that is
+    /// fails the case's completeness and is reported as missed.
+    #[serde(default)]
+    forbid: Vec<String>,
 }
 
 /// What one case scored. Opaque outside `bootstrap::eval`: the grid and
@@ -373,6 +399,7 @@ pub fn run(cases_path: &Path, config: &AppConfig) -> Result<Report> {
     for case in &set.cases {
         results.push(score(
             &memories.recaller,
+            memories.projects.as_ref(),
             memories.min_relevance,
             &context,
             case,
@@ -759,23 +786,25 @@ pub(crate) fn seed(
             })
             .collect();
 
-        let stored = memories.saver.execute(
-            &context,
-            NewMemory {
-                content: seed.content.clone(),
-                category: Category::parse(&seed.category)?,
-                subcategory: seed.subcategory.clone(),
-                tags: seed.tags.clone(),
-                entities: entities.clone(),
-                confidence: 1.0,
-                source: MemorySource {
-                    client: Some("eval".to_string()),
-                    session_id: None,
-                },
-                expires_at: None,
+        let new = NewMemory {
+            content: seed.content.clone(),
+            category: Category::parse(&seed.category)?,
+            subcategory: seed.subcategory.clone(),
+            tags: seed.tags.clone(),
+            entities: entities.clone(),
+            confidence: 1.0,
+            source: MemorySource {
+                client: Some("eval".to_string()),
+                session_id: None,
             },
-            "eval",
-        )?;
+            expires_at: None,
+        };
+        let stored = match seeded_structure(&memories, &context, seed, &new)? {
+            Some(structure) => memories
+                .saver
+                .execute_structured(&context, new, structure, "eval")?,
+            None => memories.saver.execute(&context, new, "eval")?,
+        };
 
         // Project the memory into the graph exactly as the reconciler does
         // on a real ingest (`MemoryReconciler::store`), minus the model:
@@ -814,6 +843,70 @@ pub(crate) fn seed(
     Ok((memories, context, scratch))
 }
 
+/// The structure a seed states, creating its project on first use; `None`
+/// when it states none and its category decides.
+fn seeded_structure(
+    memories: &Memories,
+    context: &UserContext,
+    seed: &SeedMemory,
+    new: &NewMemory,
+) -> Result<Option<MemoryStructure>> {
+    let Some(raw) = seed.applies_to.as_deref() else {
+        return Ok(None);
+    };
+    let derived = legacy_structure(&new.category, &new.tags);
+    let applies_to = match raw.trim() {
+        "me" => AppliesTo::Me,
+        "general" => AppliesTo::General,
+        other => {
+            let name = other.strip_prefix("project:").ok_or_else(|| {
+                RaError::Validation(format!(
+                    "seed applies_to {raw:?}: one of me, general, project:<name>"
+                ))
+            })?;
+            let project = match memories.projects.resolve(context, name)? {
+                Some(project) => project,
+                None => memories.projects.create(context, name, &[])?,
+            };
+            AppliesTo::Project(project)
+        }
+    };
+    let kind = match seed.kind.as_deref() {
+        Some(kind) => kind.parse::<Kind>()?,
+        None => derived.kind(),
+    };
+    MemoryStructure::new(
+        kind,
+        derived.topic().clone(),
+        applies_to,
+        Origin::UserSaid,
+        None,
+    )
+    .map(Some)
+}
+
+/// The project a case's `context` names, as recall scopes it: `None` for
+/// an unscoped case, `Some(None)` for an agent in no project.
+fn case_context(
+    projects: &dyn ProjectRegistry,
+    context: &UserContext,
+    case: &Case,
+) -> Result<Option<Option<ProjectRef>>> {
+    match case.context.as_deref().map(str::trim) {
+        None => Ok(None),
+        Some("none") => Ok(Some(None)),
+        Some(name) => projects
+            .resolve(context, name)?
+            .map(|project| Some(Some(project)))
+            .ok_or_else(|| {
+                RaError::Validation(format!(
+                    "case {:?} is in project {name:?}, which no seed files a memory under",
+                    case.name
+                ))
+            }),
+    }
+}
+
 /// Scores one case against one already-seeded pipeline.
 ///
 /// The recaller is a parameter (not read off [`Memories`]) because the
@@ -823,6 +916,7 @@ pub(crate) fn seed(
 /// floor, applied to negative cases only (see below).
 pub(crate) fn score(
     recaller: &MemoryRecaller,
+    projects: &dyn ProjectRegistry,
     min_relevance: f32,
     context: &UserContext,
     case: &Case,
@@ -844,6 +938,10 @@ pub(crate) fn score(
     // report exists to show.
     if case.expect_empty {
         query = query.with_min_relevance(min_relevance);
+    }
+    // A scoped case is an agent's read, floor included (see `Case::context`).
+    if let Some(project) = case_context(projects, context, case)? {
+        query = query.in_context(project).with_min_relevance(min_relevance);
     }
 
     let started = std::time::Instant::now();
@@ -926,7 +1024,7 @@ pub(crate) fn score(
         });
     }
 
-    let missed: Vec<String> = case
+    let mut missed: Vec<String> = case
         .expect
         .iter()
         .filter(|wanted| !returned.iter().any(|got| got == &wanted.as_str()))
@@ -934,6 +1032,14 @@ pub(crate) fn score(
         .collect();
 
     let found = case.expect.len() - missed.len();
+    // Something that must not answer, answering: the case is not complete,
+    // and the report says which.
+    missed.extend(
+        case.forbid
+            .iter()
+            .filter(|forbidden| returned.iter().any(|got| got == &forbidden.as_str()))
+            .map(|forbidden| format!("(forbidden, but returned) {forbidden}")),
+    );
 
     // The first expected memory's rank, if any: reciprocal rank is 1 over
     // how far down the *best* answer was buried.
@@ -1165,6 +1271,8 @@ pub(crate) fn test_case(
         subcategories: Vec::new(),
         expect_empty,
         informational: false,
+        context: None,
+        forbid: Vec::new(),
     }
 }
 
@@ -1180,6 +1288,8 @@ pub(crate) fn test_memory(content: &str, category: &str) -> SeedMemory {
         entities: Vec::new(),
         relations: Vec::new(),
         age_days: None,
+        applies_to: None,
+        kind: None,
     }
 }
 
@@ -1577,6 +1687,8 @@ mod tests {
             subcategories: vec![],
             expect_empty,
             informational: false,
+            context: None,
+            forbid: vec![],
         }
     }
 

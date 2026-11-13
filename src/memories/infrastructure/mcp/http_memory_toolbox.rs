@@ -10,9 +10,12 @@
 //! and the same per-user scoping.
 
 use super::memory_toolbox::{
-    BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, RecallRequest, SaveOutcome,
-    SaveRequest, SaveStatus, ToolMemory,
+    BatchItemOutcome, BatchSaveOutcome, DistillRequest, MemoryToolbox, ProjectChange,
+    RecallRequest, SaveOutcome, SaveRequest, SaveStatus, ToolMemory, ToolProject, UpdateOutcome,
+    UpdateRequest,
 };
+use crate::memories::application::structured_memory_saver::DetectedProject;
+use crate::memories::infrastructure::http::handlers::{PROJECT_HEADER, PROJECT_REMOTE_HEADER};
 use crate::shared::error::{RaError, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -21,6 +24,10 @@ pub struct HttpMemoryToolbox {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+    /// The project the shim's folder holds, sent with every request so the
+    /// daemon can file "this repo's" memories under it. `None` over HTTP MCP,
+    /// which has no folder.
+    project: Option<DetectedProject>,
 }
 
 impl HttpMemoryToolbox {
@@ -29,7 +36,15 @@ impl HttpMemoryToolbox {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             http: reqwest::Client::new(),
+            project: None,
         }
+    }
+
+    /// Sends this project with every request (the stdio shim, inside a
+    /// project folder).
+    pub fn with_project(mut self, project: Option<DetectedProject>) -> Self {
+        self.project = project;
+        self
     }
 
     async fn request(
@@ -42,6 +57,12 @@ impl HttpMemoryToolbox {
             .http
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(&self.api_key);
+        if let Some(project) = &self.project {
+            request = request.header(PROJECT_HEADER, &project.name);
+            if let Some(remote) = &project.alias {
+                request = request.header(PROJECT_REMOTE_HEADER, remote);
+            }
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -75,125 +96,182 @@ impl HttpMemoryToolbox {
             404 => RaError::NotFound(message),
             409 => RaError::Conflict(message),
             412 => RaError::PreconditionFailed(message),
+            422 => RaError::Rejected {
+                code: payload["error"]["code"]
+                    .as_str()
+                    .unwrap_or("rejected")
+                    .to_string(),
+                message,
+                details: payload["error"].get("details").cloned(),
+            },
             _ => RaError::Internal(format!("daemon returned {status}: {message}")),
         })
     }
 }
 
+/// A project name or alias as one path segment. Names are `a-z 0-9 . _ -`,
+/// but an alias is a remote and holds `/`.
+fn segment(raw: &str) -> String {
+    raw.trim()
+        .bytes()
+        .map(|byte| match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+fn parse_project(value: &Value) -> Result<ToolProject> {
+    let text = |field: &str| {
+        value[field].as_str().map(str::to_string).ok_or_else(|| {
+            RaError::Internal(format!(
+                "the daemon sent a project without {field}: {value}"
+            ))
+        })
+    };
+    Ok(ToolProject {
+        id: text("id")?,
+        name: text("name")?,
+        aliases: value["aliases"]
+            .as_array()
+            .map(|aliases| {
+                aliases
+                    .iter()
+                    .filter_map(|alias| alias.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        memories: value["memories"].as_u64().unwrap_or(0) as usize,
+    })
+}
+
+fn parse_change(value: &Value) -> Result<ProjectChange> {
+    Ok(ProjectChange {
+        project: parse_project(&value["project"])?,
+        message: value["message"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
 #[async_trait::async_trait]
 impl MemoryToolbox for HttpMemoryToolbox {
     async fn save(&self, request: SaveRequest) -> Result<SaveOutcome> {
-        // `wait` rather than the 202 path: an MCP tool has to tell the
-        // agent what happened in this turn, and "queued, ask again later"
-        // is not something an agent can act on.
         let mut body = json!({
             "content": request.content,
+            "kind": request.kind,
+            "topic": request.topic,
+            "origin": request.origin,
             "tags": request.tags,
-            "wait": true,
         });
-        if let Some(category) = request.category {
-            body["category"] = json!(category);
+        if let Some(applies_to) = request.applies_to {
+            body["applies_to"] = json!({
+                "target": applies_to.target,
+                "project_name": applies_to.project_name,
+                "new_project": applies_to.new_project,
+            });
+        }
+        if let Some(subtopic) = request.subtopic {
+            body["subtopic"] = json!(subtopic);
+        }
+        if let Some(valid_until) = request.valid_until {
+            body["valid_until"] = json!(valid_until);
         }
         if let Some(client) = request.client {
             body["client"] = json!(client);
         }
-
-        let result = self
-            .request(reqwest::Method::POST, "/v1/memories", Some(body))
-            .await?;
-
-        let understanding = result["understanding"].as_bool().unwrap_or(false);
-        let ids: Vec<String> = result["memory_ids"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .iter()
-            .filter_map(|id| id.as_str().map(str::to_string))
-            .collect();
-
-        // The ingest response carries ids; the tool wants to show the
-        // stored wording, which extraction may have rewritten. Fetching
-        // is a handful of localhost round trips and worth it — an agent
-        // that reports the user's phrasing when we stored something else
-        // is quietly lying.
-        let mut memories = Vec::with_capacity(ids.len());
-        for id in ids {
-            let memory = self
-                .request(reqwest::Method::GET, &format!("/v1/memories/{id}"), None)
-                .await?;
-            memories.push(parse_memory(&memory)?);
+        if let Some(replaces) = request.replaces {
+            body["replaces"] = json!(replaces);
+        }
+        if !request.coexists_with.is_empty() {
+            body["coexists_with"] = json!(request.coexists_with);
         }
 
+        let saved = self
+            .request(reqwest::Method::POST, "/v1/memories:direct", Some(body))
+            .await?;
+
         Ok(SaveOutcome {
-            memories,
-            understanding,
-            status: SaveStatus::from_wire(&result["outcome"]),
+            memories: vec![parse_memory(&saved)?],
+            understanding: false,
+            status: SaveStatus::from_wire(&saved["status"]),
+            message: saved["message"].as_str().map(str::to_string),
+        })
+    }
+
+    async fn update(&self, request: UpdateRequest) -> Result<UpdateOutcome> {
+        let mut body = json!({});
+        if let Some(content) = request.content {
+            body["content"] = json!(content);
+        }
+        if let Some(kind) = request.kind {
+            body["kind"] = json!(kind);
+        }
+        if let Some(topic) = request.topic {
+            body["topic"] = json!(topic);
+        }
+        if let Some(applies_to) = request.applies_to {
+            body["applies_to"] = json!({
+                "target": applies_to.target,
+                "project_name": applies_to.project_name,
+                "new_project": applies_to.new_project,
+            });
+        }
+        if let Some(subtopic) = request.subtopic {
+            body["subtopic"] = json!(subtopic);
+        }
+        if let Some(tags) = request.tags {
+            body["tags"] = json!(tags);
+        }
+        if let Some(valid_until) = request.valid_until {
+            body["valid_until"] = json!(valid_until);
+        }
+        if let Some(goal_status) = request.goal_status {
+            body["goal_status"] = json!(goal_status);
+        }
+        if let Some(origin) = request.origin {
+            body["origin"] = json!(origin);
+        }
+
+        let id = request.id.trim();
+        let updated = self
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/v1/memories/{id}"),
+                Some(body),
+            )
+            .await?;
+        Ok(UpdateOutcome {
+            memory: parse_memory(&updated)?,
+            message: updated["message"].as_str().map(str::to_string),
         })
     }
 
     async fn save_batch(&self, requests: Vec<SaveRequest>) -> Result<BatchSaveOutcome> {
-        // The batch route carries one `client` for the whole request; the
-        // MCP tool sets the same one on every item, so taking the first is
-        // exact rather than a guess.
-        let client = requests.iter().find_map(|request| request.client.clone());
-        let items: Vec<Value> = requests
-            .into_iter()
-            .map(|request| {
-                let mut item = json!({ "content": request.content, "tags": request.tags });
-                if let Some(category) = request.category {
-                    item["category"] = json!(category);
-                }
-                item
-            })
-            .collect();
-
-        // `wait` for the same reason `save` does: a tool has to tell the
-        // agent what happened this turn, not hand back job ids to poll.
-        let body = json!({ "items": items, "client": client, "wait": true });
-        let result = self
-            .request(reqwest::Method::POST, "/v1/memories/batch", Some(body))
-            .await?;
-
-        let understanding = result["understanding"].as_bool().unwrap_or(false);
-
-        let empty = Vec::new();
-        let mut items = Vec::new();
-        for entry in result["results"].as_array().unwrap_or(&empty) {
-            if let Some(error) = entry["error"].as_str() {
-                items.push(BatchItemOutcome {
+        // One structured save per item, each through the same rules: a
+        // rejected item is reported with its reason and does not stop the
+        // rest, so the agent can fix exactly the ones that need it.
+        let mut items = Vec::with_capacity(requests.len());
+        for request in requests {
+            items.push(match self.save(request).await {
+                Ok(outcome) => BatchItemOutcome {
+                    memories: outcome.memories,
+                    error: None,
+                    status: Some(outcome.status),
+                    message: outcome.message,
+                },
+                Err(RaError::Rejected { code, message, .. }) => BatchItemOutcome {
                     memories: Vec::new(),
-                    error: Some(error.to_string()),
+                    error: Some(format!("not saved ({code}): {message}")),
                     status: None,
-                });
-                continue;
-            }
-
-            // Same reasoning as `save`: fetch the stored wording rather
-            // than echo what was sent, since extraction may have rewritten
-            // it. A handful of loopback round trips, and worth it.
-            let ids: Vec<String> = entry["memory_ids"]
-                .as_array()
-                .unwrap_or(&empty)
-                .iter()
-                .filter_map(|id| id.as_str().map(str::to_string))
-                .collect();
-
-            let mut memories = Vec::with_capacity(ids.len());
-            for id in ids {
-                let memory = self
-                    .request(reqwest::Method::GET, &format!("/v1/memories/{id}"), None)
-                    .await?;
-                memories.push(parse_memory(&memory)?);
-            }
-            items.push(BatchItemOutcome {
-                memories,
-                error: None,
-                status: Some(SaveStatus::from_wire(&entry["outcome"])),
+                    message: None,
+                },
+                Err(other) => return Err(other),
             });
         }
-
         Ok(BatchSaveOutcome {
             items,
-            understanding,
+            understanding: false,
         })
     }
 
@@ -201,7 +279,17 @@ impl MemoryToolbox for HttpMemoryToolbox {
         let mut body = json!({
             "query": request.query,
             "categories": request.categories,
+            "kinds": request.kinds,
+            "topics": request.topics,
+            "targets": request.targets,
+            "projects": request.projects,
         });
+        if let Some(project) = request.project {
+            body["project"] = json!(project);
+        }
+        if request.all_scopes {
+            body["scope"] = json!("all");
+        }
         if let Some(limit) = request.limit {
             body["limit"] = json!(limit);
         }
@@ -267,7 +355,8 @@ impl MemoryToolbox for HttpMemoryToolbox {
             // Stricter than a recall, because the caller is about to delete
             // one of these. See `RecallRequest::FORGET_MIN_RELEVANCE`.
             min_relevance: Some(RecallRequest::FORGET_MIN_RELEVANCE),
-            as_of: None,
+            all_scopes: true,
+            ..RecallRequest::default()
         })
         .await
     }
@@ -313,6 +402,38 @@ impl MemoryToolbox for HttpMemoryToolbox {
             .await
             .map_err(|e| RaError::Internal(format!("failed to read the profile: {e}")))
     }
+
+    async fn list_projects(&self) -> Result<Vec<ToolProject>> {
+        let listed = self
+            .request(reqwest::Method::GET, "/v1/projects", None)
+            .await?;
+        listed["projects"]
+            .as_array()
+            .map(|projects| projects.iter().map(parse_project).collect())
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn rename_project(&self, name: &str, new_name: &str) -> Result<ProjectChange> {
+        let renamed = self
+            .request(
+                reqwest::Method::PATCH,
+                &format!("/v1/projects/{}", segment(name)),
+                Some(json!({"name": new_name})),
+            )
+            .await?;
+        parse_change(&renamed)
+    }
+
+    async fn merge_project(&self, name: &str, into: &str) -> Result<ProjectChange> {
+        let merged = self
+            .request(
+                reqwest::Method::POST,
+                &format!("/v1/projects/{}/merge", segment(name)),
+                Some(json!({"into": into})),
+            )
+            .await?;
+        parse_change(&merged)
+    }
 }
 
 fn parse_memory(value: &Value) -> Result<ToolMemory> {
@@ -337,7 +458,20 @@ fn parse_memory(value: &Value) -> Result<ToolMemory> {
             .unwrap_or_default(),
         created_at: parse_timestamp(&field("created_at")?)?,
         relevance: value["relevance"].as_f64().map(|value| value as f32),
+        scope: scope_label(value),
     })
+}
+
+/// `preference · coding · me`, `convention · coding · quill`.
+fn scope_label(value: &Value) -> Option<String> {
+    let kind = value["kind"].as_str()?;
+    let topic = value["topic"].as_str()?;
+    let applies_to = &value["applies_to"];
+    let scope = match applies_to["target"].as_str()? {
+        "project" => applies_to["project_name"].as_str().unwrap_or("project"),
+        target => target,
+    };
+    Some(format!("{kind} · {topic} · {scope}"))
 }
 
 fn parse_timestamp(raw: &str) -> Result<DateTime<Utc>> {

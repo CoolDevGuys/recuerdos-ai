@@ -91,6 +91,15 @@ const CROSS_CATEGORY = 0.25;
 /** The share of a category's memories that must carry a sub-label for sub-labels to define its clusters. */
 export const SUBLABEL_SHARE = 0.6;
 
+/**
+ * The group a memory is drawn in: its topic (ai-specs/memory-structure-plan.md
+ * D13: group by topic, colour by kind). The map code calls a group a
+ * "category", from before topics existed; it is the topic everywhere here.
+ */
+export function groupOf(memory: Memory): string {
+  return memory.topic;
+}
+
 export function categoryNodeId(category: string): string {
   return `category:${category}`;
 }
@@ -127,7 +136,7 @@ export function seedOf(model: MapModel): LayoutSeed {
 function ringOrder(data: MapData): string[] {
   const order = [...data.categories].sort((a, b) => b.count - a.count || a.id.localeCompare(b.id)).map((c) => c.id);
   // Memories may name a category the summary missed (it should not happen); give them a slot too.
-  for (const m of data.nodes) if (!order.includes(m.category)) order.push(m.category);
+  for (const m of data.nodes) if (!order.includes(groupOf(m))) order.push(groupOf(m));
   return order;
 }
 
@@ -149,7 +158,7 @@ export function layoutMap(data: MapData, options: LayoutOptions = {}): MapModel 
     }),
   );
   const sizes = new Map<string, number>();
-  for (const m of data.nodes) sizes.set(m.category, (sizes.get(m.category) ?? 0) + 1);
+  for (const m of data.nodes) sizes.set(groupOf(m), (sizes.get(groupOf(m)) ?? 0) + 1);
 
   const graph = new Graph({ type: "undirected", multi: false });
   for (const [id, anchor] of anchors) {
@@ -158,19 +167,19 @@ export function layoutMap(data: MapData, options: LayoutOptions = {}): MapModel 
   let released = 0;
   for (const m of data.nodes) {
     const kept = usable?.positions[m.id];
-    if (kept !== undefined && kept[2] === m.category) {
+    if (kept !== undefined && kept[2] === groupOf(m)) {
       graph.addNode(m.id, { x: kept[0], y: kept[1], fixed: true, size: 1 });
     } else {
-      const anchor = anchors.get(m.category)!;
-      const spread = 2 * Math.sqrt(sizes.get(m.category) ?? 1) + 1;
+      const anchor = anchors.get(groupOf(m))!;
+      const spread = 2 * Math.sqrt(sizes.get(groupOf(m)) ?? 1) + 1;
       const angle = 2 * Math.PI * hashUnit(m.id);
       const radius = spread * Math.sqrt(hashUnit(`${m.id}:r`));
       graph.addNode(m.id, { x: anchor.x + radius * Math.cos(angle), y: anchor.y + radius * Math.sin(angle), size: 1 });
       released += 1;
     }
-    graph.addEdge(m.id, `anchor:${m.category}`, { weight: ANCHOR_WEIGHT });
+    graph.addEdge(m.id, `anchor:${groupOf(m)}`, { weight: ANCHOR_WEIGHT });
   }
-  const categoryOf = new Map(data.nodes.map((m) => [m.id, m.category]));
+  const categoryOf = new Map(data.nodes.map((m) => [m.id, groupOf(m)]));
   for (const edge of data.edges) {
     if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target) || edge.source === edge.target) continue;
     const across = categoryOf.get(edge.source) !== categoryOf.get(edge.target) ? CROSS_CATEGORY : 1;
@@ -209,7 +218,7 @@ export function layoutMap(data: MapData, options: LayoutOptions = {}): MapModel 
   const memories: MemoryNode[] = data.nodes.map((m) => ({
     id: m.id,
     memory: m,
-    category: m.category,
+    category: groupOf(m),
     cluster: assigned.get(m.id)!.id,
     position: { x: graph.getNodeAttribute(m.id, "x") as number, y: graph.getNodeAttribute(m.id, "y") as number },
   }));
@@ -412,7 +421,7 @@ interface Assignment {
 function assignClusters(data: MapData, labels: Map<string, string>): Map<string, Assignment> {
   const result = new Map<string, Assignment>();
   const byCategory = new Map<string, Memory[]>();
-  for (const m of data.nodes) byCategory.set(m.category, [...(byCategory.get(m.category) ?? []), m]);
+  for (const m of data.nodes) byCategory.set(groupOf(m), [...(byCategory.get(groupOf(m)) ?? []), m]);
 
   for (const [category, members] of byCategory) {
     const other = { id: clusterNodeId(category, null), label: `${labels.get(category) ?? category} · other` };

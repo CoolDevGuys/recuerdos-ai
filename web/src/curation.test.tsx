@@ -38,7 +38,7 @@ describe("the categories manager", () => {
     expect(within(row("Decision")).getByText("built-in")).toBeInTheDocument();
   });
 
-  it("creates a category that can then be chosen for a new memory", async () => {
+  it("creates a category that can then be offered for a new memory", async () => {
     const { user } = await openCategories();
 
     await user.type(screen.getByLabelText("Id"), "Health.Sleep");
@@ -48,6 +48,9 @@ describe("the categories manager", () => {
     expect(await screen.findByRole("row", { name: /Sleep log/ })).toHaveTextContent("health.sleep");
     await user.click(screen.getByRole("link", { name: "List" }));
     await user.click(await screen.findByRole("button", { name: "+ Add memory" }));
+    // A memory saved as written takes its category from what it is; the AI
+    // is the one offered a category, as a hint.
+    await user.click(screen.getByLabelText(/Let the AI classify it/));
     expect(screen.getByRole("option", { name: "Sleep log" })).toBeInTheDocument();
   });
 
@@ -61,7 +64,7 @@ describe("the categories manager", () => {
     expect(server.calls.some((c) => c.method === "createCategory")).toBe(false);
   });
 
-  it("relabels a built-in, display only, and the list uses the new words", async () => {
+  it("relabels a built-in, display only", async () => {
     const { server, user } = await openCategories();
 
     await user.click(screen.getByRole("button", { name: "Relabel Coding preference" }));
@@ -71,8 +74,6 @@ describe("the categories manager", () => {
 
     expect(await screen.findByRole("row", { name: /How I code/ })).toHaveTextContent("default: Coding preference");
     expect(server.memoriesOf(ALEX_KEY).find((m) => m.id === "a")?.category).toBe("preference.coding");
-    await user.click(screen.getByRole("link", { name: "List" }));
-    expect((await screen.findAllByText("How I code")).length).toBeGreaterThan(0);
   });
 
   it("renames a custom category, moving its memories", async () => {
@@ -137,19 +138,20 @@ describe("the categories manager", () => {
 
 describe("bulk edits from the list", () => {
   it("re-files and tags the selected memories in one request", async () => {
+    // What they are, and the tags: one bulk edit, under the save rules.
     const { server, user } = await signedInAsAlex();
 
     await user.click(screen.getByRole("button", { name: "Select" }));
     await user.click(screen.getByRole("checkbox", { name: /The user prefers pnpm/ }));
     await user.click(screen.getByRole("checkbox", { name: /Testing follows TDD/ }));
     const editor = screen.getByRole("region", { name: "2 memories selected" });
-    await user.selectOptions(within(editor).getByLabelText("Move to category"), "Skill");
+    await user.selectOptions(within(editor).getByLabelText("What they are"), "Rule");
     await user.type(within(editor).getByLabelText("Add tags"), "tooling");
     await user.click(within(editor).getByRole("button", { name: "Apply to 2 memories" }));
 
     expect(await screen.findByText("Updated 2 memories.")).toBeInTheDocument();
     const changed = server.memoriesOf(ALEX_KEY).filter((m) => m.id === "a" || m.id === "b");
-    expect(changed.every((m) => m.category === "skill" && m.tags.includes("tooling"))).toBe(true);
+    expect(changed.every((m) => m.kind === "rule" && m.tags.includes("tooling"))).toBe(true);
     expect(server.calls.filter((c) => c.method === "bulk")).toHaveLength(1);
     expect(screen.queryByRole("region", { name: /selected/ })).not.toBeInTheDocument();
   });
@@ -197,7 +199,7 @@ describe("lasso selection on the map", () => {
 
     const editor = await screen.findByRole("region", { name: "2 memories selected" });
     expect(renderer.lastView?.highlighted).toEqual(new Set(["a", "c"]));
-    await user.selectOptions(within(editor).getByLabelText("Move to category"), "Decision");
+    await user.selectOptions(within(editor).getByLabelText("About"), "Work");
     await user.click(within(editor).getByRole("button", { name: "Apply to 2 memories" }));
 
     expect(await screen.findByText("Updated 2 memories.")).toBeInTheDocument();

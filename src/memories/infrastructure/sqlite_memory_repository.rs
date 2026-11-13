@@ -9,11 +9,16 @@
 //! theirs. `tests/identity_isolation.rs` asserts this from the outside.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::domain::applies_to::{AppliesTo, ProjectRef, Target};
 use crate::memories::domain::category::Category;
+use crate::memories::domain::kind::Kind;
+use crate::memories::domain::legacy_structure::legacy_structure;
 use crate::memories::domain::memory::{Entity, Memory, MemorySource};
 use crate::memories::domain::memory_repository::{AuditEntry, AuditOperation, MemoryRepository};
+use crate::memories::domain::memory_structure::{GoalStatus, MemoryStructure, Origin};
+use crate::memories::domain::topic::Topic;
 use crate::shared::error::{RaError, Result};
-use crate::shared::ids::{MemoryId, UserId};
+use crate::shared::ids::{MemoryId, ProjectId, UserId};
 use crate::shared::sqlite::{SqliteDatabase, map_sqlite_error, optional};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row};
@@ -23,7 +28,9 @@ use std::sync::Arc;
 const COLUMNS: &str = "id, user_id, content, category, subcategory, tags, entities, confidence, \
                         source_client, source_session_id, created_at, updated_at, \
                         last_accessed_at, access_count, importance, expires_at, \
-                        superseded_by";
+                        superseded_by, kind, topic, target, project_id, \
+                        (SELECT name FROM projects WHERE projects.id = memories.project_id), \
+                        origin, goal_status, needs_review";
 
 /// Phase 2 gives each user a single collection. It exists so the
 /// embedding model can be pinned per collection (see V2__memories.sql);
@@ -138,6 +145,69 @@ impl SqliteMemoryRepository {
         })
     }
 
+    /// Gives every memory stored before V11 its structure, derived from its
+    /// category (ai-specs/memory-structure-plan.md §8), and puts any user
+    /// topic that mapping produces in its owner's list. Returns how many
+    /// memories it filled.
+    ///
+    /// Run at startup. Idempotent and cheap once done: it only reads rows
+    /// whose `kind` is still NULL, through a partial index. Every row is
+    /// filled — superseded and forgotten ones too, so history reads the same
+    /// way — in one transaction, so a crash leaves all of them or none.
+    /// `updated_at` is not touched: deriving a structure is not an edit, and
+    /// the web UI's `If-Match` must not start refusing edits to memories the
+    /// user never changed.
+    pub fn backfill_structure(&self) -> Result<usize> {
+        self.database.with_connection(|connection| {
+            let rows: Vec<(String, String, String, String)> = {
+                let mut statement = connection
+                    .prepare("SELECT id, user_id, category, tags FROM memories WHERE kind IS NULL")
+                    .map_err(|e| map_sqlite_error(e, "reading memories to backfill"))?;
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    })
+                    .map_err(|e| map_sqlite_error(e, "reading memories to backfill"))?
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| map_sqlite_error(e, "reading memories to backfill"))?
+            };
+            if rows.is_empty() {
+                return Ok(0);
+            }
+
+            let transaction = connection
+                .unchecked_transaction()
+                .map_err(|e| map_sqlite_error(e, "could not begin the structure backfill"))?;
+            for (id, user_id, category, tags) in &rows {
+                let structure =
+                    legacy_structure(&Category::from_stored(category), &decode_tags(tags));
+                transaction
+                    .execute(
+                        "UPDATE memories SET kind = ?2, topic = ?3, target = ?4, origin = ?5,
+                                goal_status = ?6, needs_review = ?7
+                          WHERE id = ?1 AND kind IS NULL",
+                        rusqlite::params![
+                            id,
+                            structure.kind().as_str(),
+                            structure.topic().as_str(),
+                            structure.applies_to().target().as_str(),
+                            structure.origin().as_str(),
+                            structure.goal_status().map(|status| status.as_str()),
+                            structure.needs_review(),
+                        ],
+                    )
+                    .map_err(|e| map_sqlite_error(e, "structure backfill conflict"))?;
+                let owner = UserId::from_str(user_id)
+                    .map_err(|e| RaError::Internal(format!("stored user id {user_id:?}: {e}")))?;
+                record_topic(&transaction, owner, structure.topic())?;
+            }
+            transaction
+                .commit()
+                .map_err(|e| map_sqlite_error(e, "could not commit the structure backfill"))?;
+            Ok(rows.len())
+        })
+    }
+
     fn write_update(
         connection: &Connection,
         context: &UserContext,
@@ -150,7 +220,9 @@ impl SqliteMemoryRepository {
             .execute(
                 "UPDATE memories SET
                     content = ?3, category = ?4, subcategory = ?5, tags = ?6, entities = ?7,
-                    confidence = ?8, updated_at = ?9, expires_at = ?10, superseded_by = ?11
+                    confidence = ?8, updated_at = ?9, expires_at = ?10, superseded_by = ?11,
+                    kind = ?12, topic = ?13, target = ?14, project_id = ?15, origin = ?16,
+                    goal_status = ?17, needs_review = ?18
                   WHERE id = ?1 AND user_id = ?2 AND deleted_at IS NULL",
                 rusqlite::params![
                     memory.id().to_string(),
@@ -164,6 +236,16 @@ impl SqliteMemoryRepository {
                     memory.updated_at().to_rfc3339(),
                     memory.expires_at().map(|at| at.to_rfc3339()),
                     memory.superseded_by().map(|id| id.to_string()),
+                    memory.structure().kind().as_str(),
+                    memory.structure().topic().as_str(),
+                    memory.structure().applies_to().target().as_str(),
+                    project_id(memory.structure()),
+                    memory.structure().origin().as_str(),
+                    memory
+                        .structure()
+                        .goal_status()
+                        .map(|status| status.as_str()),
+                    memory.structure().needs_review(),
                 ],
             )
             .map_err(|e| map_sqlite_error(e, "memory update conflict"))?;
@@ -171,6 +253,7 @@ impl SqliteMemoryRepository {
         if affected == 0 {
             return Err(not_found(memory.id()));
         }
+        record_topic(connection, context.user_id(), memory.structure().topic())?;
 
         Self::write_audit(connection, context, memory.id(), operation, actor, detail)
     }
@@ -212,8 +295,10 @@ impl MemoryRepository for SqliteMemoryRepository {
                     "INSERT INTO memories (
                         id, user_id, collection_id, content, category, subcategory, tags, entities,
                         confidence, source_client, source_session_id,
-                        created_at, updated_at, last_accessed_at, expires_at, superseded_by
-                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                        created_at, updated_at, last_accessed_at, expires_at, superseded_by,
+                        kind, topic, target, project_id, origin, goal_status, needs_review
+                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                                ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                     rusqlite::params![
                         memory.id().to_string(),
                         context.user_id().to_string(),
@@ -231,9 +316,17 @@ impl MemoryRepository for SqliteMemoryRepository {
                         memory.last_accessed_at().map(|at| at.to_rfc3339()),
                         memory.expires_at().map(|at| at.to_rfc3339()),
                         memory.superseded_by().map(|id| id.to_string()),
+                        memory.structure().kind().as_str(),
+                        memory.structure().topic().as_str(),
+                        memory.structure().applies_to().target().as_str(),
+                        project_id(memory.structure()),
+                        memory.structure().origin().as_str(),
+                        memory.structure().goal_status().map(|status| status.as_str()),
+                        memory.structure().needs_review(),
                     ],
                 )
                 .map_err(|e| map_sqlite_error(e, "memory already exists"))?;
+            record_topic(connection, context.user_id(), memory.structure().topic())?;
 
             Self::write_audit(
                 connection,
@@ -698,7 +791,93 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<Result<Memory>> {
         row.get::<_, f32>(14)?,
         row.get::<_, Option<String>>(15)?,
         row.get::<_, Option<String>>(16)?,
+        StoredStructure {
+            kind: row.get(17)?,
+            topic: row.get(18)?,
+            target: row.get(19)?,
+            project_id: row.get(20)?,
+            project_name: row.get(21)?,
+            origin: row.get(22)?,
+            goal_status: row.get(23)?,
+            needs_review: row.get(24)?,
+        },
     ))
+}
+
+/// The structure columns as stored. All `None` on a row the V11 backfill has
+/// not reached yet.
+struct StoredStructure {
+    kind: Option<String>,
+    topic: Option<String>,
+    target: Option<String>,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    origin: Option<String>,
+    goal_status: Option<String>,
+    needs_review: bool,
+}
+
+impl StoredStructure {
+    /// The memory's structure. A row without one (not backfilled yet), or
+    /// with one this build cannot read, is read through the same mapping the
+    /// backfill applies, so no reader ever sees a memory without one.
+    fn into_structure(self, category: &Category, tags: &[String]) -> MemoryStructure {
+        self.parse()
+            .unwrap_or_else(|| legacy_structure(category, tags))
+    }
+
+    fn parse(self) -> Option<MemoryStructure> {
+        let kind: Kind = self.kind?.parse().ok()?;
+        let topic = Topic::from_stored(&self.topic?);
+        let applies_to = match self.target?.parse::<Target>().ok()? {
+            Target::Me => AppliesTo::Me,
+            Target::General => AppliesTo::General,
+            Target::Project => {
+                let id = ProjectId::from_str(&self.project_id?).ok()?;
+                AppliesTo::Project(ProjectRef {
+                    id,
+                    name: self.project_name.unwrap_or_else(|| id.to_string()),
+                })
+            }
+        };
+        let origin: Origin = self.origin?.parse().ok()?;
+        let goal_status = match self.goal_status {
+            Some(raw) => Some(raw.parse::<GoalStatus>().ok()?),
+            None => None,
+        };
+        Some(MemoryStructure::from_stored(
+            kind,
+            topic,
+            applies_to,
+            origin,
+            goal_status,
+            self.needs_review,
+        ))
+    }
+}
+
+fn project_id(structure: &MemoryStructure) -> Option<String> {
+    structure
+        .applies_to()
+        .project()
+        .map(|project| project.id.to_string())
+}
+
+/// Puts a user's own topic in their list the first time a memory uses it, so
+/// no memory names a topic its owner cannot see or move.
+fn record_topic(connection: &Connection, user_id: UserId, topic: &Topic) -> Result<()> {
+    if topic.is_built_in() {
+        return Ok(());
+    }
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO topics (user_id, id, label, built_in, created_at, updated_at)
+             VALUES (?1, ?2, NULL, 0, ?3, ?3)",
+            rusqlite::params![user_id.to_string(), topic.as_str(), now],
+        )
+        .map_err(|e| map_sqlite_error(e, "topic already exists"))?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -720,16 +899,21 @@ fn build_memory(
     importance: f32,
     expires_at: Option<String>,
     superseded_by: Option<String>,
+    structure: StoredStructure,
 ) -> Result<Memory> {
+    let category = Category::from_stored(&category);
+    let tags = decode_tags(&tags);
+    let structure = structure.into_structure(&category, &tags);
     Ok(Memory::from_stored(
         MemoryId::from_str(&id)
             .map_err(|e| RaError::Internal(format!("stored memory id {id:?}: {e}")))?,
         UserId::from_str(&user_id)
             .map_err(|e| RaError::Internal(format!("stored user id {user_id:?}: {e}")))?,
         content,
-        Category::from_stored(&category),
+        category,
         subcategory,
-        decode_tags(&tags),
+        structure,
+        tags,
         decode_entities(&entities),
         confidence,
         MemorySource {

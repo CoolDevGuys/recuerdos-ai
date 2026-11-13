@@ -21,13 +21,35 @@ import time
 from datetime import datetime
 from types import TracebackType
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from .errors import JobFailedError, RecuerdosError, TimeoutError_, from_response
-from .models import Distillation, Job, Memory, SearchHit, SearchReport
+from .models import (
+    AppliesTo,
+    BulkResult,
+    Distillation,
+    Job,
+    Memory,
+    Project,
+    ProjectChange,
+    SavedMemory,
+    SearchHit,
+    SearchReport,
+    Suggestion,
+    Topic,
+    UpdatedMemory,
+)
 
 __all__ = ["Client"]
+
+
+def _segment(value: str) -> str:
+    """A project name or alias as one path segment: an alias is a git
+    remote and holds ``/``."""
+    return quote(value.strip(), safe="")
+
 
 DEFAULT_BASE_URL = "http://127.0.0.1:7070"
 
@@ -154,43 +176,93 @@ class Client:
         self,
         content: str,
         *,
-        category: str | None = None,
+        kind: str,
+        topic: str,
+        origin: str,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        subtopic: str | None = None,
         tags: list[str] | None = None,
-        confidence: float | None = None,
+        valid_until: datetime | None = None,
+        category: str | None = None,
         client: str | None = None,
         session_id: str | None = None,
-        expires_at: datetime | None = None,
-    ) -> Memory:
-        """Stores one memory exactly as given, with no pipeline.
+        replaces: str | None = None,
+        coexists_with: list[str] | None = None,
+    ) -> SavedMemory:
+        """Stores one memory with its structure, with no pipeline.
 
-        Use this when you have already decided what the memory should
-        say. It is synchronous, cheap, and calls no model — but it also
-        cannot supersede a contradiction, because nothing read the
-        content. When in doubt, prefer :meth:`save`.
+        The structure is what lets recall tell the user's own preferences
+        from one project's rules (see ``docs/memory-model.md``). The server
+        applies the memory rules and raises :class:`RejectedError` — with a
+        ``code`` such as ``needs_confirmation`` or ``kind_target_mismatch``
+        and a message saying how to fix it — when one stops the save.
 
         Args:
-            content: 1–4000 characters.
-            category: Defaults to ``fact.project`` server-side.
+            content: The memory as one standalone sentence; 1–4000 characters.
+            kind: ``preference``, ``rule``, ``convention``, ``decision``,
+                ``fact``, ``experience``, ``learning``, ``procedure``,
+                ``reference``, ``goal`` or ``plan``.
+            topic: ``coding``, ``tech``, ``work``, ``family``, ``people``,
+                ``health``, ``lifestyle``, ``home``, ``finance``, ``travel``,
+                ``food``, or one of your own.
+            origin: ``user_said``, ``user_confirmed``, ``inferred`` or
+                ``document``.
+            applies_to: ``"me"``, ``"general"``, an :class:`AppliesTo`
+                (``AppliesTo(target="project", project_name="quill")``), or
+                ``None`` for the server's default (a known project, else
+                ``general`` — never ``me``).
+            subtopic: A finer label within the topic.
             tags: Lowercased and de-duplicated; at most 32.
-            confidence: ``0.0``–``1.0``. Clamped rather than rejected.
-            expires_at: Must be in the future. The nightly job retires
-                the memory once it passes.
+            valid_until: When it stops being true. Required for a plan.
+            category: The old category to also file it under; derived from
+                kind and topic when omitted.
+            replaces: The id of a stored memory this one replaces, when the
+                user changed their mind. Same ``applies_to`` only; the old one
+                leaves recall and stays in history.
+            coexists_with: Ids of stored memories the user said this does
+                not replace (both hold), so they are not reported as
+                conflicts.
+
+        A save that contradicts a stored memory for the same scope raises
+        :class:`RejectedError` with ``code == "conflict"`` and the stored
+        memories in ``error.conflicts``.
+
+        Returns:
+            The memory, plus the server's ``message`` saying how it was filed.
+            ``status`` is ``"already_known"`` when a stored memory already
+            says this: nothing was written, and the memory returned is that
+            one.
         """
-        body: dict[str, Any] = {"content": content}
-        if category is not None:
-            body["category"] = category
+        body: dict[str, Any] = {
+            "content": content,
+            "kind": kind,
+            "topic": topic,
+            "origin": origin,
+        }
+        if isinstance(applies_to, str):
+            body["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body["applies_to"] = applies_to.model_dump(exclude_none=True)
+        elif applies_to is not None:
+            body["applies_to"] = applies_to
+        if subtopic is not None:
+            body["subtopic"] = subtopic
         if tags:
             body["tags"] = tags
-        if confidence is not None:
-            body["confidence"] = confidence
+        if valid_until is not None:
+            body["valid_until"] = valid_until.isoformat()
+        if category is not None:
+            body["category"] = category
         if client is not None:
             body["client"] = client
         if session_id is not None:
             body["session_id"] = session_id
-        if expires_at is not None:
-            body["expires_at"] = expires_at.isoformat()
+        if replaces is not None:
+            body["replaces"] = replaces
+        if coexists_with:
+            body["coexists_with"] = coexists_with
 
-        return Memory.model_validate(
+        return SavedMemory.model_validate(
             self._request("POST", "/v1/memories:direct", json=body)
         )
 
@@ -245,6 +317,12 @@ class Client:
         as_of: datetime | None = None,
         min_relevance: float | None = None,
         include_superseded: bool = False,
+        kinds: list[str] | None = None,
+        topics: list[str] | None = None,
+        targets: list[str] | None = None,
+        projects: list[str] | None = None,
+        project: str | None = None,
+        scope: str | None = None,
     ) -> list[SearchHit]:
         """Hybrid recall: semantic, keyword, and a graph hop, fused by
         reciprocal rank.
@@ -279,6 +357,17 @@ class Client:
                 a cost to being wrong supplies a higher one, and a caller
                 determined to see the near-misses passes ``0.0``.
             include_superseded: Include memories a later one replaced.
+            kinds: Only these kinds (``"preference"``, ``"rule"``, …). OR-ed.
+            topics: Only these topics (``"coding"``). OR-ed.
+            targets: Only memories for ``"me"``, ``"project"`` or
+                ``"general"``. OR-ed.
+            projects: Only these projects' memories, by name or alias.
+            project: The project the caller works in. Its memories rank with
+                the user's own; other projects' are demoted unless the query
+                names them. Without it, every project's memories are.
+            scope: ``"context"`` (the default) demotes other projects, as an
+                agent wants; ``"all"`` ranks every scope alike, as a person
+                browsing the whole store does.
         """
         return self.search_report(
             query,
@@ -289,6 +378,12 @@ class Client:
             as_of=as_of,
             min_relevance=min_relevance,
             include_superseded=include_superseded,
+            kinds=kinds,
+            topics=topics,
+            targets=targets,
+            projects=projects,
+            project=project,
+            scope=scope,
         ).hits
 
     def search_report(
@@ -302,6 +397,12 @@ class Client:
         as_of: datetime | None = None,
         min_relevance: float | None = None,
         include_superseded: bool = False,
+        kinds: list[str] | None = None,
+        topics: list[str] | None = None,
+        targets: list[str] | None = None,
+        projects: list[str] | None = None,
+        project: str | None = None,
+        scope: str | None = None,
     ) -> SearchReport:
         """[`search`][`Client.search`], plus what the response says above the results.
 
@@ -337,6 +438,18 @@ class Client:
             body["min_relevance"] = min_relevance
         if include_superseded:
             body["include_superseded"] = True
+        for field, values in (
+            ("kinds", kinds),
+            ("topics", topics),
+            ("targets", targets),
+            ("projects", projects),
+        ):
+            if values:
+                body[field] = values
+        if project is not None:
+            body["project"] = project
+        if scope is not None:
+            body["scope"] = scope
 
         payload = self._request("POST", "/v1/memories/search", json=body)
         if not isinstance(payload, dict):
@@ -397,34 +510,68 @@ class Client:
         memory_id: str,
         *,
         content: str | None = None,
-        category: str | None = None,
+        kind: str | None = None,
+        topic: str | None = None,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        subtopic: str | None = None,
         tags: list[str] | None = None,
+        valid_until: datetime | None = None,
+        clear_valid_until: bool = False,
+        goal_status: str | None = None,
+        origin: str | None = None,
+        category: str | None = None,
         expires_at: datetime | None = None,
         clear_expiry: bool = False,
-    ) -> Memory:
-        """Edits a memory in place. Omitted fields are left alone.
+    ) -> UpdatedMemory:
+        """Amends a memory in place. Omitted fields are left alone.
 
-        Editing ``content`` re-embeds and re-indexes it.
+        The same rules as a save apply to what the memory becomes, and a
+        refusal raises :class:`RejectedError`. Editing ``content``
+        re-embeds and re-indexes it; the audit trail keeps the old text.
 
         Args:
-            clear_expiry: Removes an existing expiry. Distinct from
-                passing ``expires_at=None``, which means "leave it
-                alone" — JSON cannot express the difference between an
-                absent field and an explicit null, so this does.
+            applies_to: Moves it to another scope, as :meth:`save_direct`
+                takes it.
+            goal_status: ``"achieved"`` or ``"abandoned"`` closes a goal,
+                ``"active"`` reopens it. Only the user closes a goal: pass
+                ``origin="user_said"`` or ``"user_confirmed"``.
+            origin: Who asked for the change.
+            clear_valid_until: Removes an existing end date. Distinct from
+                passing ``valid_until=None``, which means "leave it alone" —
+                JSON cannot tell an absent field from an explicit null, so
+                this does. ``expires_at`` and ``clear_expiry`` are the older
+                names.
         """
         body: dict[str, Any] = {}
         if content is not None:
             body["content"] = content
+        if kind is not None:
+            body["kind"] = kind
+        if topic is not None:
+            body["topic"] = topic
+        if isinstance(applies_to, str):
+            body["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body["applies_to"] = applies_to.model_dump(exclude_none=True)
+        elif applies_to is not None:
+            body["applies_to"] = applies_to
+        if subtopic is not None:
+            body["subtopic"] = subtopic
         if category is not None:
             body["category"] = category
         if tags is not None:
             body["tags"] = tags
-        if clear_expiry:
-            body["expires_at"] = None
-        elif expires_at is not None:
-            body["expires_at"] = expires_at.isoformat()
+        if goal_status is not None:
+            body["goal_status"] = goal_status
+        if origin is not None:
+            body["origin"] = origin
+        until = valid_until if valid_until is not None else expires_at
+        if clear_valid_until or clear_expiry:
+            body["valid_until"] = None
+        elif until is not None:
+            body["valid_until"] = until.isoformat()
 
-        return Memory.model_validate(
+        return UpdatedMemory.model_validate(
             self._request("PATCH", f"/v1/memories/{memory_id}", json=body)
         )
 
@@ -439,6 +586,141 @@ class Client:
         supersede it.
         """
         self._request("DELETE", f"/v1/memories/{memory_id}")
+
+    # --- projects ----------------------------------------------------
+
+    def projects(self) -> list[Project]:
+        """The user's projects, by name, with their aliases and how many
+        memories each holds."""
+        payload = self._request("GET", "/v1/projects")
+        return [Project.model_validate(item) for item in payload.get("projects", [])]
+
+    def project(self, project: str) -> Project:
+        """One project, by id, name or alias (a former name, a remote).
+
+        Raises:
+            RejectedError: ``unknown_project``, listing the known names.
+        """
+        return Project.model_validate(
+            self._request("GET", f"/v1/projects/{_segment(project)}")
+        )
+
+    def rename_project(self, project: str, new_name: str) -> ProjectChange:
+        """Renames a project. Its memories follow, and the old name keeps
+        finding it.
+
+        Raises:
+            ConflictError: Another project already has ``new_name``; merge
+                them instead.
+            RejectedError: ``invalid_value`` for a name that is not
+                lowercase ``a-z 0-9 . _ -``.
+        """
+        return ProjectChange.model_validate(
+            self._request(
+                "PATCH", f"/v1/projects/{_segment(project)}", json={"name": new_name}
+            )
+        )
+
+    def merge_project(self, project: str, into: str) -> ProjectChange:
+        """Folds ``project`` into ``into``: its memories move, and its name
+        and aliases find ``into`` from then on."""
+        return ProjectChange.model_validate(
+            self._request(
+                "POST", f"/v1/projects/{_segment(project)}/merge", json={"into": into}
+            )
+        )
+
+    # --- topics and the review queue ----------------------------------
+
+    def topics(self) -> list[Topic]:
+        """Every topic: the built-ins, then the user's own, with counts."""
+        payload = self._request("GET", "/v1/topics")
+        return [Topic.model_validate(item) for item in payload.get("topics", [])]
+
+    def create_topic(self, topic_id: str, *, label: str | None = None) -> Topic:
+        """Adds a topic of the user's own, which saves can use at once.
+
+        Raises:
+            ConflictError: It exists already, or is a built-in's id.
+        """
+        body: dict[str, Any] = {"id": topic_id}
+        if label is not None:
+            body["label"] = label
+        return Topic.model_validate(self._request("POST", "/v1/topics", json=body))
+
+    def relabel_topic(self, topic_id: str, label: str | None) -> Topic:
+        """Relabels any topic; ``None`` goes back to the default wording.
+        Display only: memories keep the topic."""
+        return Topic.model_validate(
+            self._request(
+                "PATCH", f"/v1/topics/{_segment(topic_id)}", json={"label": label}
+            )
+        )
+
+    def bulk_edit(
+        self,
+        memory_ids: list[str],
+        *,
+        kind: str | None = None,
+        topic: str | None = None,
+        applies_to: str | AppliesTo | dict[str, Any] | None = None,
+        reviewed: bool = False,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+    ) -> BulkResult:
+        """One edit to many memories, all or nothing, under the save rules.
+
+        Args:
+            applies_to: ``"me"``, ``"general"``, or a known project
+                (``{"target": "project", "project_name": "quill"}``).
+            reviewed: Confirms each memory's structure as it is, so it
+                leaves the review queue (``needs_review``).
+
+        Raises:
+            RejectedError: ``invalid_value`` naming the memories that cannot
+                take the structure; nothing was changed.
+        """
+        body_set: dict[str, Any] = {}
+        if kind is not None:
+            body_set["kind"] = kind
+        if topic is not None:
+            body_set["topic"] = topic
+        if isinstance(applies_to, str):
+            body_set["applies_to"] = {"target": applies_to}
+        elif isinstance(applies_to, AppliesTo):
+            body_set["applies_to"] = applies_to.model_dump(
+                exclude_none=True, exclude={"new_project"}
+            )
+        elif applies_to is not None:
+            body_set["applies_to"] = applies_to
+        if reviewed:
+            body_set["reviewed"] = True
+        return BulkResult.model_validate(
+            self._request(
+                "POST",
+                "/v1/memories:bulk",
+                json={
+                    "ids": memory_ids,
+                    "set": body_set,
+                    "add_tags": add_tags or [],
+                    "remove_tags": remove_tags or [],
+                },
+            )
+        )
+
+    def suggest(self, memory_ids: list[str]) -> list[Suggestion]:
+        """What each memory may really be, for the user to accept or change
+        (up to 25). Writes nothing.
+
+        Raises:
+            RejectedError: ``no_model`` when the daemon has no language model.
+        """
+        payload = self._request(
+            "POST", "/v1/memories:suggest", json={"ids": memory_ids}
+        )
+        return [
+            Suggestion.model_validate(item) for item in payload.get("suggestions", [])
+        ]
 
     # --- jobs --------------------------------------------------------
 

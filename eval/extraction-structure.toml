@@ -1,0 +1,117 @@
+# Extraction structure set (ai-specs/memory-structure-plan.md §10, S2 exit).
+#
+# Raw text in, the structure the pipeline should file it under out. It checks
+# the one thing the retrieval eval cannot: that a project's rule read out of a
+# conversation is filed as that project's, and that an inference about the
+# user is held back for them to confirm, never stored as their preference.
+#
+# It needs a real model, so it is not part of `cargo test`. Run it with a
+# provider configured the usual way, for example:
+#
+#     RECUERDOS_AI_UNDERSTANDING__PROVIDER=anthropic \
+#     RECUERDOS_AI_UNDERSTANDING__MODEL=claude-haiku-5-5 \
+#     cargo test --bin recuerdos-ai extraction_structure_set -- --ignored --nocapture
+#
+# A case passes when some extracted memory is filed with the expected target
+# (and kind, when one is given), or — for `suggest = true` — when what it
+# found about the user is held back as a suggestion and nothing is stored as
+# the user's. The bar is 90% of cases.
+#
+# `project` is the project the caller works in, as its client would send it.
+# It is registered before the run, so filing under it is possible.
+
+[[case]]
+id = "personal-preference-in-a-project"
+text = "Remember this as my personal preference: I always use mocks in unit tests."
+project = "quill"
+target = "me"
+kind = "preference"
+
+[[case]]
+id = "repo-rule"
+text = "In this repo we never mock the database; integration tests hit a real Postgres."
+project = "quill"
+target = "project"
+
+[[case]]
+id = "project-stack-is-not-mine"
+text = "This project's frontend runs React 19 with TanStack Query."
+project = "quill"
+target = "project"
+kind = "fact"
+
+[[case]]
+id = "inferred-preference-is-a-suggestion"
+text = "assistant: I noticed you squash every PR before merging. user: ok, merge it."
+project = "quill"
+suggest = true
+
+[[case]]
+id = "server-location-is-general"
+text = "The NAS backups live in /mnt/tank/backups and run nightly at 03:00."
+target = "general"
+
+[[case]]
+id = "homelab-procedure"
+text = "To restart the homelab, stop the containers first, then reboot the Proxmox host."
+target = "general"
+kind = "procedure"
+
+[[case]]
+id = "decision-with-a-reason"
+text = "We chose SQLite over Postgres here because it keeps the installer to a single file."
+project = "quill"
+target = "project"
+kind = "decision"
+
+[[case]]
+id = "personal-rule"
+text = "Never push straight to main, in any repository I work on."
+target = "me"
+kind = "rule"
+
+[[case]]
+id = "goal"
+text = "My goal is to run a half marathon in April."
+target = "me"
+kind = "goal"
+
+[[case]]
+id = "family-fact"
+text = "My daughter Lucía is allergic to peanuts."
+target = "general"
+
+[[case]]
+id = "spanish-personal-preference"
+text = "Guárdalo como preferencia mía: prefiero pnpm en todos mis proyectos."
+project = "quill"
+target = "me"
+kind = "preference"
+
+[[case]]
+id = "spanish-repo-convention"
+text = "En este repo los casos de uso se nombran por intención, sin sufijo Service."
+project = "quill"
+target = "project"
+
+[[case]]
+id = "spanish-general-reference"
+text = "La documentación del router está en el cajón de la oficina, en una carpeta azul."
+target = "general"
+
+[[case]]
+id = "claude-md-rule-without-project"
+text = "From CLAUDE.md: all handlers return a typed error envelope."
+target = "general"
+
+[[case]]
+id = "learning"
+text = "Lesson from last week: flaky tests in this suite were always a shared clock."
+project = "quill"
+target = "project"
+kind = "learning"
+
+[[case]]
+id = "inferred-habit-in-spanish"
+text = "assistant: veo que siempre escribes los commits en imperativo. user: sí, sigue."
+suggest = true

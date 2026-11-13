@@ -46,6 +46,10 @@ eval-native:
     cargo run -q --bin recuerdos-ai -- \
         eval --baseline eval/baseline.json --max-drop 5
 
+# Score scope-aware recall (memory-structure-plan.md §9) on its own corpus.
+eval-scope:
+    docker compose run --rm dev cargo run -q --bin recuerdos-ai -- eval --cases eval/scope.toml
+
 # Re-record the baseline on the native toolchain, mirroring eval-record.
 eval-record-native:
     cargo run -q --bin recuerdos-ai -- \

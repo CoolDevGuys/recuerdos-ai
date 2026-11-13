@@ -18,12 +18,14 @@ import pytest
 
 import recuerdos_ai
 from recuerdos_ai import (
+    AppliesTo,
     AuthenticationError,
     Client,
     JobFailedError,
     NotFoundError,
     PermissionError_,
     RecuerdosError,
+    RejectedError,
     RerankSkipped,
     ServerError,
     TimeoutError_,
@@ -171,9 +173,112 @@ def test_optional_fields_are_omitted_rather_than_sent_as_null() -> None:
         bodies.append(json.loads(request.content))
         return httpx.Response(201, json=MEMORY)
 
-    client_for(handler).save_direct("User prefers pnpm")
+    client_for(handler).save_direct(
+        "User prefers pnpm", kind="preference", topic="coding", origin="user_said"
+    )
 
-    assert bodies[0] == {"content": "User prefers pnpm"}
+    assert bodies[0] == {
+        "content": "User prefers pnpm",
+        "kind": "preference",
+        "topic": "coding",
+        "origin": "user_said",
+    }
+
+
+def test_applies_to_accepts_a_target_or_a_project() -> None:
+    bodies: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(201, json={**MEMORY, "message": "Saved."})
+
+    ra = client_for(handler)
+    ra.save_direct(
+        "Prefers pnpm",
+        kind="preference",
+        topic="coding",
+        origin="user_said",
+        applies_to="me",
+    )
+    saved = ra.save_direct(
+        "Quill forbids mocking the database",
+        kind="rule",
+        topic="coding",
+        origin="user_said",
+        applies_to=AppliesTo(target="project", project_name="quill"),
+    )
+
+    assert bodies[0]["applies_to"] == {"target": "me"}
+    assert bodies[1]["applies_to"] == {"target": "project", "project_name": "quill"}
+    assert saved.message == "Saved."
+
+
+def test_a_rule_refusal_raises_rejected_with_its_code() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "error": {"code": "kind_target_mismatch", "message": "use convention"}
+            },
+        )
+
+    with pytest.raises(RejectedError) as refused:
+        client_for(handler).save_direct(
+            "x", kind="preference", topic="coding", origin="user_said"
+        )
+    assert refused.value.code == "kind_target_mismatch"
+    assert refused.value.status == 422
+
+
+def test_a_conflict_is_a_rejection_with_the_stored_memories() -> None:
+    # "conflict" is also the 409 uniqueness code; a 422 is a memory rule's
+    # refusal whatever its code, and carries what it contradicts.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "error": {
+                    "code": "conflict",
+                    "message": "It contradicts what is stored for me",
+                    "details": {
+                        "judged": True,
+                        "conflicts": [{"id": "m-1", "content": "Prefers mocks"}],
+                    },
+                }
+            },
+        )
+
+    with pytest.raises(RejectedError) as refused:
+        client_for(handler).save_direct(
+            "Avoids mocks", kind="preference", topic="coding", origin="user_said"
+        )
+    assert refused.value.code == "conflict"
+    assert refused.value.judged
+    assert refused.value.conflicts[0]["id"] == "m-1"
+
+
+def test_replacing_and_amending_send_the_structured_fields() -> None:
+    bodies: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={**MEMORY, "message": "Updated."})
+
+    ra = client_for(handler)
+    ra.save_direct(
+        "Avoids mocks",
+        kind="preference",
+        topic="coding",
+        origin="user_said",
+        replaces="m-1",
+        coexists_with=["m-2"],
+    )
+    updated = ra.update("m-3", goal_status="achieved", origin="user_confirmed")
+
+    assert bodies[0]["replaces"] == "m-1"
+    assert bodies[0]["coexists_with"] == ["m-2"]
+    assert bodies[1] == {"goal_status": "achieved", "origin": "user_confirmed"}
+    assert updated.message == "Updated."
 
 
 def test_clearing_an_expiry_is_distinct_from_leaving_it_alone() -> None:
@@ -189,8 +294,8 @@ def test_clearing_an_expiry_is_distinct_from_leaving_it_alone() -> None:
     ra.update("an-id", content="revised")
     ra.update("an-id", clear_expiry=True)
 
-    assert "expires_at" not in bodies[0], "leaving it alone sent a null"
-    assert bodies[1]["expires_at"] is None, "clearing it did not send a null"
+    assert "valid_until" not in bodies[0], "leaving it alone sent a null"
+    assert bodies[1]["valid_until"] is None, "clearing it did not send a null"
 
 
 def test_saving_defaults_to_not_waiting() -> None:
@@ -550,3 +655,121 @@ def test_the_version_a_caller_can_read_is_the_version_installed() -> None:
     # installed distribution instead of to a second copy of the truth that
     # nobody updates.
     assert recuerdos_ai.__version__ == importlib.metadata.version("recuerdos-ai")
+
+
+# --- projects --------------------------------------------------------
+
+PROJECT = {
+    "id": "019f7c5a-0000-7000-8000-0000000000aa",
+    "name": "quill",
+    "aliases": ["github.com/acme/quill"],
+    "memories": 3,
+    "created_at": "2026-11-12T08:00:00Z",
+}
+
+
+def test_projects_are_listed() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"projects": [PROJECT]})
+
+    projects = client_for(handler).projects()
+
+    assert seen[0].method == "GET" and seen[0].url.path == "/v1/projects"
+    assert projects[0].name == "quill"
+    assert projects[0].aliases == ["github.com/acme/quill"]
+    assert projects[0].memories == 3
+
+
+def test_a_remote_is_one_path_segment() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=PROJECT)
+
+    client_for(handler).project("github.com/acme/quill")
+
+    assert seen[0].url.raw_path == b"/v1/projects/github.com%2Facme%2Fquill"
+
+
+def test_rename_and_merge_send_what_the_api_takes() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "project": {**PROJECT, "name": "quill-app"},
+                "message": "Renamed quill to quill-app",
+                "previous": "quill",
+                "moved": 0,
+            },
+        )
+
+    client = client_for(handler)
+    renamed = client.rename_project("quill", "quill-app")
+    client.merge_project("me-quill", "quill")
+
+    assert (seen[0].method, seen[0].url.path) == ("PATCH", "/v1/projects/quill")
+    assert json.loads(seen[0].content) == {"name": "quill-app"}
+    assert renamed.project.name == "quill-app"
+    assert renamed.previous == "quill"
+    assert renamed.learned == []
+    assert (seen[1].method, seen[1].url.path) == (
+        "POST",
+        "/v1/projects/me-quill/merge",
+    )
+    assert json.loads(seen[1].content) == {"into": "quill"}
+
+
+def test_search_sends_the_structure_filters_and_the_context() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"results": [], "took_ms": 1})
+
+    client_for(handler).search(
+        "naming",
+        kinds=["convention"],
+        targets=["project"],
+        projects=["quill"],
+        project="fern",
+        scope="all",
+    )
+
+    body = json.loads(seen[0].content)
+    assert body["kinds"] == ["convention"]
+    assert body["targets"] == ["project"]
+    assert body["projects"] == ["quill"]
+    assert body["project"] == "fern"
+    assert body["scope"] == "all"
+    assert "topics" not in body, "an empty filter is not sent"
+
+
+def test_bulk_edit_sends_the_structure() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"memories": [], "changed": 0, "reembedded": 0})
+
+    client_for(handler).bulk_edit(
+        ["m1"], kind="reference", applies_to="general", reviewed=True
+    )
+
+    assert seen[0].url.path == "/v1/memories:bulk"
+    assert json.loads(seen[0].content) == {
+        "ids": ["m1"],
+        "set": {
+            "kind": "reference",
+            "applies_to": {"target": "general"},
+            "reviewed": True,
+        },
+        "add_tags": [],
+        "remove_tags": [],
+    }

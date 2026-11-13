@@ -55,7 +55,9 @@ impl Session {
             .send(
                 Method::POST,
                 "/v1/memories:direct",
-                Some(json!({"content": content, "category": category})),
+                Some(common::structured(
+                    json!({"content": content, "category": category}),
+                )),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -104,10 +106,16 @@ async fn a_created_category_is_immediately_valid_for_saving_and_filtering() {
         .send(
             Method::POST,
             "/v1/memories:direct",
-            Some(json!({"content": "slept 7 hours", "category": "health.sleep"})),
+            Some(common::structured(
+                json!({"content": "slept 7 hours", "category": "health.sleep"}),
+            )),
         )
         .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown before it exists");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unknown before it exists"
+    );
 
     let (status, created) = session
         .send(
@@ -148,12 +156,14 @@ async fn categories_are_per_user() {
             &sam,
             Method::POST,
             "/v1/memories:direct",
-            Some(json!({"content": "x", "category": "homelab"})),
+            Some(common::structured(
+                json!({"content": "x", "category": "homelab"}),
+            )),
         )
         .await;
 
     assert!(find(body["categories"].as_array().unwrap(), "homelab").is_none());
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -174,12 +184,6 @@ async fn relabelling_a_built_in_is_display_only() {
     assert_eq!(body["category"]["default_label"], "Coding preference");
     assert_eq!(body["moved"], 0);
     assert_eq!(session.category_of(&id).await, "preference.coding");
-    let (_, map) = session.send(Method::GET, "/v1/map", None).await;
-    let coding = find(map["categories"].as_array().unwrap(), "preference.coding").unwrap();
-    assert_eq!(
-        coding["label"], "How I code",
-        "the map shows the user's words"
-    );
 
     // A built-in's id never changes.
     let (status, _) = session
@@ -335,7 +339,7 @@ async fn a_bulk_edit_naming_someone_elses_memory_changes_nothing() {
             &sam,
             Method::POST,
             "/v1/memories:direct",
-            Some(json!({"content": "theirs"})),
+            Some(common::structured(json!({"content": "theirs"}))),
         )
         .await;
     let theirs = theirs["id"].as_str().unwrap();

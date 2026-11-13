@@ -7,6 +7,7 @@
 
 use crate::shared::error::{RaError, Result};
 use crate::shared::ids::MemoryId;
+use crate::understanding::domain::ingest_job::ProjectHint;
 
 /// Beyond this, a transcript is not a session — it is a corpus, and
 /// sending it costs more in one call than the memories it yields are
@@ -30,6 +31,8 @@ pub struct SessionTranscript {
     pub client: Option<String>,
     /// Tags applied to everything distilled out of it.
     pub tags: Vec<String>,
+    /// The project the session ran in, when the client named one.
+    pub project: Option<ProjectHint>,
 }
 
 impl SessionTranscript {
@@ -54,6 +57,7 @@ impl SessionTranscript {
             session_id: None,
             client: None,
             tags: Vec::new(),
+            project: None,
         })
     }
 

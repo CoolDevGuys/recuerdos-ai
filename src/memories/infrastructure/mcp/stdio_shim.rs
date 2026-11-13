@@ -21,6 +21,7 @@
 use super::http_memory_toolbox::HttpMemoryToolbox;
 use super::memory_mcp_server::MemoryMcpServer;
 use super::memory_toolbox::MemoryToolbox;
+use super::project_detection::detect_project;
 use crate::shared::error::{RaError, Result};
 use rmcp::ServiceExt;
 use std::sync::Arc;
@@ -39,7 +40,17 @@ pub async fn serve_stdio(client_name: &str) -> Result<()> {
     })?;
     let base_url = std::env::var(BASE_URL_ENV).unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
 
-    let toolbox: Arc<dyn MemoryToolbox> = Arc::new(HttpMemoryToolbox::new(&base_url, &api_key));
+    // The harness starts the shim inside the folder it works in: that folder's
+    // project is sent with every request, so "this repo's" memories are filed
+    // under it without the agent having to name it.
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|folder| detect_project(&folder));
+    if let Some(project) = &project {
+        eprintln!("recuerdos-ai mcp: project {}", project.name);
+    }
+    let toolbox: Arc<dyn MemoryToolbox> =
+        Arc::new(HttpMemoryToolbox::new(&base_url, &api_key).with_project(project));
 
     // Fail here rather than on the client's first tool call: an MCP
     // client shows a server that failed to start much more clearly than
