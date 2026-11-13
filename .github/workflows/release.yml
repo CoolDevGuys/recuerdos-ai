@@ -27,11 +27,13 @@ jobs:
   # also means the artifact is exercised on the platform it ships to.
   #
   # Note on portability: the ONNX Runtime prebuilt that `ort`/`fastembed`
-  # link is itself compiled against glibc 2.38 (it references __isoc23_*
-  # and __cxa_call_terminate), so the Linux binary requires glibc >= 2.38
-  # (Debian 13, Ubuntu 24.04+, Fedora 39+) no matter which runner we build
-  # on — building on an older glibc simply fails to link. Older or minimal
-  # systems use the Docker image instead, which bundles everything.
+  # link is itself compiled against glibc 2.38 and GCC 14 (it references
+  # __isoc23_* and __cxa_call_terminate), and Rust's std adds glibc 2.39
+  # symbols, so the Linux binary requires glibc >= 2.39 with GCC 14's
+  # libstdc++ (Ubuntu 24.04+, Debian 13+, Fedora 40+) no matter which
+  # runner we build on — building on an older glibc simply fails to link.
+  # Older or minimal systems use the Docker image instead, which bundles
+  # everything.
   #
   # The x86_64 runner is pinned, never `ubuntu-latest`: a binary links
   # against the build host's glibc, and when `ubuntu-latest` moved to 26.04
@@ -117,22 +119,39 @@ jobs:
       - name: Smoke test
         run: ./target/release/recuerdos-ai --version
 
-      # The smoke test only proves the binary starts *here*. This proves it
-      # starts on the oldest system the README and install.sh promise: no
-      # symbol may require a glibc newer than the documented floor.
+      # The smoke test only proves the binary starts *here*. These two prove
+      # it starts on the oldest systems the README and install.sh promise.
+      #
+      # The floor is glibc 2.39 *and* GCC 14's libstdc++, the oldest pair any
+      # distro ships (Ubuntu 24.04, Debian 13, Fedora 40): ONNX Runtime's
+      # prebuilt needs `CXXABI_1.3.15` (`__cxa_call_terminate`, GCC 14), and
+      # Rust's std links `pidfd_spawnp`/`pidfd_getpid` (glibc 2.39) since the
+      # daemon runs `git` for project detection. Those two are weak symbols,
+      # but the linker still marks GLIBC_2.39 as required on aarch64, so the
+      # loader refuses glibc 2.38. The documented floor was 2.38 until v0.6.1,
+      # but Fedora 39, its only distro, has GCC 13 and never ran the binary.
       - name: glibc floor
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          floor=2.38
+          floor=2.39
           needed=$(objdump -T target/release/recuerdos-ai | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
             | sed 's/GLIBC_//' | sort -V -u | tail -1)
           echo "highest glibc symbol version required: $needed (floor $floor)"
           if [ "$(printf '%s\n%s\n' "$floor" "$needed" | sort -V | tail -1)" != "$floor" ]; then
-            echo "::error::the binary needs glibc $needed, above the documented floor $floor — was the runner image upgraded?"
+            echo "::error::the binary needs glibc $needed, above the documented floor $floor — was the runner image or the Rust toolchain upgraded?"
             exit 1
           fi
+
+      # The proof the check above stands for, libstdc++ included: the binary
+      # starts on a clean Fedora 40, which has exactly the floor's glibc
+      # (2.39) and is not the distro it was built on.
+      - name: Starts on the floor
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD/target/release:/bin-under-test:ro" fedora:40 \
+            /bin-under-test/recuerdos-ai --version
 
       - name: Package
         id: package
