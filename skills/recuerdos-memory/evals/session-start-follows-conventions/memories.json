@@ -1,0 +1,80 @@
+{
+  "folder": {
+    "name": "quill",
+    "remote": "github.com/acme/quill"
+  },
+  "memories": [
+    {
+      "folder": {
+        "name": "quill",
+        "remote": "github.com/acme/quill"
+      },
+      "memory": {
+        "content": "Command handlers are named after the command they run, like CreateInvoiceHandler, one file per command in src/handlers/",
+        "kind": "convention",
+        "topic": "coding",
+        "applies_to": {
+          "target": "project",
+          "new_project": true
+        },
+        "origin": "user_said"
+      }
+    },
+    {
+      "folder": {
+        "name": "quill",
+        "remote": "github.com/acme/quill"
+      },
+      "memory": {
+        "content": "Tests never mock the database; they use the in-memory repository from src/testing/memory-repo.ts",
+        "kind": "rule",
+        "topic": "coding",
+        "applies_to": {
+          "target": "project",
+          "new_project": true
+        },
+        "origin": "user_said"
+      }
+    },
+    {
+      "folder": null,
+      "memory": {
+        "content": "The user prefers Vitest over Jest for unit tests",
+        "kind": "preference",
+        "topic": "coding",
+        "applies_to": {
+          "target": "me"
+        },
+        "origin": "user_said"
+      }
+    },
+    {
+      "folder": null,
+      "memory": {
+        "content": "The user always writes table-driven tests",
+        "kind": "rule",
+        "topic": "coding",
+        "applies_to": {
+          "target": "me"
+        },
+        "origin": "user_said"
+      }
+    },
+    {
+      "folder": {
+        "name": "fern",
+        "remote": "github.com/acme/fern"
+      },
+      "memory": {
+        "content": "Fern's handlers return Result values and never throw",
+        "kind": "convention",
+        "topic": "coding",
+        "applies_to": {
+          "target": "project",
+          "new_project": true
+        },
+        "origin": "user_said"
+      }
+    }
+  ]
+}

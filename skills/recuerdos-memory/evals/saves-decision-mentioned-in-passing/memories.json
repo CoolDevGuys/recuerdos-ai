@@ -1,0 +1,24 @@
+{
+  "folder": {
+    "name": "quill",
+    "remote": "github.com/acme/quill"
+  },
+  "memories": [
+    {
+      "folder": {
+        "name": "quill",
+        "remote": "github.com/acme/quill"
+      },
+      "memory": {
+        "content": "Use cases are named by intent, with no Service suffix",
+        "kind": "convention",
+        "topic": "coding",
+        "applies_to": {
+          "target": "project",
+          "new_project": true
+        },
+        "origin": "user_said"
+      }
+    }
+  ]
+}

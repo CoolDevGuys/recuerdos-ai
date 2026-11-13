@@ -1,0 +1,20 @@
+{
+  "folder": {
+    "name": "quill",
+    "remote": "github.com/acme/quill"
+  },
+  "memories": [
+    {
+      "folder": null,
+      "memory": {
+        "content": "The user prefers tabs for indentation",
+        "kind": "preference",
+        "topic": "coding",
+        "applies_to": {
+          "target": "me"
+        },
+        "origin": "user_said"
+      }
+    }
+  ]
+}

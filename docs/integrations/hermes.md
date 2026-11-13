@@ -187,6 +187,8 @@ either of them knowing the other exists.
 
 ## Next
 
+- [agent-skill.md](agent-skill.md) — the `recuerdos-memory` skill, which Hermes can load
+  as a skill (its `references/other-harnesses.md` covers assistants without a project folder)
 - [mcp.md](../mcp.md) — the MCP tools and the `memory://profile` resource
 - [custom-agents.md](custom-agents.md) — the generic REST recipe, in more depth
 - [api.md](../api.md) — every endpoint and field

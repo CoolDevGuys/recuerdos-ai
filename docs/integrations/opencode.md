@@ -109,6 +109,8 @@ between users.
 
 - The tools are described in [docs/mcp.md](../mcp.md#tools). opencode
   decides when to call them from those descriptions.
+- The [`recuerdos-memory` skill](agent-skill.md) teaches the model when to read and
+  save; install it where opencode looks for skills and add its `AGENTS.md` line.
 - opencode has no session-start hook equivalent to Claude Code's, so the
   profile is read when the model chooses to read the
   `memory://profile` resource rather than unconditionally.

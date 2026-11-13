@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: saves-decision-mentioned-in-passing
+expected_outcome: |
+  The agent writes the helper with date-fns, and on its own saves the decision mentioned
+  in passing (date-fns for all date handling here, moment banned) as a memory of this
+  project (quill), without being asked to remember it. It saves nothing about the helper
+  itself, which is task detail. Needs a Recuerdos AI daemon (see the evals README).
+context:
+  scaffold_script: place-files.sh

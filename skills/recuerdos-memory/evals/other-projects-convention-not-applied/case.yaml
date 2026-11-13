@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: other-projects-convention-not-applied
+expected_outcome: |
+  Nothing stored says how quill's handlers report errors; another project (fern) returns
+  Result values. The agent may mention fern's approach, but labelled as fern's, and does
+  not present it as this project's convention or the user's preference; it says no quill
+  convention is recorded, or asks. Needs a Recuerdos AI daemon (see the evals README).
+context:
+  scaffold_script: place-files.sh

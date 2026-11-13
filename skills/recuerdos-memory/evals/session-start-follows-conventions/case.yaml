@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: session-start-follows-conventions
+expected_outcome: |
+  Before writing code the agent consults the memory (the profile or a recall with a real
+  question) and follows what it holds: the handler is named after its command
+  (ArchiveInvoiceHandler), the test uses Vitest and is table-driven, and the database is
+  not mocked. It does not apply another project's (fern's) convention as if it were this
+  project's or the user's. Needs a Recuerdos AI daemon seeded with this project's memories
+  (see the skill's evals README).
+context:
+  scaffold_script: place-files.sh

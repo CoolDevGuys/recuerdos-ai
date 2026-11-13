@@ -177,10 +177,18 @@ would be unrecallable and would crowd out better ones on every future
 recall. In that mode, prefer letting the model call `memory_save`
 deliberately: one good memory beats a transcript.
 
+## Teach it when to use the memory
+
+Install the [`recuerdos-memory` skill](agent-skill.md) and add its one-line
+`AGENTS.md` pointer. It tells the agent when to read the profile, when to save
+(including what you mention in passing) and how to keep a project's rules out of
+your personal preferences; in testing it made Sonnet and Haiku save what Opus saves
+unprompted.
+
 ## What to expect
 
-Claude Code decides when to call the tools, guided by their descriptions.
-In practice it will:
+Claude Code decides when to call the tools, guided by their descriptions (and the
+skill, if installed). In practice it will:
 
 - call `memory_recall` when you ask something about your own conventions;
 - call `memory_save` when you state a preference in a way that sounds

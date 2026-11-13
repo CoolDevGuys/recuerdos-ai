@@ -1,0 +1,7 @@
+schema_version: "1.1"
+name: saves-project-rule-and-personal-preference
+expected_outcome: |
+  The agent saves two memories with different scopes: the database rule for this project
+  (quill), as a rule or convention, and the commit-message preference for the user
+  everywhere (applies_to me). It tells the user how each was filed. Needs a Recuerdos AI
+  daemon (see the skill's evals README).
