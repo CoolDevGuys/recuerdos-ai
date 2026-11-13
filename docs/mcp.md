@@ -147,7 +147,7 @@ checksum:
 curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh | sh
 ```
 
-(`RECUERDOS_AI_VERSION=v0.6.0` before `sh` pins a version, matching your server's.)
+(`RECUERDOS_AI_VERSION=v0.6.1` before `sh` pins a version, matching your server's.)
 Then configure the harness to run it against your server, for example in
 `~/.claude.json`:
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Field measurements owed by recall-quality-plan Phases 0–3.
 #
-# Run this ON the host that runs recuerdos-ai, after installing v0.6.0:
+# Run this ON the host that runs recuerdos-ai, after installing v0.6.1:
 #
 #   curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh \
-#     | RECUERDOS_AI_VERSION=v0.6.0 sh
+#     | RECUERDOS_AI_VERSION=v0.6.1 sh
 #
 # The RECUERDOS_AI_VERSION is not optional. `install.sh` with no version asks
 # GitHub for /releases/latest, and GitHub excludes prereleases from that — a
@@ -38,10 +38,10 @@ OUT="${OUT:-$HOME/field-measure}"   # stable on purpose: the first run writes a 
                                     # timestamped directory would lose it on re-run
 CONFIG="${CONFIG:-}"
 BIN="${BIN:-}"
-IMAGE="${IMAGE:-ghcr.io/cooldevguys/recuerdos-ai:0.6.0}"   # image tags carry no leading "v"
+IMAGE="${IMAGE:-ghcr.io/cooldevguys/recuerdos-ai:0.6.1}"   # image tags carry no leading "v"
 VOLUME="${VOLUME:-recuerdos-ai-data}"
 LIMIT="${LIMIT:-5}"                 # the k the plan's gates are written on
-WANT_VERSION="${WANT_VERSION:-0.6.0}"
+WANT_VERSION="${WANT_VERSION:-0.6.1}"
 
 mkdir -p "$OUT"
 # $OUT is stable on purpose (queries.toml and probe.toml live there), so the

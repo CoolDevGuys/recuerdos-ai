@@ -3,6 +3,44 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.6.1 — Linux downloads, project-aware HTTP sessions, and a skill for agents
+
+**`v0.6.0` was published without its Linux binaries**, and the Linux requirement is now
+**glibc ≥ 2.39** (Ubuntu 24.04+, Debian 13+, Fedora 40+), up from a documented 2.38.
+
+- The release's glibc check refused `v0.6.0`'s Linux builds: since the daemon runs
+  `git` for project detection, Rust's standard library links `pidfd_spawnp` and
+  `pidfd_getpid` (glibc 2.39), and the loader requires that version even though the
+  symbols are weak.
+- Looking closer showed the old floor was never real: ONNX Runtime's prebuilt also
+  needs GCC 14's libstdc++ (`CXXABI_1.3.15`), which Fedora 39, the one distro with
+  glibc 2.38, does not have. No system that ran earlier Linux binaries loses support.
+- The floor is now 2.39 in the release check, `install.sh` and the README, and the
+  release starts every Linux binary on a clean Fedora 40 (glibc 2.39) before
+  publishing it, so a missing library fails the release instead of the download.
+- `install.sh` on Linux needs this release. The Docker image and the macOS binary of
+  `v0.6.0` were unaffected.
+
+Also in this release:
+
+- **HTTP MCP sessions can be in a project.** `/mcp` forwards the
+  `X-Recuerdos-Project` and `X-Recuerdos-Project-Remote` request headers to the REST
+  calls, as the stdio shim does with its own: a client configured per project (a
+  project's `.mcp.json`) is then in that project. Without them an HTTP session is in no
+  project, as before.
+- **Which transport:** [mcp.md](mcp.md#which-transport-stdio-or-http) compares stdio and
+  HTTP — what each detects, how saving "in this repo" and recall ranking behave, and
+  setting up a new computer with only `install.sh`. Project detection needs the stdio
+  shim, which can point at a daemon on another machine (`RECUERDOS_AI_URL`); the Claude
+  Code, opencode and deployment guides now recommend it for coding.
+- **The `recuerdos-memory` Agent Skill** (`skills/recuerdos-memory/`): when to read the
+  profile, when to save (including what is mentioned in passing), how to read recall's
+  scope labels, and the refusals that need the user. With it, Sonnet and Haiku passed
+  every test case, against 83% and 77% with a plain memory note. Install and the
+  one-line `AGENTS.md` pointer: [agent-skill.md](integrations/agent-skill.md).
+
+No migration, no API change; the Python SDK stays at `0.5.0`.
+
 ## v0.6.0 — Structured memories: every memory says what it is, what it is about, and who it is true for
 
 The first final release since `v0.4.3`, so it also carries everything the `v0.5.0`
@@ -40,12 +78,6 @@ the profile rank by the project the caller is in. The plan is
   rewritten without the user's click, and no re-embedding is needed.
 - *On upgrade:* the stdio shim (`recuerdos-ai mcp`) detects the project from the folder
   the harness starts it in; run the same version as the daemon.
-- *Which transport:* project detection needs the stdio shim, which runs in the
-  harness's folder and can point at a daemon on another machine (`RECUERDOS_AI_URL`);
-  only the binary is installed there. Over HTTP (`/mcp`) a session is in no project
-  unless the client sends the `X-Recuerdos-Project` (and `-Remote`) headers, which
-  `/mcp` now forwards. [mcp.md](mcp.md#which-transport-stdio-or-http) compares the two,
-  and the Claude Code and opencode guides recommend stdio for coding.
 
 ### Python SDK 0.5.0
 
