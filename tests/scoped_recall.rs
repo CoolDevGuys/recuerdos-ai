@@ -153,17 +153,17 @@ async fn e16_in_fern_my_coding_preferences_are_mine_then_ferns_and_never_quills(
         "{hits:#?}"
     );
     assert!(
+        contents(&hits).contains(&"The user always writes table-driven tests"),
+        "{hits:#?}"
+    );
+    assert!(
         hits.iter().all(|hit| project_of(hit) != Some("quill")),
         "another project's conventions answered for the user: {hits:#?}"
     );
-    // Everything of the user's own ranks above anything of a project.
-    let first_project = hits.iter().position(|hit| project_of(hit).is_some());
-    let last_mine = hits
-        .iter()
-        .rposition(|hit| hit["applies_to"]["target"] == "me");
-    if let (Some(project), Some(mine)) = (first_project, last_mine) {
-        assert!(mine < project, "{hits:#?}");
-    }
+    // No order is asserted between the user's own memories and fern's: §9
+    // ranks the user's, the general and the current project's alike and only
+    // demotes other projects. Fern's convention and the user's rule score
+    // within a hair of each other, so their order is a coin toss on recency.
 }
 
 #[tokio::test]

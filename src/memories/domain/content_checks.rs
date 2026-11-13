@@ -336,13 +336,19 @@ mod tests {
         "password: Tr0ub4dor&3",
         "Root password=correct-horse-9",
         "token: 8f3kd02mf93kd02",
-        concat!("The deploy key is gh", "p_aB3dE6fGh9iJk2LmN5oPq8RsT1uVw4XyZ7"),
+        concat!(
+            "The deploy key is gh",
+            "p_aB3dE6fGh9iJk2LmN5oPq8RsT1uVw4XyZ7"
+        ),
         concat!("API key sk", "-ant-api03-abcdEFGHijklMNOPqrstUVWX"),
         concat!("Use AK", "IAIOSFODNN7EXAMPLE for the bucket"),
         concat!("Slack bot token xo", "xb-123456789012-abcdefghij"),
         concat!("GitLab: gl", "pat-aB3dE6fGh9iJk2LmN5oP"),
         concat!("--", "---BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXk"),
-        concat!("Auth header: ey", "JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
+        concat!(
+            "Auth header: ey",
+            "JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        ),
         "The webhook secret is Zr8tK2mQ9vX4nB7wL1pS6dF3hJ0yC5gA",
         "La contraseña del router es Gato#2024",
         "clave: Lu1sR0dr1guez!",
