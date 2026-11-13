@@ -122,10 +122,54 @@ curl -s https://memory.example.com/v1/profile \
 ## 4. Connect your tools
 
 Every client points at the same daemon with the same key, and they all
-share one memory — which is the entire point. The easiest transport for a
-remote daemon is **MCP over HTTP**, at `https://memory.example.com/mcp`.
+share one memory — which is the entire point. There are two ways to connect, and
+which one decides whether the server knows **which project you are in**
+([mcp.md](mcp.md#which-transport-stdio-or-http) compares them):
 
-**Claude Code** — in `~/.claude.json` or a project's `.mcp.json`:
+- **Coding harnesses (Claude Code, opencode): the stdio shim.** Install just the binary
+  on each machine you code on (`install.sh`; no daemon, no checkout) and point it at
+  the server. The harness starts it in the project's folder, and it detects the project
+  from the git remote.
+- **Chat assistants and clients that cannot run a process (Hermes, Open WebUI): HTTP**
+  at `https://memory.example.com/mcp`. Sessions are in no project, unless the client's
+  config adds the `X-Recuerdos-Project` headers.
+
+**Claude Code** — in `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "recuerdos-ai": {
+      "command": "recuerdos-ai",
+      "args": ["mcp", "--client", "claude-code"],
+      "env": {
+        "RECUERDOS_AI_URL": "https://memory.example.com",
+        "RECUERDOS_AI_API_KEY": "ra_live_…"
+      }
+    }
+  }
+}
+```
+
+**opencode** — in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "mcp": {
+    "recuerdos-ai": {
+      "type": "local",
+      "command": ["recuerdos-ai", "mcp", "--client", "opencode"],
+      "enabled": true,
+      "environment": {
+        "RECUERDOS_AI_URL": "https://memory.example.com",
+        "RECUERDOS_AI_API_KEY": "ra_live_…"
+      }
+    }
+  }
+}
+```
+
+**Over HTTP instead** (no binary on the client), in Claude Code:
 
 ```json
 {
@@ -139,20 +183,9 @@ remote daemon is **MCP over HTTP**, at `https://memory.example.com/mcp`.
 }
 ```
 
-**opencode** — in `opencode.json`:
-
-```json
-{
-  "mcp": {
-    "recuerdos-ai": {
-      "type": "remote",
-      "url": "https://memory.example.com/mcp",
-      "enabled": true,
-      "headers": { "Authorization": "Bearer ra_live_…" }
-    }
-  }
-}
-```
+and, in a project's own `.mcp.json`, add `"X-Recuerdos-Project": "quill"` (and
+`"X-Recuerdos-Project-Remote": "github.com/acme/quill"`) to `headers` so its sessions
+are in that project.
 
 **Hermes** and anything else: see the [integration recipes](integrations/).
 For clients that only speak the REST API, the [plain-REST recipe](integrations/custom-agents.md)

@@ -157,12 +157,14 @@ Downloads the release binary for your OS (Linux x86_64/arm64, macOS arm64),
 to do it by hand? Grab the tarball straight from the
 [Releases page](https://github.com/CoolDevGuys/recuerdos-ai/releases).
 
-> ⚠️ **The Linux binaries need a recent distro — glibc ≥ 2.38** (Debian 13,
-> Ubuntu 24.04+, Fedora 39+). That floor is set by ONNX Runtime's prebuilt
-> library, not by our code, so it can't be lowered here. On anything older
+> ⚠️ **The Linux binaries need a recent distro — glibc ≥ 2.39** (Ubuntu 24.04+,
+> Debian 13+, Fedora 40+). That floor is set by ONNX Runtime's prebuilt
+> library (glibc 2.38 and GCC 14's libstdc++) and Rust's standard library, so
+> it can't be lowered here. On anything older
 > (Debian 12, Ubuntu 22.04, …) the binary won't start — use **🐳 Docker**
 > above instead. The image bundles everything and runs on any distro Docker
-> runs on, whatever its glibc. (Seeing `GLIBC_2.38 not found`? That's this.)
+> runs on, whatever its glibc. (Seeing `GLIBC_2.39 not found` or
+> `CXXABI_1.3.15 not found`? That's this.)
 
 ### 🔨 From source
 
@@ -335,9 +337,14 @@ It recalls the preference without being told. ✨
 [LangChain](docs/integrations/langchain.md) ·
 [any REST client](docs/integrations/custom-agents.md)
 
-> 🌐 Running the daemon on a server? Clients connect over **HTTP MCP** at
-> `https://your-host/mcp` with a bearer token — no local binary. See each
-> recipe and [docs/mcp.md](docs/mcp.md).
+> 🧠 Coding agents use the memory best with the **[`recuerdos-memory` skill](docs/integrations/agent-skill.md)**:
+> when to read, when to save, and whose rule is whose. One line in `AGENTS.md` loads it.
+
+> 🌐 Running the daemon on a server? For coding, install just the binary on your
+> machine and run the stdio shim against it (`RECUERDOS_AI_URL`): it detects the
+> project you are working in. Chat assistants can connect over **HTTP MCP** at
+> `https://your-host/mcp` with no local binary, but HTTP detects no project. See
+> [docs/mcp.md](docs/mcp.md#which-transport-stdio-or-http).
 
 ---
 
@@ -491,7 +498,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ## 🗺️ Status
 
-**`v0.6.0`** — structured memories. Used daily by its author since Phase 3:
+**`v0.6.1`** — structured memories. Used daily by its author since Phase 3:
 the storage format has migrated itself forward cleanly across every release, and
 `v0.6.0` is the one release that changed the save API on purpose (see
 [upgrading](docs/deployment.md#what-v060-does-on-its-first-start)).

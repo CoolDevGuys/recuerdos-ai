@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: change-of-mind-replaces
+expected_outcome: |
+  The store already holds the user's preference for tabs. The agent finds it (by recall,
+  or from a conflict refusal naming it) and, since the user said they changed their mind,
+  saves the new preference with replaces set to the old one, or asks the user before doing
+  anything else. The store must not end with both preferences active. Needs a Recuerdos AI
+  daemon seeded with the tabs preference (see the skill's evals README).
