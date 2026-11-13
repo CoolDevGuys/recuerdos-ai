@@ -40,6 +40,12 @@ the profile rank by the project the caller is in. The plan is
   rewritten without the user's click, and no re-embedding is needed.
 - *On upgrade:* the stdio shim (`recuerdos-ai mcp`) detects the project from the folder
   the harness starts it in; run the same version as the daemon.
+- *Which transport:* project detection needs the stdio shim, which runs in the
+  harness's folder and can point at a daemon on another machine (`RECUERDOS_AI_URL`);
+  only the binary is installed there. Over HTTP (`/mcp`) a session is in no project
+  unless the client sends the `X-Recuerdos-Project` (and `-Remote`) headers, which
+  `/mcp` now forwards. [mcp.md](mcp.md#which-transport-stdio-or-http) compares the two,
+  and the Claude Code and opencode guides recommend stdio for coding.
 
 ### Python SDK 0.5.0
 

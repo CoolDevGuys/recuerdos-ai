@@ -10,6 +10,7 @@ use super::memory_toolbox::{
     SaveRequest, SaveStatus, ToolMemory, UpdateRequest,
 };
 use super::tool_text;
+use crate::memories::application::structured_memory_saver::DetectedProject;
 use crate::shared::error::RaError;
 use chrono::{DateTime, Utc};
 use rmcp::handler::server::wrapper::Parameters;
@@ -274,14 +275,21 @@ impl MemoryMcpServer {
         match &self.backend {
             Backend::Fixed(toolbox) => Arc::clone(toolbox),
             Backend::Loopback { base_url } => {
-                let key = context
-                    .extensions
-                    .get::<http::request::Parts>()
+                let parts = context.extensions.get::<http::request::Parts>();
+                let key = parts
                     .and_then(|parts| parts.headers.get(http::header::AUTHORIZATION))
                     .and_then(|value| value.to_str().ok())
                     .map(strip_bearer)
                     .unwrap_or_default();
-                Arc::new(HttpMemoryToolbox::new(base_url, &key))
+                // There is no folder over HTTP, so no project is detected. A
+                // client that knows its project says so with the same headers
+                // the stdio shim sends (`X-Recuerdos-Project`, optionally
+                // `-Remote`), set per project in its MCP config; they are passed
+                // on to the REST calls exactly as the shim passes its own.
+                let project = parts
+                    .and_then(|parts| crate::shared::project_headers::project_from(&parts.headers))
+                    .map(|(name, alias)| DetectedProject { name, alias });
+                Arc::new(HttpMemoryToolbox::new(base_url, &key).with_project(project))
             }
         }
     }

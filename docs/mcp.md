@@ -1,6 +1,7 @@
 # MCP server
 
-Four tools and one resource, over **two transports** — stdio and HTTP.
+Nine tools and one resource, over **two transports** — stdio and HTTP. Both serve the
+same tools; they differ in whether the server knows **which project you are in**.
 
 Recuerdos AI speaks the [Model Context Protocol](https://modelcontextprotocol.io),
 so any MCP client — Claude Code, opencode, Hermes Agent, MCP Inspector —
@@ -8,13 +9,34 @@ reads and writes the same memory store.
 
 ## Setup
 
-Either way you need the daemon running and an API key:
+Either way you need the daemon running somewhere (this machine or a server) and an
+API key:
 
 ```bash
 recuerdos-ai serve &                 # leave it running
 recuerdos-ai user add alex
 recuerdos-ai key issue --user alex --scopes read,write
 ```
+
+### Which transport: stdio or HTTP
+
+Memories that apply to one project need the server to know the project. The stdio
+shim learns it from the folder your harness runs in; over HTTP there is no folder.
+
+| | **stdio** (`recuerdos-ai mcp`) | **HTTP** (`/mcp`) |
+|---|---|---|
+| On the client machine | the `recuerdos-ai` binary, run per session by the harness (no daemon: it forwards to `RECUERDOS_AI_URL`, which can be another server) | nothing |
+| Tools and `memory://profile` | all | all |
+| **Current project** | **detected** from the folder's git `origin` (every clone and worktree is one project), or `RECUERDOS_AI_PROJECT` | **none**, unless the client sends `X-Recuerdos-Project` (and optionally `X-Recuerdos-Project-Remote`) headers, set per project in its MCP config |
+| Saving "in this repo we…" | filed under the project; a new project is confirmed once | refused `no_project` unless the headers are set or the agent names `applies_to.project_name` |
+| Recall | the current project ranks with your own memories; other projects lower | with no project, every project ranks lower than your own memories (pass `project` to `memory_recall` to say where you are) |
+| Profile | yours, this project's, general | yours and general (the headers add the project) |
+| A repository renamed on its host | the refusal offers `project_rename`, which learns the new remote | only when the remote header is sent |
+| Best for | coding harnesses working in a repository (Claude Code, opencode) | chat assistants with no project folder (Hermes, Open WebUI), and clients that cannot run a local process |
+
+**For coding, use stdio — even when the daemon is on a server.** Install only the
+binary on your computer and point it at the server; nothing else runs locally. See
+[On a new computer](#on-a-new-computer).
 
 ### Streamable HTTP (`/mcp`) — no local binary
 
@@ -30,6 +52,31 @@ opencode ──HTTP /mcp──▶ recuerdos-ai serve ──▶ SQLite
 Point the client at `http://<daemon>:7070/mcp` with
 `Authorization: Bearer ra_live_…`. It is enabled by default; turn it off
 with `[server].mcp.http = false`.
+
+**Telling it the project.** HTTP has no folder to detect a project from. For a client
+you configure per project (a project's `.mcp.json`, for instance), add the project
+headers next to the key, and that client is in that project exactly as the stdio shim
+would be:
+
+```json
+{
+  "mcpServers": {
+    "recuerdos-ai": {
+      "type": "http",
+      "url": "https://memory.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ra_live_…",
+        "X-Recuerdos-Project": "quill",
+        "X-Recuerdos-Project-Remote": "github.com/acme/quill"
+      }
+    }
+  }
+}
+```
+
+The remote is optional; with it, a repository renamed later is recognised as the same
+project. Without the headers the session is in no project, which is right for a chat
+assistant.
 
 The endpoint honours the MCP spec's DNS-rebinding guard, accepting only
 loopback `Host` values (`localhost`, `127.0.0.1`, `::1`) — which covers a
@@ -82,10 +129,47 @@ Claude Code ──stdio──▶ recuerdos-ai mcp ──HTTP──▶ recuerdos-
 | Variable | Required | Default |
 |---|---|---|
 | `RECUERDOS_AI_API_KEY` | yes | — |
-| `RECUERDOS_AI_URL` | no | `http://127.0.0.1:7070` |
+| `RECUERDOS_AI_URL` | no | `http://127.0.0.1:7070` — set it to your server's address when the daemon runs elsewhere |
+| `RECUERDOS_AI_PROJECT` | no | detected: the folder's git `origin`, named after its last segment, else the repository's folder name; outside a git repository, no project |
 
-Use this when the client only supports local (stdio) MCP servers, or when
-the `recuerdos-ai` binary is already on the client's machine.
+The shim is the only transport that knows the project for you, so it is the one to
+use in a coding harness. It needs the binary on the client machine, not the daemon:
+`RECUERDOS_AI_URL` can point at a server on your network. Keep the binary at the same
+version as the daemon.
+
+#### On a new computer
+
+No checkout of the repository is needed. Each release publishes the binary for Linux
+(x86_64, ARM64) and Apple Silicon macOS, and `install.sh` downloads it and checks its
+checksum:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CoolDevGuys/recuerdos-ai/main/install.sh | sh
+```
+
+(`RECUERDOS_AI_VERSION=v0.6.0` before `sh` pins a version, matching your server's.)
+Then configure the harness to run it against your server, for example in
+`~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "recuerdos-ai": {
+      "command": "recuerdos-ai",
+      "args": ["mcp", "--client", "claude-code"],
+      "env": {
+        "RECUERDOS_AI_URL": "https://memory.example.com",
+        "RECUERDOS_AI_API_KEY": "ra_live_…"
+      }
+    }
+  }
+}
+```
+
+The shim talks to the daemon's REST API, not to `/mcp`, so the `Host` guard below does
+not apply to it; put TLS in front of the daemon all the same. On Windows or an Intel
+Mac there is no release binary yet: use HTTP with the project headers, or build from
+source.
 
 See [integrations/claude-code.md](integrations/claude-code.md) and
 [integrations/opencode.md](integrations/opencode.md) for exact config for

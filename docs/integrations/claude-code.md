@@ -36,15 +36,18 @@ Add Recuerdos AI to `~/.claude.json` (all projects) or a project's
 client saves, so `GET /v1/audit` can tell an editor's writes from a
 script's.
 
-If you run the daemon somewhere other than `localhost:7070`, add
-`"RECUERDOS_AI_URL": "http://…"` to `env`.
+If you run the daemon somewhere other than `localhost:7070` — another server on your
+network included — add `"RECUERDOS_AI_URL": "http://…"` to `env`. Only the binary has
+to be on this machine (`install.sh`, see [mcp.md](../mcp.md#on-a-new-computer)); the
+daemon stays on the server.
 
-### If the daemon runs on another host (HTTP)
+This is the recommended setup: Claude Code starts the shim in the project's folder,
+and the shim detects the project from its git remote, so "in this repo we…" lands in
+the right project and recall ranks this project's memories with your own.
 
-The block above spawns a local `recuerdos-ai` process, so it needs the
-binary on the same machine as Claude Code. If your daemon lives on a
-server, connect straight to its `/mcp` endpoint instead — no local binary,
-no shim:
+### If you cannot run the binary here (HTTP)
+
+Connect straight to the daemon's `/mcp` endpoint instead — no local binary, no shim:
 
 ```json
 {
@@ -52,11 +55,23 @@ no shim:
     "recuerdos-ai": {
       "type": "http",
       "url": "https://memory.example.com/mcp",
-      "headers": { "Authorization": "Bearer ra_live_…" }
+      "headers": {
+        "Authorization": "Bearer ra_live_…",
+        "X-Recuerdos-Project": "quill",
+        "X-Recuerdos-Project-Remote": "github.com/acme/quill"
+      }
     }
   }
 }
 ```
+
+**HTTP detects no project**: the daemon cannot see your folder. Put this block in each
+project's `.mcp.json` with that project's name in the two `X-Recuerdos-Project`
+headers, and the session is in that project as the shim would make it. Without them
+(a global config) a session is in no project: recall ranks every project below your
+own memories, the profile has no project section, and a project memory is saved only
+when Claude names the project. [mcp.md](../mcp.md#which-transport-stdio-or-http)
+compares the two.
 
 The daemon must have the HTTP transport enabled (it is on by default;
 `[server].mcp.http`) and be reachable at that URL. Put it behind TLS if it

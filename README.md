@@ -335,9 +335,11 @@ It recalls the preference without being told. ✨
 [LangChain](docs/integrations/langchain.md) ·
 [any REST client](docs/integrations/custom-agents.md)
 
-> 🌐 Running the daemon on a server? Clients connect over **HTTP MCP** at
-> `https://your-host/mcp` with a bearer token — no local binary. See each
-> recipe and [docs/mcp.md](docs/mcp.md).
+> 🌐 Running the daemon on a server? For coding, install just the binary on your
+> machine and run the stdio shim against it (`RECUERDOS_AI_URL`): it detects the
+> project you are working in. Chat assistants can connect over **HTTP MCP** at
+> `https://your-host/mcp` with no local binary, but HTTP detects no project. See
+> [docs/mcp.md](docs/mcp.md#which-transport-stdio-or-http).
 
 ---
 
