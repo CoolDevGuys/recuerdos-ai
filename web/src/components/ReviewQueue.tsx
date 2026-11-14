@@ -112,6 +112,17 @@ export function ReviewQueue({
     show({ tone: "success", message: `Filed ${memoriesCount(filed)}.` });
   };
 
+  /** Files a memory filed as someone else's as the user's own. */
+  const fileAsMine = async (memory: Memory) => {
+    setFailure(null);
+    const outcome = await actions.bulkEdit([memory.id], { appliesTo: { target: "me", project_name: null } });
+    if (outcome.kind === "failed") return setFailure(outcome.message);
+    show({
+      tone: "success",
+      message: memory.kind === "fact" ? "Filed as your personal information." : "Filed as yours.",
+    });
+  };
+
   if (queue.length === 0) {
     return (
       <p className="rounded-lg border border-dashed border-slate-300 p-8 text-center text-sm text-slate-600 dark:border-slate-700 dark:text-slate-400">
@@ -206,6 +217,19 @@ export function ReviewQueue({
                 </button>
                 <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
                   Guessed: {describeStructure(memory, topicLabel)} · was filed as {memory.category}
+                  {canWrite && memory.applies_to.target === "general" && (kindOf(memory.kind)?.targets.includes("me") ?? false) && (
+                    <>
+                      {" · "}
+                      <button
+                        type="button"
+                        disabled={busy !== null}
+                        onClick={() => void fileAsMine(memory)}
+                        className="font-medium text-indigo-700 underline dark:text-indigo-300"
+                      >
+                        It’s about me
+                      </button>
+                    </>
+                  )}
                 </p>
                 {suggestion !== undefined && (
                   <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md bg-indigo-50 px-3 py-2 text-sm text-indigo-950 dark:bg-indigo-950/50 dark:text-indigo-100">

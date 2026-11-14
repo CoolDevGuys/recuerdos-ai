@@ -192,6 +192,9 @@ tab shows how many are left.
   — or the ones you selected — really are. Each suggestion shows under its memory
   with a reason; **Accept** it, or **Accept all**. Nothing changes until you do,
   and a suggestion the rules would refuse is never offered.
+- **It's about me** on a memory filed as `general` files it as yours: a fact becomes
+  your **personal information**. Saving your names on the **About** page sends the
+  memories that name you here.
 
 ## Projects
 
@@ -241,6 +244,25 @@ each memory's old one.
 
 Built-in categories can be relabelled, but not renamed, merged or deleted.
 Categories are per user: yours are not visible to anyone else on the daemon.
+
+## About
+
+**About** (`/ui/about`) says what the daemon is: its version and build, when it
+started, whether a language model is configured, and which key you signed in with.
+
+- **You**: your name and the other names you go by. Agents write about you as "the
+  user", and some use your name; with your names here, the daemon knows both are you
+  ([memory-model.md](memory-model.md#facts-about-you-your-personal-information)).
+  Saving them sends the memories that name you but are filed as someone else's to
+  **Needs review**.
+- With an **admin** key (or auth off), how the daemon was started: the command line,
+  the config file (from `--config` or `RECUERDOS_AI_CONFIG`, and whether it exists),
+  the `RECUERDOS_AI_*` overrides by name, and the settings in effect — the same report
+  as `recuerdos-ai config`. Secrets are never shown: an API key appears as the
+  variable that holds it and whether it is set.
+
+The list's **Kind** filter has **Personal information** too: the facts about you,
+apart from other facts.
 
 ## Signing in
 

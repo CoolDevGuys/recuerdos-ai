@@ -35,7 +35,8 @@ pub struct SaveParams {
     /// from now with no conversation around it. Write the subject out ("The
     /// user prefers…", "Quill's API…"), one fact per memory, and never a
     /// secret: store how to reach something (host, user, which key file), not
-    /// the password or key itself.
+    /// the password or key itself. "The user" always means the person whose
+    /// memory this is (the profile says their name); write them that way.
     pub content: String,
     /// What sort of statement it is. Ask yourself:
     /// preference — what the user picks when free to choose (only ever about
@@ -43,7 +44,9 @@ pub struct SaveParams {
     /// rule — a hard line never to cross;
     /// convention — how one project agreed to do things (target "project");
     /// decision — a choice made at a point in time, for a reason;
-    /// fact — a durable truth about something or someone;
+    /// fact — a durable truth about something or someone (about the user
+    /// themselves, "The user is a backend engineer", it is target "me": their
+    /// personal information);
     /// experience — something that happened;
     /// learning — the lesson drawn from it;
     /// procedure — steps to follow again;
@@ -140,7 +143,8 @@ pub struct ProjectMergeParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AppliesToParams {
     /// me — who the user is and how they like things, everywhere ("my", "I
-    /// always", "personally", "in every project").
+    /// always", "personally", "in every project"), including facts about
+    /// them: their skills, work, background, where they live.
     /// project — true of one project ("here", "this repo", "we", anything read
     /// from a project's files).
     /// general — the user's world outside any project: machines, files,

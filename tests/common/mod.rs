@@ -280,10 +280,21 @@ pub fn structured(mut body: serde_json::Value) -> serde_json::Value {
         }
     }
     object.remove("confidence");
+    // A sentence about the user is theirs: filed as general, the daemon
+    // refuses it as `about_the_user` (R13), as an agent would learn.
+    let about_the_user = object
+        .get("content")
+        .and_then(|content| content.as_str())
+        .map(|content| {
+            let content = content.to_lowercase();
+            content.starts_with("user ") || content.starts_with("the user ")
+        })
+        .unwrap_or(false);
+    let target = if about_the_user { "me" } else { "general" };
     let defaults = [
         ("kind", serde_json::json!("fact")),
         ("topic", serde_json::json!("coding")),
-        ("applies_to", serde_json::json!({"target": "general"})),
+        ("applies_to", serde_json::json!({"target": target})),
         ("origin", serde_json::json!("user_said")),
     ];
     for (field, value) in defaults {

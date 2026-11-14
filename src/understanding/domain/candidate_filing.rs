@@ -13,7 +13,9 @@
 //!   for review, since a job cannot confirm a new project (R3);
 //! - text tied to one project is filed under it when it is known (R7);
 //! - a kind its target does not allow is moved to one that fits, and marked
-//!   (R2). A project's "preference" is its convention.
+//!   (R2). A project's "preference" is its convention;
+//! - a memory whose subject is the user ("The user is…", or one of their
+//!   names) is filed as theirs, `me`, not as `general` (R13).
 //!
 //! "Marked" is `needs_review`: the web UI's review queue lists it, and the
 //! user's edit clears it.
@@ -24,6 +26,7 @@ use crate::memories::domain::content_checks::{project_phrase, secret_in};
 use crate::memories::domain::kind::Kind;
 use crate::memories::domain::legacy_structure::legacy_structure;
 use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
+use crate::memories::domain::self_names::{SelfNames, self_subject};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Filing {
@@ -34,7 +37,11 @@ pub enum Filing {
     Drop(String),
 }
 
-pub fn file_candidate(candidate: &Candidate, project: Option<&ProjectRef>) -> Filing {
+pub fn file_candidate(
+    candidate: &Candidate,
+    project: Option<&ProjectRef>,
+    names: &SelfNames,
+) -> Filing {
     if let Some(found) = secret_in(&candidate.content) {
         return Filing::Drop(format!("it looks like it contains {found}"));
     }
@@ -71,6 +78,15 @@ pub fn file_candidate(candidate: &Candidate, project: Option<&ProjectRef>) -> Fi
         } else {
             review = true;
         }
+    }
+
+    // R13: a memory whose subject is the user is about them, however the
+    // model filed it: "The user is an expert in PHP", or one of their names.
+    if target == Target::General
+        && kind.allows(Target::Me)
+        && self_subject(&candidate.content, names).is_some()
+    {
+        target = Target::Me;
     }
 
     // R3: no project to file it under.
@@ -130,6 +146,10 @@ mod tests {
     use crate::shared::ids::ProjectId;
     use crate::understanding::domain::candidate::Placement;
 
+    fn file(candidate: &Candidate, project: Option<&ProjectRef>) -> Filing {
+        file_candidate(candidate, project, &SelfNames::default())
+    }
+
     fn quill() -> ProjectRef {
         ProjectRef {
             id: ProjectId::new(),
@@ -168,7 +188,7 @@ mod tests {
 
     #[test]
     fn what_the_user_said_about_themselves_is_theirs() {
-        let structure = stored(file_candidate(
+        let structure = stored(file(
             &candidate(
                 "The user prefers mocks in unit tests",
                 placed(Kind::Preference, Target::Me, false),
@@ -183,7 +203,7 @@ mod tests {
 
     #[test]
     fn an_inference_about_the_user_is_held_back_as_a_suggestion() {
-        let filing = file_candidate(
+        let filing = file(
             &candidate(
                 "The user prefers small pull requests",
                 placed(Kind::Preference, Target::Me, true),
@@ -196,7 +216,7 @@ mod tests {
     #[test]
     fn a_projects_preference_is_its_convention() {
         let project = quill();
-        let structure = stored(file_candidate(
+        let structure = stored(file(
             &candidate(
                 "Use cases are named by intent",
                 placed(Kind::Preference, Target::Project, false),
@@ -211,7 +231,7 @@ mod tests {
 
     #[test]
     fn a_project_memory_without_a_known_project_is_general_and_marked() {
-        let structure = stored(file_candidate(
+        let structure = stored(file(
             &candidate(
                 "Never mock the database",
                 placed(Kind::Rule, Target::Project, false),
@@ -226,7 +246,7 @@ mod tests {
     #[test]
     fn text_tied_to_the_codebase_follows_the_project() {
         let project = quill();
-        let structure = stored(file_candidate(
+        let structure = stored(file(
             &candidate(
                 "The codebase uses Python 3.12",
                 placed(Kind::Fact, Target::Me, false),
@@ -238,10 +258,7 @@ mod tests {
 
     #[test]
     fn a_missing_placement_defaults_away_from_the_user_and_is_marked() {
-        let structure = stored(file_candidate(
-            &candidate("Prefers pnpm", Placement::default()),
-            None,
-        ));
+        let structure = stored(file(&candidate("Prefers pnpm", Placement::default()), None));
 
         assert_eq!(structure.applies_to(), &AppliesTo::General);
         assert!(structure.needs_review());
@@ -249,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_credential_is_dropped() {
-        let filing = file_candidate(
+        let filing = file(
             &candidate(
                 "The router password is hunter2hunter2",
                 placed(Kind::Fact, Target::General, false),
@@ -257,5 +274,56 @@ mod tests {
             None,
         );
         assert!(matches!(filing, Filing::Drop(_)), "{filing:?}");
+    }
+
+    #[test]
+    fn a_fact_about_the_user_filed_as_general_is_theirs() {
+        // What v0.6.0's extraction did with "The user is an expert in PHP…":
+        // a fact about a person, in their world.
+        let structure = stored(file(
+            &candidate(
+                "The user is an expert in PHP and proficient in Python",
+                placed(Kind::Fact, Target::General, false),
+            ),
+            None,
+        ));
+        assert_eq!(structure.applies_to(), &AppliesTo::Me);
+        assert_eq!(structure.kind(), Kind::Fact);
+    }
+
+    #[test]
+    fn a_memory_that_names_the_user_is_theirs_and_one_about_others_is_not() {
+        let names = SelfNames::parse(&["Alejandro Romero".to_string()]).unwrap();
+        let about_them = file_candidate(
+            &candidate(
+                "Alejandro Romero is a Senior Backend Software Engineer in Berlin",
+                placed(Kind::Fact, Target::General, false),
+            ),
+            None,
+            &names,
+        );
+        assert_eq!(stored(about_them).applies_to(), &AppliesTo::Me);
+
+        let about_ana = file_candidate(
+            &candidate(
+                "The user's sister Ana is allergic to nuts",
+                placed(Kind::Fact, Target::General, false),
+            ),
+            None,
+            &names,
+        );
+        assert_eq!(stored(about_ana).applies_to(), &AppliesTo::General);
+    }
+
+    #[test]
+    fn an_inferred_fact_about_the_user_is_still_theirs_to_confirm() {
+        let filing = file(
+            &candidate(
+                "The user works mostly at night",
+                placed(Kind::Fact, Target::General, true),
+            ),
+            None,
+        );
+        assert_eq!(filing, Filing::Suggest);
     }
 }

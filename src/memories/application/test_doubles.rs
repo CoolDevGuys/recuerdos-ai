@@ -194,6 +194,7 @@ impl Fixture {
             Arc::new(self.recaller()),
             self.project_registry(),
             self.topic_catalog(),
+            self.self_names(),
             fixed_clock(),
         )
     }
@@ -274,6 +275,15 @@ impl Fixture {
     ) -> Arc<dyn crate::memories::domain::project_registry::ProjectRegistry> {
         Arc::new(
             crate::memories::infrastructure::sqlite_project_registry::SqliteProjectRegistry::new(
+                Arc::clone(&self.database),
+            ),
+        )
+    }
+
+    /// The real SQLite store of the user's names over the fixture's database.
+    pub fn self_names(&self) -> Arc<dyn crate::memories::domain::self_names::SelfNameStore> {
+        Arc::new(
+            crate::memories::infrastructure::sqlite_self_name_store::SqliteSelfNameStore::new(
                 Arc::clone(&self.database),
             ),
         )

@@ -63,7 +63,7 @@ class RejectedError(RecuerdosError):
 
     ``code`` says which: ``missing_field``, ``invalid_value``,
     ``kind_target_mismatch``, ``unknown_project``, ``no_project``,
-    ``needs_confirmation``, ``scope_contradiction``, ``secret``,
+    ``needs_confirmation``, ``scope_contradiction``, ``about_the_user``, ``secret``,
     ``unknown_topic`` or ``conflict``. The message says how to fix it — often,
     by asking the user first.
 

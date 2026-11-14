@@ -9,6 +9,7 @@ pub mod sqlite_graph_backfill_state;
 pub mod sqlite_memory_repository;
 pub mod sqlite_project_registry;
 pub mod sqlite_reindexer;
+pub mod sqlite_self_name_store;
 pub mod sqlite_topic_catalog;
 pub mod sqlite_vector_index;
 pub mod stopwords;

@@ -6,7 +6,9 @@ import type {
   CategoryChange,
   CategoryUpdate,
   ConflictingMemory,
+  About,
   Identity,
+  SelfNames,
   IngestOutcome,
   IngestRequest,
   IngestResult,
@@ -35,6 +37,12 @@ import type {
  */
 export interface ApiClient {
   ping(): Promise<Identity>;
+  /** The daemon's version and, for an admin, its configuration. */
+  about(): Promise<About>;
+  /** The names "the user" goes by. */
+  selfNames(): Promise<SelfNames>;
+  /** Replaces them; memories they reveal as the user's go to review. */
+  setSelfNames(names: string[]): Promise<SelfNames>;
   listMemories(): Promise<Memory[]>;
   getMemory(id: string): Promise<Memory>;
   listCategories(): Promise<Category[]>;
@@ -108,7 +116,7 @@ const OUTCOMES: readonly IngestOutcome[] = ["stored", "nothing_durable", "alread
 const CLIENT_NAME = "web-ui";
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
   headers?: Record<string, string>;
 }
@@ -129,6 +137,18 @@ export class HttpApiClient implements ApiClient {
 
   async ping(): Promise<Identity> {
     return parseIdentity(await this.request("/v1/ping"));
+  }
+
+  async about(): Promise<About> {
+    return parseAbout(await this.request("/v1/about"));
+  }
+
+  async selfNames(): Promise<SelfNames> {
+    return parseSelfNames(await this.request("/v1/me"));
+  }
+
+  async setSelfNames(names: string[]): Promise<SelfNames> {
+    return parseSelfNames(await this.request("/v1/me", { method: "PUT", body: { names } }));
   }
 
   async listMemories(): Promise<Memory[]> {
@@ -365,6 +385,52 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function malformed(what: string): ApiError {
   return new ApiError(0, "malformed_response", `The server sent an unexpected ${what}.`);
+}
+
+const strings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+export function parseSelfNames(body: unknown): SelfNames {
+  if (!isObject(body) || !Array.isArray(body.names)) throw malformed("names");
+  return {
+    names: strings(body.names),
+    sentence: typeof body.sentence === "string" ? body.sentence : null,
+    ...(typeof body.flagged === "number" && { flagged: body.flagged }),
+  };
+}
+
+export function parseAbout(body: unknown): About {
+  if (!isObject(body) || typeof body.version !== "string" || typeof body.user !== "string") throw malformed("about");
+  const daemon = isObject(body.daemon) ? body.daemon : null;
+  const file = daemon !== null && isObject(daemon.config_file) ? daemon.config_file : {};
+  return {
+    version: body.version,
+    git_sha: typeof body.git_sha === "string" ? body.git_sha : "",
+    started_at: typeof body.started_at === "string" ? body.started_at : "",
+    user: body.user,
+    scopes: strings(body.scopes).filter((s): s is Scope => SCOPES.includes(s as Scope)),
+    auth_mode: body.auth_mode === "none" ? "none" : "api-key",
+    understanding: body.understanding === true,
+    daemon:
+      daemon === null
+        ? null
+        : {
+            command: strings(daemon.command),
+            config_file: {
+              path: typeof file.path === "string" ? file.path : null,
+              from: file.from === "flag" || file.from === "env" ? file.from : "none",
+              exists: file.exists === true,
+            },
+            overrides: strings(daemon.overrides),
+            settings: (Array.isArray(daemon.settings) ? daemon.settings : []).filter(isObject).map((section) => ({
+              name: typeof section.name === "string" ? section.name : "",
+              settings: (Array.isArray(section.settings) ? section.settings : []).filter(isObject).map((setting) => ({
+                key: typeof setting.key === "string" ? setting.key : "",
+                value: typeof setting.value === "string" ? setting.value : String(setting.value),
+              })),
+            })),
+          },
+  };
 }
 
 export function parseIdentity(body: unknown): Identity {

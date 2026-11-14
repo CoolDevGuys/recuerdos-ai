@@ -34,6 +34,7 @@ use crate::memories::domain::project_registry::{
     ProjectRecord, ProjectRegistry, is_remote, normalize_project_name, remote_parts,
 };
 use crate::memories::domain::recall_query::{MAX_QUERY_LEN, RecallQuery};
+use crate::memories::domain::self_names::{SelfNameStore, SelfSubject, self_subject};
 use crate::memories::domain::topic::Topic;
 use crate::memories::domain::topic_catalog::TopicCatalog;
 use crate::shared::blocking::blocking;
@@ -232,6 +233,8 @@ pub struct StructuredMemorySaver {
     recaller: Arc<MemoryRecaller>,
     projects: Arc<dyn ProjectRegistry>,
     topics: Arc<dyn TopicCatalog>,
+    /// Who "the user" is, for R13.
+    self_names: Arc<dyn SelfNameStore>,
     clock: Arc<dyn Clock>,
     /// The model that judges contradictions, set once the understanding
     /// context is wired (it owns the model). Unset means no model: the
@@ -285,6 +288,7 @@ impl StructuredMemorySaver {
         recaller: Arc<MemoryRecaller>,
         projects: Arc<dyn ProjectRegistry>,
         topics: Arc<dyn TopicCatalog>,
+        self_names: Arc<dyn SelfNameStore>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
@@ -293,6 +297,7 @@ impl StructuredMemorySaver {
             recaller,
             projects,
             topics,
+            self_names,
             clock,
             judge: OnceLock::new(),
         }
@@ -448,6 +453,18 @@ impl StructuredMemorySaver {
         // R7, the phrase list: the text must not tie itself to one project
         // while claiming to hold everywhere.
         refuse_project_phrases(&content, target)?;
+
+        // R13: a memory whose subject is the user is about them, not about
+        // someone in their world.
+        if target == Target::General && kind.allows(Target::Me) {
+            let names = self.self_names.get(context)?;
+            if let Some(subject) = self_subject(&content, &names) {
+                return Err(rejected(
+                    "about_the_user",
+                    about_the_user_message(&subject, origin),
+                ));
+            }
+        }
 
         // R10, R12: plans end on a date; goals end when the user says so.
         self.check_valid_until(kind, save.valid_until)?;
@@ -1263,6 +1280,25 @@ pub(crate) fn refuse_secrets(content: &str) -> Result<()> {
     }
 }
 
+/// R13's refusal: what the memory is, and how to save it.
+fn about_the_user_message(subject: &SelfSubject, origin: Origin) -> String {
+    let who = match subject {
+        SelfSubject::TheUser => "its subject is the user".to_string(),
+        SelfSubject::Named(name) => format!("its subject, {name}, is the user"),
+    };
+    let then = if origin == Origin::Inferred {
+        "It was inferred, so first ask the user whether it is true of them, then save it \
+         with applies_to.target \"me\" and origin \"user_confirmed\"."
+    } else {
+        "Save it again with applies_to.target \"me\" (as kind \"fact\" if it is personal \
+         information rather than a preference)."
+    };
+    format!(
+        "This is about the user ({who}), so it applies to them, not to \"general\". {then} \
+         If it is really about someone else, make that person the subject."
+    )
+}
+
 /// R7, the phrase list: text bound to one codebase cannot be filed as the
 /// user's or as general.
 pub(crate) fn refuse_project_phrases(content: &str, target: Target) -> Result<()> {
@@ -1381,6 +1417,7 @@ mod tests {
     use super::*;
     use crate::memories::application::test_doubles::Fixture;
     use crate::memories::domain::memory_repository::MemoryRepository;
+    use crate::memories::domain::self_names::SelfNames;
 
     struct Harness {
         fixture: Fixture,
@@ -1397,6 +1434,7 @@ mod tests {
             Arc::new(fixture.recaller()),
             Arc::clone(&projects),
             fixture.topic_catalog(),
+            fixture.self_names(),
             crate::memories::application::test_doubles::fixed_clock(),
         );
         Harness {
@@ -2425,5 +2463,68 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(result, SaveResult::Saved(_)));
+    }
+
+    #[test]
+    fn r13_a_fact_about_the_user_filed_as_general_is_refused_and_saved_as_theirs() {
+        let harness = harness();
+        let content = "The user is an expert in PHP and also proficient in Python";
+
+        let refused = harness.run(save(content, "fact", "work", Some("general"), "user_said"));
+        let Err(RaError::Rejected { code, message, .. }) = refused else {
+            panic!("expected a refusal, got {refused:?}");
+        };
+        assert_eq!(code, "about_the_user");
+        assert!(message.contains("applies_to.target \"me\""), "{message}");
+
+        let saved = harness
+            .run(save(content, "fact", "work", Some("me"), "user_said"))
+            .unwrap();
+        assert_eq!(saved.memory.structure().applies_to(), &AppliesTo::Me);
+    }
+
+    #[test]
+    fn r13_a_memory_that_names_the_user_is_theirs_once_their_names_are_known() {
+        let harness = harness();
+        let content = "Alejandro Romero is a Senior Backend Software Engineer in Berlin";
+        harness.stored(save(content, "fact", "work", Some("general"), "user_said"));
+
+        harness
+            .fixture
+            .self_names()
+            .set(
+                &harness.fixture.alex,
+                &SelfNames::parse(&["Alejandro Romero".to_string()]).unwrap(),
+            )
+            .unwrap();
+        let refused = harness.run(save(
+            "Alejandro Romero speaks Spanish and English",
+            "fact",
+            "people",
+            Some("general"),
+            "user_said",
+        ));
+        let Err(RaError::Rejected { code, message, .. }) = refused else {
+            panic!("expected a refusal, got {refused:?}");
+        };
+        assert_eq!(code, "about_the_user");
+        assert!(
+            message.contains("Alejandro Romero, is the user"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn r13_someone_in_the_users_world_stays_general() {
+        let harness = harness();
+        harness
+            .run(save(
+                "The user's sister Ana is allergic to nuts",
+                "fact",
+                "family",
+                Some("general"),
+                "user_said",
+            ))
+            .unwrap();
     }
 }

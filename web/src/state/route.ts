@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 /** The views, as URL paths under the mount, so a reload or a shared link lands on the same one. */
-export type View = "list" | "review" | "map" | "projects" | "topics" | "categories";
+export type View = "list" | "review" | "map" | "projects" | "topics" | "categories" | "about";
 
 const MOUNT = "/ui";
 
@@ -12,6 +12,7 @@ export const VIEW_PATHS: Record<View, string> = {
   projects: `${MOUNT}/projects`,
   topics: `${MOUNT}/topics`,
   categories: `${MOUNT}/categories`,
+  about: `${MOUNT}/about`,
 };
 
 function viewOf(pathname: string): View {
@@ -21,6 +22,7 @@ function viewOf(pathname: string): View {
   if (path.endsWith("/projects")) return "projects";
   if (path.endsWith("/topics")) return "topics";
   if (path.endsWith("/categories")) return "categories";
+  if (path.endsWith("/about")) return "about";
   return "list";
 }
 

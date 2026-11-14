@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from "react";
 import type { ApiClient } from "./api/client";
 import type { Memory } from "./api/types";
+import { AboutView } from "./components/AboutView";
 import { AddMemory, type Added } from "./components/AddMemory";
 import { BulkEditor } from "./components/BulkEditor";
 import { CategoriesView } from "./components/CategoriesView";
@@ -259,6 +260,7 @@ function Memories({
         />
       )}
       {view === "categories" && <CategoriesView client={client} user={user} access={access} actions={actions} />}
+      {view === "about" && <AboutView client={client} user={user} canWrite={access.canWrite} />}
       {open.kind === "edit" && (
         <Panel title={access.canWrite ? "Edit memory" : "Memory"} onClose={close}>
           <MemoryEditor
@@ -321,6 +323,7 @@ function ViewTabs({ view, onChange, reviewCount }: { view: View; onChange: (view
       {tab("projects", "Projects")}
       {tab("topics", "Topics")}
       {tab("categories", "Categories")}
+      {tab("about", "About")}
     </nav>
   );
 }

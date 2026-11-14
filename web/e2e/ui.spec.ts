@@ -156,6 +156,34 @@ test("files a memory from the Needs review queue", async ({ page, request }) => 
   expect(memory).toMatchObject({ kind: "reference", topic: "tech", needs_review: false });
 });
 
+test("says what the daemon is, learns your names and files a memory about you as yours", async ({ page, request }) => {
+  // As v0.6.0's upgrade left an old "fact about a person": general.
+  const name = `Zed${RUN} Quinn`;
+  const content = `${name} is a backend engineer in Berlin`;
+  const saved = await request.post("/v1/memories", {
+    headers: { Authorization: `Bearer ${KEY}` },
+    data: { content, category: "fact.person", wait: true },
+  });
+  expect(saved.status()).toBe(201);
+
+  await signIn(page, "/ui/about");
+  await expect(page.getByRole("heading", { name: /^Recuerdos AI \d+\.\d+\.\d+/ })).toBeVisible();
+  await page.getByLabel("Your name").fill(name);
+  await page.getByRole("button", { name: "Save names" }).click();
+  await expect(page.getByText(/1 memory about you was filed as someone else's/)).toBeVisible();
+
+  await page.getByRole("link", { name: /Needs review/ }).click();
+  const row = page.getByRole("listitem").filter({ hasText: content });
+  await row.getByRole("button", { name: "It’s about me" }).click();
+  await expect(page.getByText("Filed as your personal information.")).toBeVisible();
+
+  const id = (await saved.json()).memory_ids[0];
+  const memory = await (await request.get(`/v1/memories/${id}`, { headers: { Authorization: `Bearer ${KEY}` } })).json();
+  expect(memory).toMatchObject({ kind: "fact", applies_to: { target: "me" }, needs_review: false });
+  const profile = await (await request.get("/v1/profile", { headers: { Authorization: `Bearer ${KEY}` } })).text();
+  expect(profile).toContain(`The user is ${name}.`);
+});
+
 test("renames a project, and its memories follow", async ({ page, request }) => {
   const project = `${RUN}-quill`;
   const saved = await request.post("/v1/memories:direct", {

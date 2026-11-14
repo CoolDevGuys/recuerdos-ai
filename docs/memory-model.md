@@ -94,7 +94,7 @@ An unknown topic is refused with the list of known ones, so a typo cannot create
 
 | `target` | Means | Example |
 |---|---|---|
-| `me` | Who you are and how you like things, everywhere | "Prefers mocks in unit tests" |
+| `me` | Who you are and how you like things, everywhere | "Prefers mocks in unit tests", "Is an expert in PHP" |
 | `project` | True of one project | "Quill forbids mocking the database" |
 | `general` | True of your world, not tied to a project | "The NAS backups are in `/mnt/tank/backups`" |
 
@@ -102,6 +102,30 @@ How an agent chooses: "my", "I always", "personally", "in every project" → `me
 "here", "this repo", "we", or a line read from a project's files → `project`.
 Machines, files, services, places and appointments outside a project → `general`.
 **When it is unclear, the agent should ask you.**
+
+### Facts about you: your personal information
+
+A fact whose subject is you ("The user is an expert in PHP", "The user works at Kau in
+Berlin") is `kind: "fact"` with `target: "me"`. The web UI and the profile call these
+your **personal information**: their own group in the list, and their own heading
+under "About you". They are not preferences: nothing about them is a choice an agent
+should follow, but every agent should know them.
+
+"The user" always means the person whose memory this is, whichever agent wrote it.
+Some agents use your name instead, so the daemon can be told your names (the web UI's
+**About** page, or `PUT /v1/me`). With them:
+
+- a save that files a memory about you as `general` is refused as `about_the_user`,
+  and the message says to file it as `me`. "The user's sister Ana is a nurse" is
+  about Ana, and stays `general`;
+- the pipeline files such a memory as yours by itself;
+- the profile opens with who "the user" is, so an agent reading a memory that names
+  you knows it is about the same person;
+- the memories you already have that name you but are filed as `general` are sent to
+  **Needs review**, where **It's about me** files each as yours.
+
+The check is deliberately narrow: the memory must begin with you as its subject ("The
+user is…", "Alejandro Romero works…"). One it misses is saved as the agent sent it.
 
 - **Left out,** it defaults to the current project when one is known, otherwise
   `general`, and **never** `me`: a wrong `me` would show one project's rule among your
@@ -273,7 +297,9 @@ refused it files the memory somewhere safe instead:
 - a credential is dropped;
 - a project's rule with no known project is filed as `general`, and one that
   names a kind its target does not allow is moved to one that fits. Both are
-  marked `needs_review`.
+  marked `needs_review`;
+- a memory whose subject is you ("The user is…", or one of your names) that the
+  model filed as `general` is filed as yours.
 
 Send the `X-Recuerdos-Project` header to say which project the text is about. The
 local MCP server does this for you. Only a project you already have is used.
@@ -292,6 +318,7 @@ to change. Usually it means asking you.
 | `kind_target_mismatch` | The kind cannot apply there (a `preference` for a project) | Use the kind the message suggests, or the right target |
 | `needs_confirmation` | An inferred memory about you | Ask, then save with `origin: "user_confirmed"` |
 | `scope_contradiction` | The text ties itself to one project ("the codebase", "este proyecto") but would apply to you or in general | Use `target: "project"`, or reword it if it really holds everywhere |
+| `about_the_user` | Its subject is you ("The user is…", or one of your names) but it would be filed as `general` | Save it with `target: "me"` (a `fact` about you is your personal information); if it is really about someone else, make them the subject |
 | `no_project` | `target: "project"` with no project known | Ask which project, and name it |
 | `unknown_project` | A project the daemon does not know | Ask whether it is new (`new_project: true`) or a known one under another name |
 | `secret` | It looks like it contains a password, token or key | Store how to reach it, not the secret |
@@ -312,3 +339,9 @@ it, or confirm a guess that was right. With a language model, **Suggest** propos
 what each one is, for you to accept or change; nothing is rewritten without your
 click. Over the API it is `POST /v1/memories:bulk` (`set.kind`, `topic`,
 `applies_to`, `reviewed`) and `POST /v1/memories:suggest`.
+
+Old memories filed as "a fact about a person" became facts in your general world,
+**unflagged** — including the ones about you ("The user is an expert in PHP…",
+"Alejandro Romero is a backend engineer…"). Saving your names on the **About** page
+sends every such memory to **Needs review**; **It's about me** files it as your
+personal information.

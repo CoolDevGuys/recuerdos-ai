@@ -742,6 +742,25 @@ impl From<&TopicView> for TopicResponse {
     }
 }
 
+/// `GET /v1/me`: who "the user" is in this store.
+#[derive(Debug, Serialize)]
+pub struct SelfNamesResponse {
+    pub names: Vec<String>,
+    /// How the profile and the extraction prompt say it; null with no names.
+    pub sentence: Option<String>,
+    /// On `PUT`: memories newly sent to review because they are about the
+    /// user but filed as general.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flagged: Option<usize>,
+}
+
+/// `PUT /v1/me`: the user's names, first the one they go by in full.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetSelfNamesRequest {
+    pub names: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TopicsResponse {
     pub topics: Vec<TopicResponse>,

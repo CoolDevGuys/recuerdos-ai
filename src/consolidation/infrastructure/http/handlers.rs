@@ -80,6 +80,10 @@ pub async fn read_profile(
         .profile_digest_writer
         .execute_in(&context, project.as_ref())
         .await?;
+    // Who "the user" is, whichever path wrote the profile.
+    let memories = state.memories.clone();
+    let names = blocking(move || memories.self_names_curator.get(&context)).await?;
+    let profile = crate::memories::application::profile_assembler::introduce(profile, &names);
 
     let mut headers = HeaderMap::new();
     headers.insert(

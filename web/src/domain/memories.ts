@@ -1,4 +1,5 @@
 import type { Memory } from "../api/types";
+import { kindKeyOf } from "./structureForm";
 
 /**
  * Which memories the list shows. `current` is what recall would still use:
@@ -54,7 +55,7 @@ export function filterMemories(memories: readonly Memory[], filter: MemoryFilter
   return memories.filter((memory) => {
     if (!hasStatus(memory, filter.status, now)) return false;
     if (filter.topic !== null && memory.topic !== filter.topic) return false;
-    if (filter.kind !== null && memory.kind !== filter.kind) return false;
+    if (filter.kind !== null && kindKeyOf(memory) !== filter.kind) return false;
     if (filter.scope !== null && scopeOf(memory) !== filter.scope) return false;
     if (needle === "") return true;
     return (

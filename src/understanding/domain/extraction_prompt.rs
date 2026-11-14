@@ -104,6 +104,8 @@ pub struct SourceHints {
     /// The project the caller is working in, when it has one, so the model
     /// can tell that project's rules from the user's own.
     pub project: Option<String>,
+    /// The user's names, so a memory that names them is filed as theirs.
+    pub self_names: crate::memories::domain::self_names::SelfNames,
 }
 
 pub fn system_prompt(taxonomy: &Taxonomy, lens: Lens) -> String {
@@ -138,6 +140,12 @@ pub fn user_message(lens: Lens, content: &str, hints: &SourceHints) -> String {
             "No project is known for this text: use applies_to \"project\" only for what is \
              plainly about one codebase.\n",
         ),
+    }
+    if let Some(sentence) = hints.self_names.sentence() {
+        message.push_str(&format!(
+            "{sentence} A memory about them, whether it names them or says \"the user\", \
+             applies_to \"me\"; write it as \"The user …\".\n"
+        ));
     }
     if !hints.tags.is_empty() {
         message.push_str(&format!(
@@ -349,9 +357,19 @@ mod tests {
                 category: Some("fact.project".to_string()),
                 tags: vec!["infrastructure".to_string()],
                 project: None,
+                self_names: crate::memories::domain::self_names::SelfNames::parse(&[
+                    "Alejandro Romero".to_string(),
+                    "Alex".to_string(),
+                ])
+                .unwrap(),
             },
         );
 
+        assert!(
+            message
+                .contains("The user is Alejandro Romero (also called Alex). A memory about them"),
+            "{message}"
+        );
         assert!(message.contains("claude-code"));
         assert!(message.contains("infrastructure"));
         assert!(
