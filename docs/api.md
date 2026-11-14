@@ -106,7 +106,7 @@ page. Every key gets the version, build, start time and who it belongs to; an
 
 ```json
 {
-  "version": "0.6.1", "git_sha": "5cbf648db65d", "started_at": "2026-11-14T08:00:00Z",
+  "version": "0.7.0", "git_sha": "f66418ce03e5", "started_at": "2026-11-14T08:00:00Z",
   "user": "ops", "scopes": ["admin"], "auth_mode": "api-key", "understanding": true,
   "daemon": {
     "command": ["serve", "--config", "/etc/recuerdos-ai/recuerdos-ai.toml"],
