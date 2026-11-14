@@ -96,7 +96,9 @@ Every memory also says:
   codebase), `work`, `family`, `people`, `health`, `lifestyle`, `home`,
   `finance`, `travel` or `food`.
 - `applies_to` — `me` for the user themselves, everywhere ("I prefer", "I
-  always", "personally"); `project` for the project the text is about ("in
+  always", "personally"), and for facts about them: their skills, work,
+  background, where they live. "The user" is always the person whose memory
+  this is; write them that way. `project` for the project the text is about ("in
   this repo", "here we", a project's rules file); `general` for the user's
   world outside any project (a server, a file location, an appointment).
   **This is the field that matters most.** A project's "always use X" is that

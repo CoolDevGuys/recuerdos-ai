@@ -3,6 +3,36 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## Unreleased — an About page, and the store knows who "the user" is
+
+- **About page** (`/ui/about`, `GET /v1/about`): the daemon's version, build and start
+  time, and the key you signed in with. An admin key (or auth off) also sees how it was
+  started: the command line, the config file and where it was named (`--config` or
+  `RECUERDOS_AI_CONFIG`, and whether it exists), the `RECUERDOS_AI_*` overrides by name,
+  and the settings in effect. It is the report `recuerdos-ai config` prints, which now
+  comes from the same code. Secrets are never in it.
+- **Who "the user" is** (`GET`/`PUT /v1/me`, the About page's **You**): the names the
+  store's owner goes by. Agents write "The user is…", some write the name; until now a
+  memory naming the user was just a fact about some person.
+  - A save filing a memory whose subject is the user as `general` is refused as
+    **`about_the_user`** (R13), saying to file it as `me`. "The user's sister Ana…"
+    stays `general`.
+  - The pipeline files such a memory as the user's by itself, and the extraction
+    prompt is told the user's names.
+  - The profile opens with `The user is Alejandro Romero (also called Alex).`
+  - Saving the names sends the stored memories they reveal as the user's own, filed
+    as `general`, to **Needs review**, where **It's about me** files each as theirs.
+- **Personal information**: a `fact` about the user (`target: "me"`) is listed as its
+  own group in the web UI's **Kind** filter and under its own heading in the profile.
+  No new kind: it is what a fact about you was always meant to be.
+- The e2e daemon in CI runs without the rate limit, like the SDK test daemon: the
+  suite's bursts are not a person's.
+
+**Upgrading:** migration V13 adds the `self_names` table. Memories saved before
+v0.6.0 as "a fact about a person" became facts in your general world, unflagged,
+including those about you: set your names on the About page to send them to Needs
+review. The MCP tool descriptions now say that a fact about the user is `me`.
+
 ## v0.6.1 — Linux downloads, project-aware HTTP sessions, and a skill for agents
 
 **`v0.6.0` was published without its Linux binaries**, and the Linux requirement is now

@@ -6,6 +6,8 @@
 //! implementation of the same contract without the worker knowing.
 
 use crate::identity::domain::user_context::UserContext;
+use crate::memories::domain::self_names::{SelfNameStore, SelfNames};
+use crate::shared::blocking::blocking;
 use crate::shared::error::Result;
 use crate::understanding::application::candidate_extractor::CandidateExtractor;
 use crate::understanding::application::memory_reconciler::MemoryReconciler;
@@ -22,6 +24,9 @@ pub const DEFAULT_ACTOR: &str = "pipeline";
 pub struct MemoryIngestor {
     extractor: Arc<CandidateExtractor>,
     reconciler: Arc<MemoryReconciler>,
+    /// The user's names, so extraction and filing know a memory that names
+    /// them is about them. Unset: only "the user" is recognised.
+    self_names: Option<Arc<dyn SelfNameStore>>,
 }
 
 impl MemoryIngestor {
@@ -29,7 +34,27 @@ impl MemoryIngestor {
         Self {
             extractor,
             reconciler,
+            self_names: None,
         }
+    }
+
+    pub fn with_self_names(mut self, store: Arc<dyn SelfNameStore>) -> Self {
+        self.self_names = Some(store);
+        self
+    }
+
+    async fn names(&self, context: &UserContext) -> SelfNames {
+        let Some(store) = self.self_names.clone() else {
+            return SelfNames::default();
+        };
+        let context = context.clone();
+        // A failed read costs the name match, never the job.
+        blocking(move || store.get(&context))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read the user's names");
+                SelfNames::default()
+            })
     }
 }
 
@@ -40,11 +65,13 @@ impl IngestPipeline for MemoryIngestor {
         context: &UserContext,
         payload: &IngestPayload,
     ) -> Result<IngestOutcome> {
+        let names = self.names(context).await;
         let hints = SourceHints {
             client: payload.client.clone(),
             category: payload.category.clone(),
             tags: payload.tags.clone(),
             project: payload.project.as_ref().map(|project| project.name.clone()),
+            self_names: names.clone(),
         };
 
         let candidates = self
@@ -62,7 +89,13 @@ impl IngestPipeline for MemoryIngestor {
         let actor = payload.client.as_deref().unwrap_or(DEFAULT_ACTOR);
         let outcome = self
             .reconciler
-            .execute(context, &candidates, payload.project.as_ref(), actor)
+            .execute(
+                context,
+                &candidates,
+                payload.project.as_ref(),
+                &names,
+                actor,
+            )
             .await?;
 
         tracing::info!(

@@ -177,23 +177,26 @@ impl Understanding {
 
         let pipeline: Arc<dyn IngestPipeline> = match &model {
             Some(model) => Arc::new(IntentFirstIngestor::new(
-                Arc::new(MemoryIngestor::new(
-                    Arc::new(CandidateExtractor::new(
-                        Arc::clone(model),
-                        Arc::clone(&taxonomy),
-                        config.graph.extract_relations(),
-                    )),
-                    Arc::new(MemoryReconciler::new(
-                        Arc::clone(&memories.recaller),
-                        Arc::clone(&memories.saver),
-                        Arc::clone(&memories.forgetter),
-                        Arc::clone(&memories.repository),
-                        Arc::clone(&memories.projects),
-                        Arc::clone(model),
-                        memories.graph.clone(),
-                        config.understanding.reconcile,
-                    )),
-                )),
+                Arc::new(
+                    MemoryIngestor::new(
+                        Arc::new(CandidateExtractor::new(
+                            Arc::clone(model),
+                            Arc::clone(&taxonomy),
+                            config.graph.extract_relations(),
+                        )),
+                        Arc::new(MemoryReconciler::new(
+                            Arc::clone(&memories.recaller),
+                            Arc::clone(&memories.saver),
+                            Arc::clone(&memories.forgetter),
+                            Arc::clone(&memories.repository),
+                            Arc::clone(&memories.projects),
+                            Arc::clone(model),
+                            memories.graph.clone(),
+                            config.understanding.reconcile,
+                        )),
+                    )
+                    .with_self_names(Arc::clone(&memories.self_names)),
+                ),
                 verbatim,
             )),
             None => verbatim,
@@ -402,7 +405,13 @@ mod tests {
                 .expect("extraction");
             let filings: Vec<Filing> = candidates
                 .iter()
-                .map(|candidate| file_candidate(candidate, project.as_ref()))
+                .map(|candidate| {
+                    file_candidate(
+                        candidate,
+                        project.as_ref(),
+                        &crate::memories::domain::self_names::SelfNames::default(),
+                    )
+                })
                 .collect();
 
             let ok = if case.suggest {

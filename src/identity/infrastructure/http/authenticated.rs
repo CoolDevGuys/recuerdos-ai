@@ -243,6 +243,11 @@ mod tests {
             mcp_allowed_hosts: Vec::new(),
             ingest_timeout: std::time::Duration::from_secs(180),
             ui: false,
+            about: Arc::new(crate::bootstrap::about::About::capture(
+                &crate::bootstrap::config::AppConfig::default(),
+                None,
+                chrono::Utc::now(),
+            )),
         };
 
         let router = Router::new()

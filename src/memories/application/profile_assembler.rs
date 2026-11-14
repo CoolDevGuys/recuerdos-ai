@@ -28,6 +28,7 @@ use crate::memories::domain::applies_to::{AppliesTo, ProjectRef};
 use crate::memories::domain::kind::Kind;
 use crate::memories::domain::memory::Memory;
 use crate::memories::domain::memory_repository::MemoryRepository;
+use crate::memories::domain::self_names::SelfNames;
 use crate::shared::clock::Clock;
 use crate::shared::error::Result;
 use chrono::{DateTime, Utc};
@@ -239,7 +240,7 @@ fn render(
             if !wrote_heading {
                 section.push_str(&heading);
             }
-            section.push_str(&format!("\n### {}\n", kind_heading(kind)));
+            section.push_str(&format!("\n### {}\n", kind_heading(*scope, kind)));
             for memory in group.iter().take(shown) {
                 section.push_str(&format!("- {}\n", one_line(memory)));
             }
@@ -266,7 +267,12 @@ fn render(
     output
 }
 
-fn kind_heading(kind: Kind) -> &'static str {
+/// A kind's heading inside a scope. A fact about the user is what they call
+/// their personal information: who they are, their skills, their work.
+fn kind_heading(scope: ProfileScope, kind: Kind) -> &'static str {
+    if scope == ProfileScope::Me && kind == Kind::Fact {
+        return "Personal information";
+    }
     match kind {
         Kind::Preference => "Preferences",
         Kind::Rule => "Rules",
@@ -279,6 +285,19 @@ fn kind_heading(kind: Kind) -> &'static str {
         Kind::Reference => "References",
         Kind::Goal => "Goals",
         Kind::Plan => "Plans",
+    }
+}
+
+/// Says who "the user" is right under the profile's title, so an agent reading
+/// "The user prefers…" and a memory naming them knows both are one person.
+/// Unchanged with no names.
+pub fn introduce(profile: String, names: &SelfNames) -> String {
+    let Some(sentence) = names.sentence() else {
+        return profile;
+    };
+    match profile.split_once('\n') {
+        Some((title, rest)) => format!("{title}\n\n{sentence}\n{rest}"),
+        None => format!("{profile}\n\n{sentence}\n"),
     }
 }
 
@@ -638,5 +657,57 @@ mod tests {
         assert!(profile.contains("### Goals"), "{profile}");
         assert!(profile.contains("half marathon"), "{profile}");
         assert!(!profile.contains("cello"), "{profile}");
+    }
+
+    #[test]
+    fn facts_about_the_user_are_their_personal_information() {
+        use crate::memories::domain::applies_to::AppliesTo;
+        use crate::memories::domain::memory_structure::{MemoryStructure, Origin};
+        use crate::memories::domain::topic::Topic;
+        let fixture = Fixture::new();
+        let memory = fixture.save(&fixture.alex, "The user is an expert in PHP");
+        let structure = MemoryStructure::new(
+            Kind::Fact,
+            Topic::Work,
+            AppliesTo::Me,
+            Origin::UserSaid,
+            None,
+        )
+        .unwrap();
+        fixture
+            .memories
+            .update(&fixture.alex, &memory.with_structure(structure), "test")
+            .unwrap();
+
+        let profile = assembler(&fixture).execute(&fixture.alex).unwrap();
+
+        let about_you = profile.find("## About you (everywhere)").unwrap();
+        let personal = profile.find("### Personal information").unwrap();
+        assert!(about_you < personal, "{profile}");
+        assert!(
+            profile.contains("- The user is an expert in PHP"),
+            "{profile}"
+        );
+    }
+
+    #[test]
+    fn the_profile_says_who_the_user_is_under_its_title() {
+        let names =
+            SelfNames::parse(&["Alejandro Romero".to_string(), "Alex".to_string()]).unwrap();
+        let profile = introduce(
+            "# Memory profile: alex (updated 2026-11-14)\n\n## About you (everywhere)\n"
+                .to_string(),
+            &names,
+        );
+        assert_eq!(
+            profile,
+            "# Memory profile: alex (updated 2026-11-14)\n\n\
+             The user is Alejandro Romero (also called Alex).\n\n\
+             ## About you (everywhere)\n"
+        );
+        assert_eq!(
+            introduce("# t\n".to_string(), &SelfNames::default()),
+            "# t\n"
+        );
     }
 }

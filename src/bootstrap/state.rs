@@ -1,5 +1,6 @@
 //! Shared axum state: what every handler and extractor can reach.
 
+use crate::bootstrap::about::About;
 use crate::bootstrap::config::{AppConfig, RateLimitConfig};
 use crate::bootstrap::consolidation_wiring::Consolidation;
 use crate::bootstrap::memories_wiring::Memories;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub ingest_timeout: std::time::Duration,
     /// Whether to serve the web UI at `/ui` (`[ui].enabled`).
     pub ui: bool,
+    /// What `GET /v1/about` reports, captured when the daemon started.
+    pub about: Arc<About>,
 }
 
 #[cfg(test)]

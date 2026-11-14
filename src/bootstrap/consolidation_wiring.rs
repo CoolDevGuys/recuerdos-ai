@@ -145,23 +145,26 @@ fn session_pipeline(
     understanding: &Understanding,
 ) -> Arc<dyn IngestPipeline> {
     match &understanding.model {
-        Some(model) => Arc::new(MemoryIngestor::new(
-            Arc::new(CandidateExtractor::for_sessions(
-                Arc::clone(model),
-                Arc::clone(&understanding.taxonomy),
-                config.graph.extract_relations(),
-            )),
-            Arc::new(MemoryReconciler::new(
-                Arc::clone(&memories.recaller),
-                Arc::clone(&memories.saver),
-                Arc::clone(&memories.forgetter),
-                Arc::clone(&memories.repository),
-                Arc::clone(&memories.projects),
-                Arc::clone(model),
-                memories.graph.clone(),
-                config.understanding.reconcile,
-            )),
-        )),
+        Some(model) => Arc::new(
+            MemoryIngestor::new(
+                Arc::new(CandidateExtractor::for_sessions(
+                    Arc::clone(model),
+                    Arc::clone(&understanding.taxonomy),
+                    config.graph.extract_relations(),
+                )),
+                Arc::new(MemoryReconciler::new(
+                    Arc::clone(&memories.recaller),
+                    Arc::clone(&memories.saver),
+                    Arc::clone(&memories.forgetter),
+                    Arc::clone(&memories.repository),
+                    Arc::clone(&memories.projects),
+                    Arc::clone(model),
+                    memories.graph.clone(),
+                    config.understanding.reconcile,
+                )),
+            )
+            .with_self_names(Arc::clone(&memories.self_names)),
+        ),
         None => Arc::new(VerbatimIngestor::new(
             Arc::clone(&memories.saver),
             Arc::clone(&understanding.taxonomy),

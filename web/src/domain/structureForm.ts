@@ -21,7 +21,7 @@ export const KINDS: readonly KindOption[] = [
   { id: "rule", label: "Rule", hint: "A hard line, never to be crossed.", targets: ANY },
   { id: "convention", label: "Convention", hint: "How one project agreed to do things.", targets: ["project"] },
   { id: "decision", label: "Decision", hint: "A choice made at a point in time, for a reason.", targets: ["project", "general"] },
-  { id: "fact", label: "Fact", hint: "A durable truth about something or someone.", targets: ANY },
+  { id: "fact", label: "Fact", hint: "A durable truth about something or someone. About you, it is your personal information.", targets: ANY },
   { id: "experience", label: "Experience", hint: "Something that happened.", targets: ANY },
   { id: "learning", label: "Learning", hint: "The lesson drawn from something that happened.", targets: ANY },
   { id: "procedure", label: "Procedure", hint: "Steps to follow again.", targets: ANY },
@@ -154,8 +154,25 @@ export function structurePatchOf(memory: Memory, values: StructureValues): Struc
 }
 
 /** A memory's structure in words: "Convention · Coding · quill". */
+/**
+ * A fact about the user is their personal information (who they are, their
+ * skills, their work): its own group in the list, though the daemon stores it
+ * as kind `fact` with target `me`.
+ */
+export const PERSONAL_INFORMATION = "personal";
+
+/** The group a memory is listed under: its kind, or personal information. */
+export function kindKeyOf(memory: Pick<Memory, "kind" | "applies_to">): string {
+  return memory.kind === "fact" && memory.applies_to.target === "me" ? PERSONAL_INFORMATION : memory.kind;
+}
+
+/** A group's label: "Personal information", or the kind's. */
+export function kindKeyLabel(key: string): string {
+  return key === PERSONAL_INFORMATION ? "Personal information" : (kindOf(key)?.label ?? key);
+}
+
 export function describeStructure(memory: Memory, topicLabel: (id: string) => string = topicLabelOf): string {
-  const kind = kindOf(memory.kind)?.label ?? memory.kind;
+  const kind = kindKeyLabel(kindKeyOf(memory));
   const scope =
     memory.applies_to.target === "project"
       ? (memory.applies_to.project_name ?? "a project")

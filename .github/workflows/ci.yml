@@ -379,7 +379,10 @@ jobs:
       - name: Web UI end to end
         run: |
           set -euo pipefail
-          docker run -d --name e2e -p 7070:7070 recuerdos-ai:ci serve
+          # No rate limit: the suite signs in and loads every tab, which is a
+          # burst no person makes; a 429 would fail a test, not find a bug.
+          docker run -d --name e2e -p 7070:7070 \
+            -e RECUERDOS_AI_RATE_LIMIT__ENABLED=false recuerdos-ai:ci serve
           for _ in $(seq 1 60); do
             curl -fsS http://127.0.0.1:7070/healthz >/dev/null && break
             sleep 0.5

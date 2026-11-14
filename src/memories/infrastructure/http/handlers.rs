@@ -14,8 +14,9 @@ use super::dto::{
     MapResponse, MapSubtopic, MapTopic, MapTopicEdge, MemoryResponse, MergeCategoryRequest,
     MergeProjectRequest, ProjectChangeResponse, ProjectResponse, ProjectsResponse,
     RelabelTopicRequest, RenameProjectRequest, RerankResponse, SaveMemoryRequest,
-    SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse, TopicResponse, TopicsResponse,
-    UpdateCategoryRequest, UpdateMemoryRequest, UpdatedMemoryResponse,
+    SavedMemoryResponse, SearchHit, SearchRequest, SearchResponse, SelfNamesResponse,
+    SetSelfNamesRequest, TopicResponse, TopicsResponse, UpdateCategoryRequest, UpdateMemoryRequest,
+    UpdatedMemoryResponse,
 };
 use crate::bootstrap::state::AppState;
 use crate::identity::domain::user_context::UserContext;
@@ -745,6 +746,42 @@ pub async fn list_topics(
     let views = blocking(move || memories.topic_curator.list(&context)).await?;
     Ok(Json(TopicsResponse {
         topics: views.iter().map(TopicResponse::from).collect(),
+    }))
+}
+
+/// `GET /v1/me`: the names "the user" goes by in this store.
+pub async fn get_self_names(
+    State(state): State<AppState>,
+    ReadAccess(context): ReadAccess,
+) -> Result<Json<SelfNamesResponse>> {
+    let memories = state.memories.clone();
+    let names = blocking(move || memories.self_names_curator.get(&context)).await?;
+    Ok(Json(SelfNamesResponse {
+        names: names.names().to_vec(),
+        sentence: names.sentence(),
+        flagged: None,
+    }))
+}
+
+/// `PUT /v1/me`: replaces the user's names, and sends the memories they show
+/// to be the user's own (filed as general) to the review queue.
+pub async fn set_self_names(
+    State(state): State<AppState>,
+    WriteAccess(context): WriteAccess,
+    Actor(actor): Actor,
+    Json(request): Json<SetSelfNamesRequest>,
+) -> Result<Json<SelfNamesResponse>> {
+    let memories = state.memories.clone();
+    let saved = blocking(move || {
+        memories
+            .self_names_curator
+            .set(&context, &request.names, &actor)
+    })
+    .await?;
+    Ok(Json(SelfNamesResponse {
+        names: saved.names.names().to_vec(),
+        sentence: saved.names.sentence(),
+        flagged: Some(saved.flagged),
     }))
 }
 

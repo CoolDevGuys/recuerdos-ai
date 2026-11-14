@@ -14,6 +14,7 @@ use crate::memories::application::memory_restorer::MemoryRestorer;
 use crate::memories::application::memory_updater::MemoryUpdater;
 use crate::memories::application::profile_assembler::ProfileAssembler;
 use crate::memories::application::project_curator::ProjectCurator;
+use crate::memories::application::self_names_curator::SelfNamesCurator;
 use crate::memories::application::structured_memory_saver::StructuredMemorySaver;
 use crate::memories::application::structured_memory_updater::StructuredMemoryUpdater;
 use crate::memories::application::topic_curator::TopicCurator;
@@ -27,6 +28,7 @@ use crate::memories::domain::recall_ranker::{
     default_similarity_baseline_for,
 };
 use crate::memories::domain::reranker::{RerankMode, Reranker};
+use crate::memories::domain::self_names::SelfNameStore;
 use crate::memories::domain::text_index::TextIndex;
 use crate::memories::domain::topic_catalog::TopicCatalog;
 use crate::memories::domain::vector_index::VectorIndex;
@@ -34,6 +36,7 @@ use crate::memories::infrastructure::sqlite_category_catalog::SqliteCategoryCata
 use crate::memories::infrastructure::sqlite_entity_graph::SqliteEntityGraph;
 use crate::memories::infrastructure::sqlite_memory_repository::SqliteMemoryRepository;
 use crate::memories::infrastructure::sqlite_project_registry::SqliteProjectRegistry;
+use crate::memories::infrastructure::sqlite_self_name_store::SqliteSelfNameStore;
 use crate::memories::infrastructure::sqlite_topic_catalog::SqliteTopicCatalog;
 use crate::memories::infrastructure::sqlite_vector_index::SqliteVectorIndex;
 use crate::memories::infrastructure::tantivy_text_index::TantivyTextIndex;
@@ -72,6 +75,9 @@ pub struct Memories {
     pub topic_curator: Arc<TopicCurator>,
     /// Each user's topics, for the review queue's suggestions.
     pub topics: Arc<dyn TopicCatalog>,
+    /// Who "the user" is in each store: the names they go by (`/v1/me`).
+    pub self_names: Arc<dyn SelfNameStore>,
+    pub self_names_curator: Arc<SelfNamesCurator>,
     pub recaller: Arc<MemoryRecaller>,
     pub finder: Arc<MemoryFinder>,
     pub forgetter: Arc<MemoryForgetter>,
@@ -302,12 +308,15 @@ impl Memories {
             Arc::new(SqliteProjectRegistry::new(Arc::clone(&database)));
         let topics: Arc<dyn TopicCatalog> =
             Arc::new(SqliteTopicCatalog::new(Arc::clone(&database)));
+        let self_names: Arc<dyn SelfNameStore> =
+            Arc::new(SqliteSelfNameStore::new(Arc::clone(&database)));
         let structured_saver = Arc::new(StructuredMemorySaver::new(
             Arc::clone(&saver),
             Arc::clone(&repository),
             Arc::clone(&recaller),
             Arc::clone(&projects),
             Arc::clone(&topics),
+            Arc::clone(&self_names),
             Arc::clone(&clock),
         ));
         let topic_curator = Arc::new(TopicCurator::new(
@@ -342,6 +351,11 @@ impl Memories {
             project_curator,
             topic_curator,
             topics,
+            self_names_curator: Arc::new(SelfNamesCurator::new(
+                Arc::clone(&self_names),
+                Arc::clone(&repository),
+            )),
+            self_names,
             forgetter: Arc::new(MemoryForgetter::new(
                 Arc::clone(&repository),
                 Arc::clone(&vectors),

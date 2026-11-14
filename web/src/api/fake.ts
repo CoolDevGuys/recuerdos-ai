@@ -1,5 +1,7 @@
 import { ApiError, type ApiClient } from "./client";
 import type {
+  About,
+  SelfNames,
   BulkEdit,
   BulkResult,
   Category,
@@ -38,6 +40,8 @@ interface Account {
   /** Built-in topics the user relabelled. */
   topicLabels: Map<string, string>;
   projects: Project[];
+  /** Who "the user" is: `/v1/me`. */
+  names: string[];
 }
 
 const PROJECT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -94,6 +98,16 @@ export class FakeServer {
   mapEdges: MapEdge[] = [];
   /** Above this many memories the whole-store map is categories only, as the daemon's `[ui].map_detail_limit`. */
   mapDetailLimit = Number.POSITIVE_INFINITY;
+  /** What `about` reports about the daemon to an admin key. */
+  daemon: NonNullable<About["daemon"]> = {
+    command: ["serve", "--config", "/etc/recuerdos-ai/recuerdos-ai.toml"],
+    config_file: { path: "/etc/recuerdos-ai/recuerdos-ai.toml", from: "flag", exists: true },
+    overrides: ["RECUERDOS_AI_AUTH__MODE", "RECUERDOS_AI_SERVER__PORT"],
+    settings: [
+      { name: "embeddings", settings: [{ key: "provider", value: "local" }, { key: "model", value: "bge-small-en-v1.5" }] },
+      { name: "understanding", settings: [{ key: "api_key", value: "OPENAI_API_KEY (set)" }] },
+    ],
+  };
   /** What `suggest` proposes, by memory id. */
   suggestions = new Map<string, Omit<Suggestion, "id">>();
   /** Requests seen, for assertions about what was (not) sent. */
@@ -128,6 +142,7 @@ export class FakeServer {
       topics: new Map(),
       topicLabels: new Map(),
       projects,
+      names: [],
     });
     return this;
   }
@@ -188,6 +203,50 @@ class FakeClient implements ApiClient {
   async ping(): Promise<Identity> {
     this.server.takeFailure();
     return { ...this.server.account(this.key).identity, understanding: this.server.understanding };
+  }
+
+  async about(): Promise<About> {
+    this.server.takeFailure();
+    const { identity } = this.server.account(this.key);
+    const admin = identity.scopes.includes("admin") || this.key === null;
+    return {
+      version: "0.6.1",
+      git_sha: "5cbf648",
+      started_at: "2026-11-14T08:00:00Z",
+      user: identity.user,
+      scopes: identity.scopes,
+      auth_mode: this.key === null ? "none" : "api-key",
+      understanding: this.server.understanding,
+      daemon: admin ? this.server.daemon : null,
+    };
+  }
+
+  async selfNames(): Promise<SelfNames> {
+    return namesOf(this.readable().names);
+  }
+
+  async setSelfNames(names: string[]): Promise<SelfNames> {
+    const account = this.writable();
+    this.server.calls.push({ method: "setSelfNames" });
+    const cleaned: string[] = [];
+    for (const raw of names) {
+      const name = raw.trim().replace(/\s+/g, " ");
+      if (name !== "" && !cleaned.some((n) => n.toLowerCase() === name.toLowerCase())) cleaned.push(name);
+    }
+    if (cleaned.length > 8) throw new ApiError(400, "invalid_request", "at most 8 names");
+    account.names = cleaned;
+    // A rough copy of the daemon's rule (self_names.rs): a general memory
+    // whose subject is the user goes to review.
+    const subjects = ["the user ", ...cleaned.map((n) => `${n.toLowerCase()} `)];
+    let flagged = 0;
+    for (const m of account.memories) {
+      const content = m.content.toLowerCase();
+      if (m.applies_to.target === "general" && !m.needs_review && subjects.some((s) => content.startsWith(s))) {
+        m.needs_review = true;
+        flagged += 1;
+      }
+    }
+    return { ...namesOf(cleaned), flagged };
   }
 
   async listTopics(): Promise<Topic[]> {
@@ -704,4 +763,11 @@ export function memory(overrides: Partial<Memory> & Pick<Memory, "id" | "content
     valid_until: null,
     ...overrides,
   };
+}
+
+function namesOf(names: string[]): SelfNames {
+  const [first, ...rest] = names;
+  const sentence =
+    first === undefined ? null : rest.length === 0 ? `The user is ${first}.` : `The user is ${first} (also called ${rest.join(", ")}).`;
+  return { names: [...names], sentence };
 }

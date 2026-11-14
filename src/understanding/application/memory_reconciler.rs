@@ -33,6 +33,7 @@ use crate::memories::domain::memory_repository::MemoryRepository;
 use crate::memories::domain::memory_structure::MemoryStructure;
 use crate::memories::domain::project_registry::{ProjectRegistry, normalize_project_name};
 use crate::memories::domain::recall_query::RecallQuery;
+use crate::memories::domain::self_names::SelfNames;
 use crate::shared::error::Result;
 use crate::shared::ids::MemoryId;
 use crate::understanding::domain::candidate::Candidate;
@@ -136,6 +137,7 @@ impl MemoryReconciler {
         context: &UserContext,
         candidates: &[Candidate],
         project: Option<&ProjectHint>,
+        names: &SelfNames,
         actor: &str,
     ) -> Result<ReconcileOutcome> {
         let project = match project {
@@ -149,7 +151,7 @@ impl MemoryReconciler {
 
         let mut outcome = ReconcileOutcome::default();
         for candidate in candidates {
-            match file_candidate(candidate, project.as_ref()) {
+            match file_candidate(candidate, project.as_ref(), names) {
                 Filing::Store(structure) => outcome.absorb(
                     self.reconcile_one(context, candidate, structure, actor)
                         .await?,
@@ -602,6 +604,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("The backend runs on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -647,7 +650,13 @@ mod tests {
         }];
 
         reconciler
-            .execute(&fixture.alex, &[candidate], None, ACTOR)
+            .execute(
+                &fixture.alex,
+                &[candidate],
+                None,
+                &SelfNames::default(),
+                ACTOR,
+            )
             .await
             .unwrap();
 
@@ -685,6 +694,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("a plain fact with no entities")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -719,6 +729,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -754,6 +765,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -794,6 +806,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -816,7 +829,7 @@ mod tests {
     #[tokio::test]
     async fn a_duplicate_is_a_noop_and_stores_nothing() {
         let fixture = Fixture::new();
-        fixture.save_fact(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "The project uses pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -829,8 +842,9 @@ mod tests {
         let outcome = reconciler
             .execute(
                 &fixture.alex,
-                &[candidate("User prefers pnpm")],
+                &[candidate("The project uses pnpm")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -862,6 +876,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("User no longer uses Docker")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -878,7 +893,7 @@ mod tests {
     #[tokio::test]
     async fn a_related_but_different_memory_is_added_alongside() {
         let fixture = Fixture::new();
-        fixture.save_fact(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "The project uses pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -893,6 +908,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("User prefers Vitest")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -907,7 +923,7 @@ mod tests {
         // Acting on it would delete at random; refusing costs nothing,
         // because the model had no grounds to judge a memory it never saw.
         let fixture = Fixture::new();
-        let real = fixture.save_fact(&fixture.alex, "User prefers pnpm");
+        let real = fixture.save_fact(&fixture.alex, "The project uses pnpm");
         let invented = MemoryId::new();
 
         let (reconciler, _) = reconciler(
@@ -923,8 +939,9 @@ mod tests {
         let outcome = reconciler
             .execute(
                 &fixture.alex,
-                &[candidate("User prefers pnpm")],
+                &[candidate("The project uses pnpm")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -965,6 +982,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -992,6 +1010,7 @@ mod tests {
                 &fixture.alex,
                 &[candidate("Backend deploys on Hetzner")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -1023,10 +1042,11 @@ mod tests {
             .execute(
                 &fixture.alex,
                 &[
-                    candidate("User prefers pnpm"),
-                    candidate("User prefers pnpm as their package manager"),
+                    candidate("The project uses pnpm"),
+                    candidate("The project uses pnpm as its package manager"),
                 ],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await
@@ -1042,7 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn unusable_decisions_leave_the_store_untouched() {
         let fixture = Fixture::new();
-        fixture.save_fact(&fixture.alex, "User prefers pnpm");
+        fixture.save_fact(&fixture.alex, "The project uses pnpm");
 
         let (reconciler, _) = reconciler(
             &fixture,
@@ -1055,8 +1075,9 @@ mod tests {
         let outcome = reconciler
             .execute(
                 &fixture.alex,
-                &[candidate("User prefers pnpm")],
+                &[candidate("The project uses pnpm")],
                 None,
+                &SelfNames::default(),
                 ACTOR,
             )
             .await

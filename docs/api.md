@@ -98,6 +98,55 @@ curl -H "Authorization: Bearer $KEY" localhost:7070/v1/ping
 `understanding` says whether a language model is configured, so a client offers
 only what works (the web UI's review queue shows **Suggest** only with one).
 
+### `GET /v1/about`
+
+Requires any valid key. What the daemon says about itself: the web UI's **About**
+page. Every key gets the version, build, start time and who it belongs to; an
+**admin** key (or `[auth].mode = "none"`) also gets how the daemon was started.
+
+```json
+{
+  "version": "0.6.1", "git_sha": "5cbf648db65d", "started_at": "2026-11-14T08:00:00Z",
+  "user": "ops", "scopes": ["admin"], "auth_mode": "api-key", "understanding": true,
+  "daemon": {
+    "command": ["serve", "--config", "/etc/recuerdos-ai/recuerdos-ai.toml"],
+    "config_file": {"path": "/etc/recuerdos-ai/recuerdos-ai.toml", "from": "flag", "exists": true},
+    "overrides": ["RECUERDOS_AI_AUTH__MODE", "RECUERDOS_AI_SERVER__PORT"],
+    "settings": [{"name": "embeddings", "settings": [{"key": "provider", "value": "local"}]}]
+  }
+}
+```
+
+`daemon` is `null` for any other key. `config_file.from` is `flag` (`--config`),
+`env` (`RECUERDOS_AI_CONFIG`) or `none`; `exists: false` means the named file is
+missing and defaults apply. `overrides` are the `RECUERDOS_AI_*` variables set at
+start, **by name only**. `settings` is the report `recuerdos-ai config` prints: an
+API key appears as the variable that holds it and whether it is set, never its
+value.
+
+### `GET /v1/me`, `PUT /v1/me`
+
+Who "the user" is in this store. `GET` requires `read`; `PUT` requires `write` and
+replaces the list (an empty list clears it).
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"names": ["Alejandro Romero", "Alejandro", "Alex"]}' localhost:7070/v1/me
+```
+
+```json
+{"names": ["Alejandro Romero", "Alejandro", "Alex"],
+ "sentence": "The user is Alejandro Romero (also called Alejandro, Alex).",
+ "flagged": 2}
+```
+
+The first name is the one the user goes by in full; at most 8, each up to 64
+characters, trimmed, with repeats removed. With them, a memory that names the user is
+known to be about them: a save filing it as `general` is refused as `about_the_user`,
+the pipeline files it as theirs, and the profile opens with `sentence`. On `PUT`,
+`flagged` counts the stored memories it revealed as the user's own (filed as
+`general`) that were sent to the review queue; nothing is re-filed without the user.
+
 ## Request ids
 
 Every response carries `x-request-id` (generated if you don't send one).
@@ -337,8 +386,8 @@ or save again with `coexists_with` (both hold).
 
 Any other rule that stops the save also answers `422` with its code:
 `missing_field`, `invalid_value`, `unknown_topic`, `kind_target_mismatch`,
-`needs_confirmation`, `scope_contradiction`, `no_project`, `unknown_project` or
-`secret`. The message says how to fix it. See
+`needs_confirmation`, `scope_contradiction`, `about_the_user`, `no_project`,
+`unknown_project` or `secret`. The message says how to fix it. See
 [memory-model.md](memory-model.md#when-a-save-is-refused).
 
 ### `POST /v1/memories/search`
@@ -838,6 +887,9 @@ With a provider configured this is written by a model and cached until
 the memories under it change; without one it is assembled from the
 memories directly. The route, the media type and the shape are identical
 either way.
+
+With the user's names set (`PUT /v1/me`), the line under the title says who "the
+user" is: `The user is Alejandro Romero (also called Alex).`
 
 The same content the MCP `memory://profile` resource serves, so an agent
 and a shell script see one profile.

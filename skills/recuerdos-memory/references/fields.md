@@ -17,6 +17,7 @@ one of them isn't enough.
 | "In this repo we…", rules in CLAUDE.md | `convention` / `rule` | `project` |
 | "We chose X over Y because…" | `decision` | `project` (or `general`) |
 | "The API is written in Rust", "staging resets nightly" | `fact` | `project` |
+| "I'm a backend engineer in Berlin", "I speak Spanish" | `fact` (personal information) | `me` |
 | "The NAS backups are in /mnt/tank" | `reference` / `fact` | `general` |
 | "After that outage we learned…" | `learning` / `experience` | wherever it applies |
 | "To release: tag, wait for CI, …" | `procedure` | `project` or `me` |
@@ -47,6 +48,7 @@ user closes it; a `plan` needs `valid_until`.
 | `already_known` | The store already says this | Nothing to do. |
 | `needs_confirmation` | An inferred memory about the user, or closing a goal on your own | Ask; on yes, retry with `origin: "user_confirmed"`. |
 | `scope_contradiction` | The text is tied to one project ("the codebase", "este repo") but filed as `me`/`general` | Use `target: "project"`, or reword if it really holds everywhere. |
+| `about_the_user` | Its subject is the user ("The user is…", or one of their names) but it is filed as `general` | Save it with `target: "me"` — a `fact` about the user is their personal information. If it is about someone else, make them the subject. |
 | `kind_target_mismatch` | e.g. a `preference` for a project | Use what the message suggests (a project's way of doing things is a `convention`). |
 | `unknown_project` | The folder's project is not registered yet | Ask whether it is new; on yes retry with `applies_to.new_project: true`. If the message asks "Is it a rename of X?", ask, and on yes call `project_rename` (X → this folder's name), then retry. |
 | `no_project` | `target: project` with no project known | Ask which project, and name it in `applies_to.project_name`. |

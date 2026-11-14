@@ -12,7 +12,7 @@ import {
   type SortKey,
   type Status,
 } from "../domain/memories";
-import { describeStructure, kindOf, topicLabelOf } from "../domain/structureForm";
+import { describeStructure, kindKeyLabel, kindKeyOf, topicLabelOf } from "../domain/structureForm";
 import { secondaryButton } from "./styles";
 
 const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
@@ -72,7 +72,7 @@ export function MemoryList({
   const canSelect = canWrite && onSelect !== undefined && selected !== undefined;
 
   const topics = useMemo(() => countBy(memories, (m) => m.topic), [memories]);
-  const kinds = useMemo(() => countBy(memories, (m) => m.kind), [memories]);
+  const kinds = useMemo(() => countBy(memories, kindKeyOf), [memories]);
   const scopes = useMemo(() => countBy(memories, scopeOf), [memories]);
   const scopeLabel = (scope: string) =>
     scope === "me" ? "You (everywhere)" : scope === "general" ? "General" : `Project ${scope.slice("project:".length)}`;
@@ -187,7 +187,7 @@ export function MemoryList({
             <option value="">All kinds</option>
             {kinds.map((kind) => (
               <option key={kind.id} value={kind.id}>
-                {kindOf(kind.id)?.label ?? kind.id} ({kind.count})
+                {kindKeyLabel(kind.id)} ({kind.count})
               </option>
             ))}
           </select>

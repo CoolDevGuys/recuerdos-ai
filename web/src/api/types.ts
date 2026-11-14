@@ -11,6 +11,39 @@ export interface Identity {
   understanding?: boolean;
 }
 
+/** `GET`/`PUT /v1/me`: who "the user" is in this store. */
+export interface SelfNames {
+  /** First the one they go by in full. */
+  names: string[];
+  /** How the profile says it; null with no names. */
+  sentence: string | null;
+  /** On save: memories newly sent to Needs review because they are about the user. */
+  flagged?: number;
+}
+
+/** `GET /v1/about`: what the daemon says about itself. */
+export interface About {
+  version: string;
+  git_sha: string;
+  /** ISO 8601. */
+  started_at: string;
+  user: string;
+  scopes: Scope[];
+  auth_mode: "api-key" | "none";
+  understanding: boolean;
+  /** Only for an admin key (or with auth off): how the daemon was started. */
+  daemon: DaemonDetails | null;
+}
+
+export interface DaemonDetails {
+  /** The command line after the binary's name: `["serve", "--config", "…"]`. */
+  command: string[];
+  config_file: { path: string | null; from: "flag" | "env" | "none"; exists: boolean };
+  /** `RECUERDOS_AI_*` variables set at start, by name (values are never sent). */
+  overrides: string[];
+  settings: { name: string; settings: { key: string; value: string }[] }[];
+}
+
 /** Who or what a memory is true for (ai-specs/memory-structure-plan.md §3). */
 export type Target = "me" | "project" | "general";
 

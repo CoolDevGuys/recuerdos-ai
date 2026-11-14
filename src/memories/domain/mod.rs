@@ -23,6 +23,7 @@ pub mod project_registry;
 pub mod recall_query;
 pub mod recall_ranker;
 pub mod reranker;
+pub mod self_names;
 pub mod text_index;
 pub mod topic;
 pub mod topic_catalog;

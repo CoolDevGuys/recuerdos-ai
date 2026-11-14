@@ -633,6 +633,11 @@ async fn run_serve(config_path: Option<&Path>) -> Result<(), String> {
         mcp_allowed_hosts: config.server.mcp.allowed_hosts.clone(),
         ingest_timeout: std::time::Duration::from_secs(config.server.ingest_timeout_secs),
         ui: config.ui.enabled,
+        about: std::sync::Arc::new(bootstrap::about::About::capture(
+            &config,
+            config_path,
+            chrono::Utc::now(),
+        )),
     };
 
     let outcome = bootstrap::server::serve(&config.server.host, config.server.port, state).await;
@@ -1013,166 +1018,16 @@ fn run_config(config_path: Option<&Path>) -> Result<(), String> {
     // No tracing init: this is a one-shot report, and its whole value is
     // clean stdout the operator can read at a glance.
     let config = bootstrap::config::AppConfig::load(config_path).map_err(|e| e.to_string())?;
-    let embeddings = &config.embeddings;
-    let understanding = &config.understanding;
 
-    println!("recuerdos-ai configuration (defaults + file + RECUERDOS_AI_* env)\n");
-
-    println!("embeddings");
-    println!("  provider   {}", embeddings.provider);
-    println!("  model      {}", embeddings.model);
-    if embeddings.provider == "local" {
-        // The one field that only matters offline; a remote provider
-        // ignores it, so showing it there would just mislead.
-        println!("  cache_dir  {}", config.model_cache_dir().display());
-    } else {
-        println!("  base_url   {}", display_base_url(&embeddings.base_url));
-        println!("  api_key    {}", key_status(&embeddings.api_key_env));
-    }
-    // Printed in every state: which text the vectors are built from is the
-    // one embedding setting that also decides which store will open, so
-    // "content" is an answer an operator checking a deploy needs to see.
-    println!("  document_text {}", embeddings.document_text);
-
-    println!("\nunderstanding");
-    println!("  provider   {}", understanding.provider);
-    if understanding.provider != "none" {
-        println!("  model      {}", understanding.model);
-        println!("  base_url   {}", display_base_url(&understanding.base_url));
-        println!("  api_key    {}", key_status(&understanding.api_key_env));
-        println!("  reconcile  {}", understanding.reconcile);
-    }
-
-    println!("\nconsolidation");
-    if config.consolidation.enabled {
-        println!("  enabled ({})", config.consolidation.schedule);
-    } else {
-        println!("  disabled");
-    }
-
-    // Retrieval decides what comes back and in what order, so it is worth
-    // confirming without opening the file. `relevance_weight` prints in every
-    // state including its zero, for the same reason the rerank mode does: "the
-    // order is what fusion decided" is an effective state, and 0.0 is the answer
-    // an operator needs to hear rather than a line to hide.
-    let retrieval = &config.retrieval;
-    println!("\nretrieval");
-    println!("  limit      {}", retrieval.default_limit);
-    println!(
-        "  recency    {} d half-life",
-        retrieval.recency_half_life_days
-    );
-    println!("  floor      {}", retrieval.min_relevance);
-    // The baseline the ranker will actually use — explicit, or the map row
-    // for this model *and* document format — because an explicit value
-    // silently outranks the enriched row (docs/configuration.md).
-    println!(
-        "  similarity_baseline {} ({})",
-        bootstrap::memories_wiring::resolve_similarity_baseline(&config, &embeddings.model),
-        if retrieval.similarity_baseline.is_some() {
-            "explicit"
-        } else {
-            "per-model default"
+    println!("recuerdos-ai configuration (defaults + file + RECUERDOS_AI_* env)");
+    // The same report the web UI's About page shows (bootstrap/about.rs).
+    for section in bootstrap::about::report(&config) {
+        println!("\n{}", section.name);
+        for setting in section.settings {
+            println!("  {:<10} {}", setting.key, setting.value);
         }
-    );
-    println!("  relevance_weight {}", retrieval.relevance_weight);
-
-    // The rerank stage prints in every mode: `off` is its effective
-    // state as much as `on` is, and the whole point of this report is
-    // answering "what is the daemon actually doing" without opening the
-    // config file (reranking-plan.md Phase 5.2).
-    let rerank = &config.rerank;
-    println!("\nrerank");
-    println!("  mode       {}", rerank.mode);
-    if rerank.mode != "off" {
-        println!("  model      {}", rerank.model);
-        // The model lands in the embeddings cache dir — shared by
-        // convention, so showing it here would duplicate that section.
-        println!("  depth      {}", rerank.depth);
-        println!("  weight     {}", rerank.weight);
-        println!("  timeout    {} ms", rerank.timeout_ms);
-        println!("  concurrent {}", rerank.max_concurrency);
-        println!("  batch      {}", rerank.batch_size);
     }
-
-    // The third leg decides which relational memories are reachable at all, and
-    // since Phase 3 it can also reserve a seat in the answer — so its state belongs
-    // here for the same reason retrieval's and the rerank stage's do: a deployment
-    // where the hop places nothing and one where it holds a slot are different
-    // systems, and neither is visible without opening the file.
-    let graph = &config.graph;
-    println!("\ngraph");
-    println!("  enabled    {}", graph.enabled);
-    if graph.enabled {
-        println!(
-            "  hops       {} (limit {})",
-            graph.max_hops, graph.hop_limit
-        );
-        println!(
-            "  weight     {} (unanchored floor {})",
-            graph.rank_weight, graph.unanchored_floor
-        );
-        // Printed at zero too: `0` means the hop competes for rank and nothing
-        // else, which is the pre-Phase-3 pipeline and an effective state an
-        // operator comparing two deployments needs to see.
-        println!("  expansion_slots {}", graph.expansion_slots);
-    }
-
-    println!("\nserver");
-    println!("  listen     {}:{}", config.server.host, config.server.port);
-    let mut transports = Vec::new();
-    if config.server.mcp.http {
-        transports.push("http (/mcp)");
-    }
-    if config.server.mcp.stdio {
-        transports.push("stdio (recuerdos-ai mcp)");
-    }
-    println!(
-        "  mcp        {}",
-        if transports.is_empty() {
-            "none".to_string()
-        } else {
-            transports.join(", ")
-        }
-    );
-
-    println!(
-        "  ui         {}",
-        if config.ui.enabled { "/ui" } else { "off" }
-    );
-
-    println!("\nstorage");
-    println!("  backend    {}", config.storage.backend);
-    println!("  path       {}", config.data_dir().display());
-
-    println!("\nauth");
-    println!("  mode       {}", config.auth.mode);
-
     Ok(())
-}
-
-/// How a `base_url` reads in the report: an empty one means the provider's
-/// built-in address, which is clearer said than shown blank.
-fn display_base_url(base_url: &str) -> String {
-    if base_url.trim().is_empty() {
-        "(provider default)".to_string()
-    } else {
-        base_url.to_string()
-    }
-}
-
-/// Report an API key by the env var that holds it and whether that var is
-/// currently set — never the value. An empty name means the provider needs
-/// no key (a local server); a named-but-unset var is the likely cause of a
-/// provider that fails on its first real request, so it is called out.
-fn key_status(env_name: &str) -> String {
-    if env_name.trim().is_empty() {
-        "none".to_string()
-    } else if std::env::var(env_name).is_ok() {
-        format!("{env_name} (set)")
-    } else {
-        format!("{env_name} (NOT SET)")
-    }
 }
 
 fn run_init(config_path: &PathBuf) -> Result<(), String> {

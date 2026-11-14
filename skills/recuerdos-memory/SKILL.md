@@ -28,7 +28,8 @@ the server explains every refusal; this skill covers what they can't: **when** t
 
 Each line starts with `[kind · topic · who]`:
 
-- **`me`** — the user, everywhere. A `preference` or `rule` is an instruction.
+- **`me`** — the user, everywhere. A `preference` or `rule` is an instruction; a
+  `fact` is their personal information (who they are, their skills, their work).
 - **This project** — binding here, and it **overrides** a personal preference here.
 - **Another project** (any other name) — how *that* project does it. **Never apply it
   here as the user's preference.** Offer it as an example ("fern returns `Result`s —
@@ -51,10 +52,12 @@ says, secrets (save how to reach a thing, never the key), or your own guesses ab
 user — ask them first, and save on a yes with `origin: "user_confirmed"`.
 
 **Who it applies to is the field that matters most.** "my", "I always", "in every
-project" → `me`; "here", "this repo", "we", anything read from the project's files →
+project", and facts about the user themselves (their job, skills, where they live) →
+`me`; "here", "this repo", "we", anything read from the project's files →
 `project` (the current one is filled in for you); machines, places, appointments →
 `general`. **If you can't tell, ask.** Write `content` as one standalone sentence with
-its subject ("The user prefers…", "Quill's API…"), one fact per memory. The full field
+its subject ("The user prefers…", "Quill's API…"), one fact per memory. "The user" is
+always the person whose memory this is; the profile's first line says their name. The full field
 guide is in [references/fields.md](references/fields.md) if a tool description isn't
 enough.
 

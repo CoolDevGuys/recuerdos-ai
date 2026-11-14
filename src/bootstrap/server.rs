@@ -4,6 +4,7 @@
 use crate::bootstrap::config::RateLimitConfig;
 use crate::bootstrap::state::{AppState, AuthMode};
 use crate::consolidation::infrastructure::http as consolidation_http;
+use crate::identity::domain::scope::Scope;
 use crate::identity::infrastructure::http::authenticated::{self, Authenticated};
 use crate::memories::infrastructure::http as memories_http;
 use crate::shared::api_error::{ApiErrorBody, ApiErrorDetail};
@@ -113,6 +114,7 @@ fn api_router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/version", get(version))
         .route("/v1/ping", get(ping))
+        .route("/v1/about", get(about))
         .route("/v1/jobs/{id}", get(understanding_http::handlers::get_job))
         // The escape hatch: store exactly this, no pipeline. For a caller
         // that has already decided what to remember.
@@ -131,6 +133,12 @@ fn api_router(state: AppState) -> Router {
         // Projects (memory-structure-plan.md §6). A rename is one row and a
         // merge re-files without re-embedding, so the short timeout holds.
         .route("/v1/projects", get(memories_http::handlers::list_projects))
+        // Who "the user" is: the names this store's owner goes by.
+        .route(
+            "/v1/me",
+            get(memories_http::handlers::get_self_names)
+                .put(memories_http::handlers::set_self_names),
+        )
         // Topics (memory-structure-plan.md §3.3): a label is display only.
         .route(
             "/v1/topics",
@@ -198,6 +206,39 @@ async fn ping(State(state): State<AppState>, Authenticated(context): Authenticat
         // What this daemon can do, so a client offers only what works:
         // the web UI shows Suggest only with a model.
         "understanding": state.understanding.enabled,
+    }))
+}
+
+/// What the daemon says about itself, for the web UI's About page. Every
+/// signed-in caller sees the version and who they are; an admin key (and
+/// `[auth].mode = "none"`, which has every scope) also sees where the config
+/// came from and the settings in effect. Secrets are never in it.
+async fn about(
+    State(state): State<AppState>,
+    Authenticated(context): Authenticated,
+) -> Json<Value> {
+    let about = &state.about;
+    let admin = context.allows(Scope::Admin);
+    let daemon = admin.then(|| {
+        json!({
+            "command": about.command,
+            "config_file": about.config_file,
+            "overrides": about.overrides,
+            "settings": about.settings,
+        })
+    });
+    Json(json!({
+        "version": about.version,
+        "git_sha": about.git_sha,
+        "started_at": about.started_at,
+        "user": context.handle(),
+        "scopes": context.scopes().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        "auth_mode": match state.auth_mode {
+            AuthMode::ApiKey => "api-key",
+            AuthMode::None => "none",
+        },
+        "understanding": state.understanding.enabled,
+        "daemon": daemon,
     }))
 }
 
