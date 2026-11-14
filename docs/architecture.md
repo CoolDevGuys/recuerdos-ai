@@ -1,6 +1,6 @@
 # Architecture
 
-**Status: current as of `v0.6.1`.** It states the rules the code is held
+**Status: current as of `v0.7.0`.** It states the rules the code is held
 to: `scripts/check-boundaries.sh` enforces the layer and naming rules in CI and
 in `just check-native`. `identity` is the worked example.
 

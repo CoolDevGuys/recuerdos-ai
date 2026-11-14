@@ -3,7 +3,7 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-## Unreleased — an About page, and the store knows who "the user" is
+## v0.7.0 — an About page, and the store knows who "the user" is
 
 - **About page** (`/ui/about`, `GET /v1/about`): the daemon's version, build and start
   time, and the key you signed in with. An admin key (or auth off) also sees how it was

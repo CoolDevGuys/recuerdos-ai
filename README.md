@@ -498,7 +498,7 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 
 ## 🗺️ Status
 
-**`v0.6.1`** — structured memories. Used daily by its author since Phase 3:
+**`v0.7.0`** — structured memories. Used daily by its author since Phase 3:
 the storage format has migrated itself forward cleanly across every release, and
 `v0.6.0` is the one release that changed the save API on purpose (see
 [upgrading](docs/deployment.md#what-v060-does-on-its-first-start)).

@@ -6,7 +6,7 @@ Actionable, phased breakdown of the build. Every phase lives on its own git bran
 ends in a **shippable, usable** state, and every task has a goal, step-by-step
 procedure, examples where they apply, and a Definition of Done (DoD).
 
-> **Status (2026-11-14): Phases 0–7 are ✅ SHIPPED; `v0.6.1` is the current
+> **Status (2026-11-14): Phases 0–7 are ✅ SHIPPED; `v0.7.0` is the current
 > release.** Phases 0–6 were released as `v0.1.0` and `v0.1.1`; Phase 7
 > (budgeted consolidation, sub-labels, the graph layer, recall quality and the optional
 > reranker) across `v0.2.0`–`v0.4.0`. Those phase sections are kept as the **build
