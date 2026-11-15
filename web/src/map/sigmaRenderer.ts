@@ -18,7 +18,7 @@ import { convexHull, lassoed, type Point } from "../domain/map/geometry";
 import type { GroupNode, MapModel } from "../domain/map/layout";
 import { categoryStyle, glyphImage, kindStyle, withAlpha } from "../domain/map/palette";
 import { LEVEL_RATIO, levelAt, quantize, zoomMix, type Level, type ZoomMix } from "../domain/map/zoom";
-import type { MapRenderer, RendererCallbacks, RendererFactory } from "./renderer";
+import type { CameraView, MapRenderer, RendererCallbacks, RendererFactory } from "./renderer";
 
 type NodeKind = "memory" | "category" | "cluster";
 
@@ -33,8 +33,8 @@ function labelColor(dark: boolean): string {
  * each refresh. All the map's logic lives there; this file only wires
  * events, the camera and the category hulls.
  */
-export const createSigmaRenderer: RendererFactory = (container, model, initialView, callbacks) =>
-  new SigmaMapRenderer(container, model, initialView, callbacks);
+export const createSigmaRenderer: RendererFactory = (container, model, initialView, callbacks, camera) =>
+  new SigmaMapRenderer(container, model, initialView, callbacks, camera ?? null);
 
 const PictogramProgram = createNodeCompoundProgram([
   NodeCircleProgram,
@@ -64,6 +64,7 @@ class SigmaMapRenderer implements MapRenderer {
     private readonly model: MapModel,
     view: ViewState,
     private readonly callbacks: RendererCallbacks,
+    camera: CameraView | null,
   ) {
     this.view = view;
     // One category's own map already fills the view with that category: its
@@ -111,8 +112,35 @@ class SigmaMapRenderer implements MapRenderer {
     this.sigma.on("leaveNode", () => this.onHover(null));
     // Follow the system theme while the map is open, not only when it is created.
     this.scheme?.addEventListener("change", this.onScheme);
+    // Redrawn after an edit: stay where the user was rather than fitting the map again.
+    // Setting the camera runs onCamera, so the zoom level follows.
+    if (camera !== null) this.restore(camera);
     this.sigma.refresh();
     this.callbacks.onLevelChange(this.level);
+  }
+
+  camera(): CameraView | null {
+    const { width, height } = this.sigma.getDimensions();
+    if (width === 0 || height === 0) return null;
+    const centre = this.sigma.viewportToGraph({ x: width / 2, y: height / 2 });
+    const left = this.sigma.viewportToGraph({ x: 0, y: height / 2 });
+    const right = this.sigma.viewportToGraph({ x: width, y: height / 2 });
+    return { x: centre.x, y: centre.y, span: Math.hypot(right.x - left.x, right.y - left.y) };
+  }
+
+  /** Put the camera on `view`, whatever this map's extent: centre first, then the zoom that spans the same width. */
+  private restore(view: CameraView): void {
+    const { width, height } = this.sigma.getDimensions();
+    if (width === 0 || height === 0 || !(view.span > 0)) return;
+    const camera = this.sigma.getCamera();
+    const centre = this.sigma.viewportToFramedGraph(this.sigma.graphToViewport({ x: view.x, y: view.y }));
+    camera.setState({ x: centre.x, y: centre.y, ratio: 1, angle: 0 });
+    const left = this.sigma.viewportToGraph({ x: 0, y: height / 2 });
+    const right = this.sigma.viewportToGraph({ x: width, y: height / 2 });
+    const spanAtOne = Math.hypot(right.x - left.x, right.y - left.y);
+    if (!(spanAtOne > 0)) return;
+    const ratio = Math.min(3, Math.max(0.02, view.span / spanAtOne));
+    camera.setState({ ...camera.getState(), ratio });
   }
 
   /** Camera ratio × this = the ratio the zoom bands read (see constructor). */

@@ -187,7 +187,12 @@ function Memories({
 
   return (
     <>
-      <ViewTabs view={view} onChange={setView} reviewCount={memories.data.filter((m) => m.needs_review).length} />
+      <ViewTabs
+        view={view}
+        onChange={setView}
+        reviewCount={memories.data.filter((m) => m.needs_review).length}
+        {...(access.canWrite && { onAdd: () => setOpen({ kind: "add" }) })}
+      />
       {view === "list" && (
         <>
           {selected.size > 0 && (
@@ -210,7 +215,6 @@ function Memories({
             highlighted={highlighted}
             canWrite={access.canWrite}
             onOpen={openMemory}
-            onAdd={() => setOpen({ kind: "add" })}
             selected={selected}
             onSelect={select}
           />
@@ -290,7 +294,22 @@ function Memories({
   );
 }
 
-function ViewTabs({ view, onChange, reviewCount }: { view: View; onChange: (view: View) => void; reviewCount: number }) {
+/**
+ * The views, and beside them "+ Add memory": a memory comes to mind on any
+ * view, so adding one is never more than a click away.
+ */
+function ViewTabs({
+  view,
+  onChange,
+  reviewCount,
+  onAdd,
+}: {
+  view: View;
+  onChange: (view: View) => void;
+  reviewCount: number;
+  /** Only for a key that can write. */
+  onAdd?: () => void;
+}) {
   const tab = (value: View, label: string, badge?: number) => (
     <a
       href={VIEW_PATHS[value]}
@@ -316,14 +335,25 @@ function ViewTabs({ view, onChange, reviewCount }: { view: View; onChange: (view
     </a>
   );
   return (
-    <nav aria-label="Views" className="mb-5 flex gap-1 overflow-x-auto border-b border-slate-200 dark:border-slate-800">
-      {tab("list", "List")}
-      {tab("review", "Needs review", reviewCount)}
-      {tab("map", "Map")}
-      {tab("projects", "Projects")}
-      {tab("topics", "Topics")}
-      {tab("categories", "Categories")}
-      {tab("about", "About")}
-    </nav>
+    <div className="mb-5 flex items-center gap-3 border-b border-slate-200 dark:border-slate-800">
+      <nav aria-label="Views" className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+        {tab("list", "List")}
+        {tab("review", "Needs review", reviewCount)}
+        {tab("map", "Map")}
+        {tab("projects", "Projects")}
+        {tab("topics", "Topics")}
+        {tab("categories", "Categories")}
+        {tab("about", "About")}
+      </nav>
+      {onAdd !== undefined && (
+        <button
+          type="button"
+          onClick={onAdd}
+          className="mb-1 shrink-0 whitespace-nowrap rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+        >
+          + Add memory
+        </button>
+      )}
+    </div>
   );
 }

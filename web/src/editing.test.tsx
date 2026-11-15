@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { ApiError } from "./api/client";
 import { memory } from "./api/fake";
 import { ALEX_KEY, ALEX_MEMORIES, signedInAsAlex, standardServer } from "./test/renderApp";
@@ -220,6 +220,26 @@ describe("forgetting a memory", () => {
 });
 
 describe("adding a memory", () => {
+  beforeEach(() => window.history.pushState(null, "", "/ui/"));
+
+  it("is offered beside the tabs on every view, not only the list", async () => {
+    const { server, user } = await signedInAsAlex();
+    await user.click(screen.getByRole("link", { name: "Topics" }));
+    await user.click(screen.getByRole("button", { name: "+ Add memory" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add a memory" });
+
+    await user.type(within(dialog).getByLabelText("Memory"), "Deploys run on Fridays");
+    await user.selectOptions(within(dialog).getByLabelText("What it is"), "Decision");
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Work");
+    await user.click(within(dialog).getByRole("radio", { name: /One project/ }));
+    await user.type(within(dialog).getByLabelText("Project"), "Quill");
+    await user.click(within(dialog).getByRole("button", { name: "Save memory" }));
+
+    expect(await screen.findByText("Memory saved.")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/ui/topics");
+    expect(server.calls.filter((c) => c.method === "create")).toHaveLength(1);
+  });
+
   async function openAdd(server = standardServer()) {
     const { user } = await signedInAsAlex(server);
     await user.click(screen.getByRole("button", { name: "+ Add memory" }));

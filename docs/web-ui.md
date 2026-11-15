@@ -44,7 +44,9 @@ the words carry the meaning too.
 
 Use the scroll wheel or a pinch to zoom, or **Topics / Clusters / Memories** to
 jump to a level. Clicking a topic or cluster opens it.
-Clicking a memory opens it in the editor.
+Clicking a memory opens it in the editor. Saving or forgetting it redraws the map
+where you were, at the same zoom, so you can work through a cluster without
+zooming back in after each change. **Fit** shows the whole map again.
 
 **From the keyboard**, Tab to the map, then:
 
@@ -142,7 +144,7 @@ easier view on a small screen.
   is kept. You then choose:
   - **Load the latest**: discards your edit and shows the current version.
   - **Save mine anyway**: overwrites the current version with yours.
-- **Add memory** saves exactly what you write, instantly, once you say **what it
+- **+ Add memory**, beside the tabs on every view, saves exactly what you write, instantly, once you say **what it
   is** (a preference, a rule, a fact, a dated plan…), **what it is about** (one of
   the topics, yours included) and **who it applies to**: you everywhere, one project, or in general. The choices a kind cannot take
   are greyed out (a preference is always yours), and the category follows from what

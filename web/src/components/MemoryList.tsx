@@ -40,7 +40,6 @@ export function MemoryList({
   highlighted = null,
   canWrite = false,
   onOpen,
-  onAdd,
   selected,
   onSelect,
   pageSize = PAGE_SIZE,
@@ -54,7 +53,6 @@ export function MemoryList({
   highlighted?: string | null;
   canWrite?: boolean;
   onOpen?: (memory: Memory) => void;
-  onAdd?: () => void;
   /** The bulk selection; with `onSelect`, the list offers a "Select" mode. */
   selected?: ReadonlySet<string>;
   /** Adds (`on`) or removes these ids from the selection. */
@@ -116,30 +114,19 @@ export function MemoryList({
       <h2 id={`${searchId}-heading`} className="sr-only">
         Memories
       </h2>
-      {canWrite && (onAdd !== undefined || canSelect) && (
+      {canWrite && canSelect && (
         <div className="mb-4 flex justify-end gap-2">
-          {canSelect && (
-            <button
-              type="button"
-              aria-pressed={selecting}
-              onClick={() => {
-                if (selecting) onSelect(memories.map((m) => m.id), false);
-                setSelecting(!selecting);
-              }}
-              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-            >
-              {selecting ? "Done selecting" : "Select"}
-            </button>
-          )}
-          {onAdd !== undefined && (
           <button
             type="button"
-            onClick={onAdd}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+            aria-pressed={selecting}
+            onClick={() => {
+              if (selecting) onSelect(memories.map((m) => m.id), false);
+              setSelecting(!selecting);
+            }}
+            className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
           >
-            + Add memory
+            {selecting ? "Done selecting" : "Select"}
           </button>
-          )}
         </div>
       )}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[1fr_10rem_10rem_10rem_10rem_9rem]">

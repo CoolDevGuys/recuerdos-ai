@@ -23,7 +23,21 @@ export interface MapRenderer {
    * plus drag lassos in either mode.
    */
   setLassoMode(on: boolean): void;
+  /** Where the camera is now, to start the next renderer of the same map there. */
+  camera(): CameraView | null;
   destroy(): void;
+}
+
+/**
+ * A camera position in graph coordinates: the point at the view's centre and
+ * how much of the graph the view spans across. Unlike Sigma's own camera
+ * state it does not depend on the map's extent, so it still means the same
+ * place after an edit moves or removes a memory at the edge.
+ */
+export interface CameraView {
+  x: number;
+  y: number;
+  span: number;
 }
 
 export interface RendererCallbacks {
@@ -43,6 +57,8 @@ export type RendererFactory = (
   model: MapModel,
   view: ViewState,
   callbacks: RendererCallbacks,
+  /** Start here instead of fitting the whole map: the same map, redrawn after a change. */
+  camera?: CameraView | null,
 ) => MapRenderer;
 
 export type RendererLoader = () => Promise<RendererFactory>;
