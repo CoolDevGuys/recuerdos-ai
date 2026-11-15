@@ -123,6 +123,23 @@ export function useMemoryActions(client: ApiClient, user: string) {
       }
     }
 
+    /** Runs `run` on every id; never throws. */
+    async function eachOf(ids: readonly string[], run: (id: string) => Promise<unknown>): Promise<ManyOutcome> {
+      const done: string[] = [];
+      let failure: string | null = null;
+      for (const id of ids) {
+        try {
+          await run(id);
+          done.push(id);
+        } catch (error) {
+          failure = describeError(error);
+          break;
+        }
+      }
+      await refresh();
+      return { done, failure };
+    }
+
     return {
       /**
        * Saves the changes `values` makes to `base`. Conditional on `base`
@@ -195,6 +212,13 @@ export function useMemoryActions(client: ApiClient, user: string) {
         );
       },
       forget: (id: string) => attempt(() => client.forgetMemory(id)),
+      /**
+       * Forgets each memory in turn, then refreshes once. Not all or nothing:
+       * a forget is a soft delete, so what went through is reported and can
+       * be restored with `restoreMany`.
+       */
+      forgetMany: (ids: readonly string[]) => eachOf(ids, (id) => client.forgetMemory(id)),
+      restoreMany: (ids: readonly string[]) => eachOf(ids, (id) => client.restoreMemory(id)),
       /** Read-only; no refresh needed, but the same never-throw shape. */
       recall: async (query: string, limit = 10): Promise<Outcome<RecallHit[]>> => {
         try {
@@ -218,3 +242,9 @@ export function useMemoryActions(client: ApiClient, user: string) {
 }
 
 export type MemoryActions = ReturnType<typeof useMemoryActions>;
+
+/** What a one-by-one action got through, and why it stopped if it did. */
+export interface ManyOutcome {
+  done: string[];
+  failure: string | null;
+}

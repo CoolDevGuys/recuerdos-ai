@@ -4,14 +4,18 @@ import { memoriesCount } from "../domain/categories";
 import { KINDS, TOPICS } from "../domain/structureForm";
 import type { MemoryActions } from "../state/memories";
 import { useToasts } from "../state/toasts";
-import { field, hint, label, primaryButton, secondaryButton } from "./styles";
+import { dangerButton, field, hint, label, primaryButton, secondaryButton } from "./styles";
+
+/** How long the Undo on forgotten memories stays offered, as for one. */
+const UNDO_WINDOW_MS = 8000;
 
 /**
  * One edit applied to every selected memory (plan §4.3, and the review queue
  * of memory-structure-plan §8): what they are, what they are about, who they
  * are for, the sub-label and tags — or "these are right as they are". All or
  * nothing on the daemon, under the same rules as a save; shared by the
- * list's selection, the map's lasso and the review queue.
+ * list's selection, the map's lasso and the review queue. It also forgets
+ * them all, after a confirmation, with an Undo that restores them.
  */
 export function BulkEditor({
   selected,
@@ -35,6 +39,7 @@ export function BulkEditor({
   const [form, setForm] = useState<BulkForm>(EMPTY_BULK_FORM);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmingForget, setConfirmingForget] = useState(false);
 
   const set = (patch: Partial<BulkForm>) => {
     setForm((current) => ({ ...current, ...patch }));
@@ -59,6 +64,37 @@ export function BulkEditor({
       tone: "success",
       message: changed === 0 ? "Those memories already looked like that." : `Updated ${memoriesCount(changed)}.`,
     });
+    setForm(EMPTY_BULK_FORM);
+    onDone();
+  };
+
+  const undoForget = async (ids: readonly string[]) => {
+    const { done, failure } = await actions.restoreMany(ids);
+    if (failure !== null) {
+      show({ tone: "error", message: `Restored ${memoriesCount(done.length)}, then stopped: ${failure}` });
+      return;
+    }
+    show({ tone: "success", message: `Restored ${memoriesCount(done.length)}.` });
+  };
+
+  const forget = async () => {
+    setBusy(true);
+    const { done, failure } = await actions.forgetMany(selected);
+    setBusy(false);
+    setConfirmingForget(false);
+    // What did go through stays undoable, even when the rest stopped.
+    if (done.length > 0) {
+      show(
+        { tone: "info", message: `Forgot ${memoriesCount(done.length)}.`, action: { label: "Undo", run: () => void undoForget(done) } },
+        UNDO_WINDOW_MS,
+      );
+    }
+    if (failure !== null && done.length === 0) {
+      setError(`Nothing was forgotten: ${failure}`);
+      return;
+    }
+    // Part went through: the selection would hold memories already gone.
+    if (failure !== null) show({ tone: "error", message: `The rest were not forgotten: ${failure}` });
     setForm(EMPTY_BULK_FORM);
     onDone();
   };
@@ -189,13 +225,45 @@ export function BulkEditor({
             {error}
           </p>
         )}
-        <div className="flex gap-2 sm:col-span-2">
+        <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
           <button type="submit" disabled={busy} className={primaryButton}>
-            {busy ? "Applying…" : `Apply to ${memoriesCount(selected.length)}`}
+            {busy && !confirmingForget ? "Applying…" : `Apply to ${memoriesCount(selected.length)}`}
           </button>
           <button type="button" onClick={onClear} disabled={busy} className={secondaryButton}>
             Cancel
           </button>
+          <span className="ml-auto flex flex-wrap items-center gap-2">
+            {confirmingForget ? (
+              <>
+                <span className="text-sm text-slate-700 dark:text-slate-300">
+                  Forget {memoriesCount(selected.length)}?
+                </span>
+                <button type="button" disabled={busy} onClick={() => void forget()} className={dangerButton}>
+                  {busy ? "Forgetting…" : "Forget"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setConfirmingForget(false)}
+                  className={secondaryButton}
+                >
+                  Keep them
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setError(null);
+                  setConfirmingForget(true);
+                }}
+                className={dangerButton}
+              >
+                Forget {memoriesCount(selected.length)}…
+              </button>
+            )}
+          </span>
         </div>
       </form>
     </section>
