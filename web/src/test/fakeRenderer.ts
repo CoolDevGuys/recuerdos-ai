@@ -1,7 +1,7 @@
 import type { ViewState } from "../domain/map/appearance";
 import type { MapModel } from "../domain/map/layout";
 import type { Level } from "../domain/map/zoom";
-import type { MapRenderer, RendererCallbacks, RendererLoader } from "../map/renderer";
+import type { CameraView, MapRenderer, RendererCallbacks, RendererLoader } from "../map/renderer";
 
 /** Records what the map asked of its renderer, and lets a test play the user's clicks on the canvas. */
 export class FakeRenderer implements MapRenderer {
@@ -12,6 +12,10 @@ export class FakeRenderer implements MapRenderer {
   destroyed = false;
   lassoModes: boolean[] = [];
   callbacks: RendererCallbacks | null = null;
+  /** Where the camera is; a test moves it to play the user zooming in. */
+  at: CameraView | null = null;
+  /** The camera each renderer was started at, in order (null: fit the map). */
+  startedAt: (CameraView | null)[] = [];
 
   update(view: ViewState): void {
     this.views.push(view);
@@ -37,6 +41,9 @@ export class FakeRenderer implements MapRenderer {
   }
   setLassoMode(on: boolean): void {
     this.lassoModes.push(on);
+  }
+  camera(): CameraView | null {
+    return this.at;
   }
   destroy(): void {
     this.destroyed = true;
@@ -68,8 +75,10 @@ export class FakeRenderer implements MapRenderer {
 }
 
 export function fakeRendererLoader(renderer: FakeRenderer): RendererLoader {
-  return async () => (_container, model, view, callbacks) => {
+  return async () => (_container, model, view, callbacks, camera) => {
     renderer.model = model;
+    renderer.startedAt.push(camera ?? null);
+    renderer.at = camera ?? null;
     renderer.views.push(view);
     renderer.callbacks = callbacks;
     return renderer;

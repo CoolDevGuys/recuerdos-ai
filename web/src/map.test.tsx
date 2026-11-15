@@ -98,6 +98,27 @@ describe("the map view", () => {
     expect(renderer.model?.byId.get("c")?.category).toBe("tech");
   });
 
+  it("stays where the camera was after an edit or a forget, instead of fitting the map again", async () => {
+    const { renderer, user } = await openMap();
+    expect(renderer.startedAt).toEqual([null]);
+    const zoomedIn = { x: 0.4, y: -0.2, span: 0.3 };
+    renderer.at = zoomedIn;
+
+    renderer.clickMemory("c");
+    const dialog = await screen.findByRole("dialog", { name: "Edit memory" });
+    await user.selectOptions(within(dialog).getByLabelText("About"), "Tech");
+    await user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(renderer.model?.byId.get("c")?.category).toBe("tech"));
+    expect(renderer.startedAt.at(-1)).toEqual(zoomedIn);
+
+    renderer.clickMemory("b");
+    const editor = await screen.findByRole("dialog", { name: "Edit memory" });
+    await user.click(within(editor).getByRole("button", { name: "Forget…" }));
+    await user.click(within(editor).getByRole("button", { name: "Forget" }));
+    await waitFor(() => expect(renderer.model?.byId.has("b")).toBe(false));
+    expect(renderer.startedAt.at(-1)).toEqual(zoomedIn);
+  });
+
   it("offers the relations toggle only when there are relations", async () => {
     await openMap();
     expect(screen.queryByLabelText(/Stated relations/)).not.toBeInTheDocument();
@@ -260,6 +281,16 @@ describe("a store above the detail limit", () => {
 
     await user.click(screen.getByRole("button", { name: /All topics/ }));
     await waitFor(() => expect(renderer.model?.aggregate).toBe(true));
+  });
+
+  it("fits a topic's map when it opens, wherever the camera was on the last one", async () => {
+    const { renderer, user } = await openAggregate();
+    renderer.at = { x: 1, y: 1, span: 0.5 };
+
+    await user.click(screen.getByRole("button", { name: "Open Coding, 2 memories" }));
+
+    await waitFor(() => expect(renderer.model?.scope).toBe("coding"));
+    expect(renderer.startedAt.at(-1)).toBeNull();
   });
 
   it("opens a topic clicked on the map", async () => {

@@ -3,6 +3,14 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
+## v0.7.1 — the map keeps your place, and Add memory is on every view
+
+- **The map keeps your place.** Saving or forgetting a memory from the map used to
+  redraw it fitted to the whole store, so working through a cluster meant zooming
+  back in after every change. It now redraws at the same spot and zoom. Opening
+  another topic's map still starts fitted.
+- **+ Add memory is beside the tabs on every view**, not only on the list.
+
 ## v0.7.0 — an About page, and the store knows who "the user" is
 
 - **About page** (`/ui/about`, `GET /v1/about`): the daemon's version, build and start

@@ -9,7 +9,7 @@ import { kindOf } from "../../domain/structureForm";
 import { LEVELS, type Level } from "../../domain/map/zoom";
 import { readLayoutSeed, writeLayoutSeed } from "../../map/layoutCache";
 import { useLayoutRunner, useRendererLoader } from "../../map/rendererContext";
-import type { MapRenderer } from "../../map/renderer";
+import type { CameraView, MapRenderer } from "../../map/renderer";
 import { useMap, type MemoryActions } from "../../state/memories";
 import { BulkEditor } from "../BulkEditor";
 import { RecallPanel } from "./RecallPanel";
@@ -58,6 +58,9 @@ export default function MapView({
   const [layoutFailed, setLayoutFailed] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   const renderer = useRef<MapRenderer | null>(null);
+  // Where the camera was when the last renderer went away, and on which map:
+  // an edit or a forget redraws the same map, and the user stays zoomed in.
+  const lastCamera = useRef<{ scope: string | null; camera: CameraView } | null>(null);
   const [rendererFailed, setRendererFailed] = useState(false);
   const [level, setLevel] = useState<Level>("categories");
   const [lassoMode, setLassoMode] = useState(false);
@@ -109,6 +112,7 @@ export default function MapView({
     loadRenderer()
       .then((create) => {
         if (cancelled || container.current === null) return;
+        const kept = lastCamera.current?.scope === model.scope ? lastCamera.current.camera : null;
         created = create(container.current, model, latest.current.view, {
           onOpenMemory: (id) => {
             const node = latest.current.model?.byId.get(id);
@@ -120,13 +124,15 @@ export default function MapView({
             setSelected(ids);
             setLassoNote(ids.length === 0 ? "The lasso caught no memories. Draw around the dots or discs you want." : null);
           },
-        });
+        }, kept);
         renderer.current = created;
         setRendererFailed(false);
       })
       .catch(() => setRendererFailed(true));
     return () => {
       cancelled = true;
+      const camera = created?.camera() ?? null;
+      if (created !== null) lastCamera.current = camera === null ? null : { scope: model.scope, camera };
       created?.destroy();
       renderer.current = null;
     };
