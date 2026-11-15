@@ -3,7 +3,7 @@
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 One entry per phase, backfilled as phases land.
 
-## Unreleased
+## v0.7.2 — forget many memories at once
 
 - **Forget many at once.** The bulk editor (list selection, map lasso, review
   queue) has **Forget N memories…**, with a confirmation and an Undo that restores
