@@ -162,6 +162,12 @@ export class FakeServer {
     Object.assign(memory, patch, { updated_at: this.tick() });
   }
 
+  /** Simulates another client forgetting a memory. */
+  forgetElsewhere(key: string | null, id: string): void {
+    const account = this.account(key);
+    account.memories = account.memories.filter((m) => m.id !== id);
+  }
+
   memoriesOf(key: string | null): Memory[] {
     return this.account(key).memories.map(copy);
   }

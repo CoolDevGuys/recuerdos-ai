@@ -180,6 +180,12 @@ you (forgotten by an agent, say), or one cannot take the change (a preference
 cannot belong to a project; "this repo" cannot be yours), nothing is changed and
 the message says which.
 
+**Forget N memories…** forgets the whole selection, after asking. Like forgetting
+one, it is a soft delete, and the toast's **Undo** brings them all back. It is not
+all or nothing: memories are forgotten one at a time, so if one fails (already
+forgotten elsewhere, say), the ones before it stay forgotten, still undoable, and
+the message says why it stopped.
+
 ## Needs review
 
 **Needs review** (`/ui/review`) lists the memories saved before memories had a

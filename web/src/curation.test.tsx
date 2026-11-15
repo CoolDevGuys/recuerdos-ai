@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
+import { ApiError } from "./api/client";
 import { FakeServer, memory } from "./api/fake";
 import { memoryKeyStore } from "./state/keyStore";
 import { FakeRenderer } from "./test/fakeRenderer";
@@ -166,6 +167,69 @@ describe("bulk edits from the list", () => {
 
     expect(within(editor).getByRole("alert")).toHaveTextContent("Choose something to change.");
     expect(server.calls.some((c) => c.method === "bulk")).toBe(false);
+  });
+
+  it("forgets the selected memories after asking, and Undo restores them", async () => {
+    const { server, user } = await signedInAsAlex();
+
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await user.click(screen.getByRole("checkbox", { name: /The user prefers pnpm/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Testing follows TDD/ }));
+    const editor = screen.getByRole("region", { name: "2 memories selected" });
+    await user.click(within(editor).getByRole("button", { name: "Forget 2 memories…" }));
+    expect(server.calls.some((c) => c.method === "forget")).toBe(false);
+    expect(within(editor).getByText("Forget 2 memories?")).toBeInTheDocument();
+    await user.click(within(editor).getByRole("button", { name: "Forget" }));
+
+    expect(await screen.findByText("Forgot 2 memories.")).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).map((m) => m.id)).toEqual(["c"]);
+    expect(screen.queryByRole("region", { name: /selected/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/The user prefers pnpm/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Restored 2 memories.")).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).map((m) => m.id).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("keeps the selection when the forget is called off or nothing went through", async () => {
+    const { server, user } = await signedInAsAlex();
+
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await user.click(screen.getByRole("checkbox", { name: /The user prefers pnpm/ }));
+    const editor = screen.getByRole("region", { name: "1 memory selected" });
+    await user.click(within(editor).getByRole("button", { name: "Forget 1 memory…" }));
+    await user.click(within(editor).getByRole("button", { name: "Keep them" }));
+    expect(server.calls.some((c) => c.method === "forget")).toBe(false);
+
+    server.failNext(new ApiError(503, "unavailable", "the store is busy"));
+    await user.click(within(editor).getByRole("button", { name: "Forget 1 memory…" }));
+    await user.click(within(editor).getByRole("button", { name: "Forget" }));
+
+    expect(await within(editor).findByRole("alert")).toHaveTextContent("Nothing was forgotten");
+    expect(server.memoriesOf(ALEX_KEY)).toHaveLength(3);
+    expect(screen.getByRole("region", { name: "1 memory selected" })).toBeInTheDocument();
+  });
+
+  it("says when only part of a forget went through, and keeps that part undoable", async () => {
+    const { server, user } = await signedInAsAlex();
+
+    await user.click(screen.getByRole("button", { name: "Select" }));
+    await user.click(screen.getByRole("checkbox", { name: /The user prefers pnpm/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Testing follows TDD/ }));
+    // Another tab forgets the second one first: the run stops there.
+    server.forgetElsewhere(ALEX_KEY, "b");
+    const editor = screen.getByRole("region", { name: "2 memories selected" });
+    await user.click(within(editor).getByRole("button", { name: "Forget 2 memories…" }));
+    await user.click(within(editor).getByRole("button", { name: "Forget" }));
+
+    expect(await screen.findByText("Forgot 1 memory.")).toBeInTheDocument();
+    expect(screen.getByText(/The rest were not forgotten/)).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).map((m) => m.id)).toEqual(["c"]);
+    expect(screen.queryByRole("region", { name: /selected/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(await screen.findByText("Restored 1 memory.")).toBeInTheDocument();
+    expect(server.memoriesOf(ALEX_KEY).map((m) => m.id).sort()).toEqual(["a", "c"]);
   });
 
   it("leaving select mode clears the selection", async () => {
